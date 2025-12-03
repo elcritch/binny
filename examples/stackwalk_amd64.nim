@@ -2,6 +2,8 @@ import std/[os, osproc, strutils, strformat, sequtils]
 import sframe
 import sframe/amd64_walk
 
+## NOTE: requires binutils 2.44+ (?)
+##
 when defined(gcc) or true:
   {.emit: """
   static inline void* nframe_get_fp(void) { return __builtin_frame_address(0); }
