@@ -675,3 +675,5 @@ proc validateSection*(sec: SFrameSection; sectionBase: uint64 = 0'u64; checkSort
         errs.add fmt"FDE start addresses not sorted at index {i}"
       last = start
   errs
+
+# Note: Example stack walking utilities moved to separate module `sframe_walk`.
