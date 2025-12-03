@@ -68,14 +68,14 @@ proc nframe_entry_build*() =
   lastFrames = buildFramesFrom(pc1, sp1, fp1)
 
 #proc cdeep7() {.importc.}
-proc deep0() = nframe_entry_build()
-proc deep1() = deep0()
-proc deep2() = deep1()
-proc deep3() = deep2()
-proc deep4() = deep3()
-proc deep5() = deep4()
-proc deep6() = deep5()
-proc deep7() = deep6()
+proc deep0() {.noinline.} = nframe_entry_build()
+proc deep1() {.noinline.} = deep0()
+proc deep2() {.noinline.} = deep1()
+proc deep3() {.noinline.} = deep2()
+proc deep4() {.noinline.} = deep3()
+proc deep5() {.noinline.} = deep4()
+proc deep6() {.noinline.} = deep5()
+proc deep7() {.noinline.} = deep6()
 
 
 when isMainModule:
