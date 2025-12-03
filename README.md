@@ -103,3 +103,18 @@ The GNU toolchain can emit `.sframe` from `cfi_*` directives when assembled with
 Shortcut script
 
 - `examples/gen_sframe_example.sh` builds the sample C, runs objdump `--sframe`, extracts `.sframe`, and calls the Nim dumper if built.
+
+Nim self-stack trace example (AMD64)
+
+Build the example Nim program with GAS SFrame enabled and run it:
+
+- `nim c --cc:gcc --passC:"-O2 -fasynchronous-unwind-tables -Wa,--gsframe" examples/stackwalk_amd64.nim`
+- `./examples/stackwalk_amd64`
+
+What it does:
+
+- Copies its own binary to a temp file (to avoid “Text file busy”),
+- Uses `/usr/local/bin/x86_64-unknown-freebsd15.0-objcopy` to extract `.sframe` from the copy,
+- Uses `/usr/local/bin/x86_64-unknown-freebsd15.0-objdump -h` to find the `.sframe` VMA (section base),
+- Decodes the `.sframe` with the Nim reader, and
+- Walks the stack via `walkStackAmd64With`, reading live memory directly.

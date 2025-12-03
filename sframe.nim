@@ -508,11 +508,11 @@ proc decodeSection*(bytes: openArray[byte]): SFrameSection =
     fdes[idx] = decodeFDE(bytes[i ..< i+20])
     i += 20
 
-  # Decode FREs according to FDE counts/types
+  # Decode FREs per FDE using start offsets
   var fres: seq[SFrameFRE] = @[]
-  var j = freStart
   for fde in fdes:
     let ft = fde.funcInfo.fdeInfoGetFreType()
+    var j = freStart + int(fde.funcStartFreOff)
     for _ in 0 ..< int(fde.funcNumFres):
       let (fr, used) = decodeFRE(bytes[j ..< freStart+freLen], ft)
       fres.add fr
