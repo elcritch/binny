@@ -40,6 +40,17 @@ Notes
 - AMD64 uses `header.cfaFixedRaOffset` for RA; AArch64 uses RA/FP offsets from FRE.
 - This is a minimal implementation for testing and experimentation; not a full tracer.
 
+Decode an existing .sframe section file
+
+- Extract the `.sframe` section from an ELF binary (GNU objcopy or llvm-objcopy):
+  - `objcopy --dump-section .sframe=out.sframe your.elf`
+  - or `llvm-objcopy --dump-section .sframe=out.sframe your.elf`
+- Dump it with the included tool:
+  - `nim c -r tools/sframe_dump.nim out.sframe` (assumes function start addresses are relative to section base 0)
+  - You can provide the section base address if needed (e.g., when `SFRAME_F_FDE_FUNC_START_PCREL` is set or to compute absolute PCs):
+    - `nim c -r tools/sframe_dump.nim out.sframe --base=0x7f000000`
+
+
 SFrame section layout
 
 The `.sframe` section contains:
@@ -76,4 +87,3 @@ Key details
 - FDE.funcStartFreOff: offset to function’s first FRE relative to start of FRE sub-section.
 - FRE start address width: 1/2/4 bytes chosen per-function via FDE info word (ADDR1/ADDR2/ADDR4).
 - FRE info word encodes CFA base (SP/FP), number of offsets, and offset size (1/2/4).
-
