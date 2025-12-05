@@ -11,13 +11,11 @@ when defined(gcc) or true:
   {.emit: """
   static inline void* nframe_get_fp(void) { return __builtin_frame_address(0); }
   static inline void* nframe_get_ra(void) { return __builtin_return_address(0); }
-  static inline void* nframe_get_fp_n(int n) { return __builtin_frame_address(n); }
-  static inline void* nframe_get_ra_n(int n) { return __builtin_return_address(n); }
+  static inline void* nframe_get_fp_0(void) { return __builtin_frame_address(0); }
+  static inline void* nframe_get_ra_0(void) { return __builtin_return_address(0); }
   """.}
-  proc nframe_get_fp(): pointer {.importc.}
-  proc nframe_get_ra(): pointer {.importc.}
-  proc nframe_get_fp_n(n: cint): pointer {.importc.}
-  proc nframe_get_ra_n(n: cint): pointer {.importc.}
+  proc nframe_get_fp(): pointer {.importc: "nframe_get_fp_0".}
+  proc nframe_get_ra(): pointer {.importc: "nframe_get_ra_0".}
 
 type SFrameCache = object
   loaded: bool
@@ -79,7 +77,11 @@ proc loadSelfSFrame(): (SFrameSection, uint64) =
   let workExe = if fileExists(exeCopy): exeCopy else: exe
   let tmp = getTempDir() / "self.out.sframe"
   if objcopy.len > 0:
-    discard execShellCmd(objcopy & " --dump-section .sframe=" & tmp & " " & workExe)
+    try:
+      discard execProcess(objcopy & " --dump-section .sframe=" & tmp & " " & workExe,
+                          options = {poEvalCommand, poUsePath, poStdErrToStdOut})
+    except CatchableError:
+      discard
   var sec: SFrameSection
   var base: uint64 = 0
   try:
@@ -122,11 +124,12 @@ when not declared(cuintptr_t):
 proc getProgramCounters*(maxLength: cint): seq[cuintptr_t] {.noinline.} =
   ## Return up to maxLength program counters, top->bottom.
   let frames = block:
-    # Start from the caller frame to skip this wrapper
-    let fp1 = cast[uint64](nframe_get_fp_n(1))
-    let pc1 = cast[uint64](nframe_get_ra_n(1))
-    let sp1 = fp1 # approximation commonly valid with FP-based FREs
-    buildFramesFrom(pc1, sp1, fp1, maxLength.int)
+    # Start from the current frame (level 0)
+    var local = 0
+    let sp0 = cast[uint64](addr local)
+    let fp0 = cast[uint64](nframe_get_fp())
+    let pc0 = cast[uint64](nframe_get_ra())
+    buildFramesFrom(pc0, sp0, fp0, maxLength.int)
   result = newSeqOfCap[cuintptr_t](frames.len)
   for pc in frames:
     result.add(cast[cuintptr_t](pc))
@@ -148,4 +151,3 @@ when defined(nimStackTraceOverride):
     registerStackTraceOverride(getBacktrace)
   when declared(registerStackTraceOverrideGetProgramCounters):
     registerStackTraceOverrideGetProgramCounters(getProgramCounters)
-
