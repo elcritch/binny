@@ -117,10 +117,7 @@ suite "Nim override stackwalk (AMD64)":
 
     # Map addresses to deepN indices and extract the subsequence of deep frames.
     for id, sym in deepSyms:
+      echo "checking deep symbol: ", sym.name, " exists in backtrace pcs"
       check sym.pc in backtracePcs 
 
-    #var deepSeq: seq[int] = @[]
-    #for pc in pcs:
-    #  let pcInSyms = pc in deepSyms
-    #  check pcInSyms
 
