@@ -13,11 +13,23 @@ when defined(gcc) or true:
   static inline void* nframe_get_ra_0(void) { return __builtin_return_address(0); }
   static inline void* nframe_get_fp_1(void) { return __builtin_frame_address(1); }
   static inline void* nframe_get_ra_1(void) { return __builtin_return_address(1); }
+  static inline void* nframe_get_sp(void) {
+    void* sp;
+#if defined(__x86_64__) || defined(__amd64__)
+    __asm__ __volatile__("mov %%rsp, %0" : "=r"(sp));
+#elif defined(__aarch64__)
+    __asm__ __volatile__("mov %0, sp" : "=r"(sp));
+#else
+    sp = __builtin_frame_address(0);
+#endif
+    return sp;
+  }
   """.}
   proc nframe_get_fp(): pointer {.importc: "nframe_get_fp_0".}
   proc nframe_get_ra(): pointer {.importc: "nframe_get_ra_0".}
   proc nframe_get_fp_1(): pointer {.importc.}
   proc nframe_get_ra_1(): pointer {.importc.}
+  proc nframe_get_sp(): pointer {.importc.}
 
 type SFrameCache = object
   loaded: bool
@@ -51,7 +63,7 @@ proc getSframeBase(exe: string): uint64 =
     discard
   0'u64
 
-proc readU64Ptr(address: uint64): uint64 =
+proc readU64Ptr(address: uint64): uint64 {.raises: [].} =
   cast[ptr uint64](cast[pointer](address))[]
 
 proc loadSelfSFrame(): (SFrameSection, uint64) =
@@ -111,10 +123,21 @@ proc initSFrameCache*() =
   ## Call this early in program startup to enable SFrame-based overrides.
   ensureCache()
 
-proc buildFramesFrom(startPc, startSp, startFp: uint64; maxFrames: int): seq[uint64] =
+proc buildFramesFrom(startPc, startSp, startFp: uint64; maxFrames: int): seq[uint64] {.raises: [].} =
   if not gCache.loaded:
     return @[]
   result = walkStackAmd64With(gCache.sec, gCache.base, startPc, startSp, startFp, readU64Ptr, maxFrames = maxFrames)
+
+proc buildCurrentCallerFrames*(maxFrames: int = 32): seq[uint64] {.noinline, gcsafe, raises: [].} =
+  ## Capture current frame (this proc) and unwind starting at our caller using SFrame.
+  {.cast(gcsafe).}:
+    ensureCache()
+    if not gCache.loaded:
+      return @[]
+    let sp0 = cast[uint64](nframe_get_sp())
+    let fp0 = cast[uint64](nframe_get_fp())
+    let pc0 = cast[uint64](nframe_get_ra())
+    buildFramesFrom(pc0, sp0, fp0, maxFrames)
 
 proc buildFrames(maxFrames: int = 32): seq[uint64] =
   # Capture current frame state and walk (starting at caller of this function)
@@ -128,28 +151,26 @@ when not declared(cuintptr_t):
   # On some Nim platforms uintptr_t may map to unsigned long instead of uint
   type cuintptr_t* {.importc: "uintptr_t", nodecl.} = uint
 
-proc getProgramCounters*(maxLength: cint): seq[cuintptr_t] {.noinline, gcsafe.} =
-  ## Return up to maxLength program counters, top->bottom.
-  ## GC-safe variant that walks the frame-pointer chain without touching GC data.
+proc getProgramCounters*(maxLength: cint): seq[cuintptr_t] {.noinline, gcsafe, raises: [].} =
+  ## Return up to maxLength program counters, top->bottom, using SFrame data.
+  ## Starts from the immediate caller of this function (RA0) so it works with
+  ## -fomit-frame-pointer. Avoids use of __builtin_* with n>0.
   {.cast(gcsafe).}:
     var pcsOut: seq[cuintptr_t] = @[]
     if maxLength <= 0: return pcsOut
-    var fp = cast[uint64](nframe_get_fp_1())
-    var pc = cast[uint64](nframe_get_ra_1())
-    var count = 0
-    while fp != 0'u64 and pc != 0'u64 and count < maxLength.int:
-      pcsOut.add(cast[cuintptr_t](pc))
-      let nextFpPtr = cast[ptr uint64](cast[pointer](fp))
-      let nextRaPtr = cast[ptr uint64](cast[pointer](fp + 8))
-      let nextFp = nextFpPtr[]
-      let nextPc = nextRaPtr[]
-      if nextFp <= fp: break
-      fp = nextFp
-      pc = nextPc
-      inc count
+    ensureCache()
+    if not gCache.loaded:
+      return pcsOut
+    # Capture current register context and unwind using SFrame
+    let sp0 = cast[uint64](nframe_get_sp())
+    let fp0 = cast[uint64](nframe_get_fp())
+    let pc0 = cast[uint64](nframe_get_ra())
+    let frames = buildFramesFrom(pc0, sp0, fp0, maxFrames = maxLength.int)
+    for i in 0 ..< min(frames.len, maxLength.int):
+      pcsOut.add(cast[cuintptr_t](frames[i]))
     result = pcsOut
 
-proc getBacktrace*(): string {.noinline, gcsafe.} =
+proc getBacktrace*(): string {.noinline, gcsafe, raises: [].} =
   {.cast(gcsafe).}:
     ## Return a human-readable backtrace string based on SFrame PCs.
     let pcs = getProgramCounters(64)
@@ -162,8 +183,5 @@ proc getBacktrace*(): string {.noinline, gcsafe.} =
       inc i
     result = lines.join("\n")
 
-when defined(nimStackTraceOverride):
-  when declared(registerStackTraceOverride):
-    registerStackTraceOverride(getBacktrace)
-  when declared(registerStackTraceOverrideGetProgramCounters):
-    registerStackTraceOverrideGetProgramCounters(getProgramCounters)
+# Optional runtime override registration is disabled on this Nim due to effect tag mismatches.
+# Users can still call getBacktrace()/getProgramCounters() directly.

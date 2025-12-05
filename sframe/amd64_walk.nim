@@ -3,9 +3,9 @@ import sframe
 import sframe/mem_sim
 export mem_sim
 
-type U64Reader* = proc (address: uint64): uint64 {.gcsafe.}
+type U64Reader* = proc (address: uint64): uint64 {.gcsafe, raises: [].}
 
-proc walkStackAmd64*(sec: SFrameSection; sectionBase, startPc, startSp, startFp: uint64; mem: SimMemory; maxFrames: int = 16): seq[uint64] =
+proc walkStackAmd64*(sec: SFrameSection; sectionBase, startPc, startSp, startFp: uint64; mem: SimMemory; maxFrames: int = 16): seq[uint64] {.raises: [].} =
   ## Minimal AMD64 stack walker using SFrame data. Returns PCs from top to bottom.
   var pc = startPc
   var sp = startSp
@@ -32,7 +32,7 @@ proc walkStackAmd64*(sec: SFrameSection; sectionBase, startPc, startSp, startFp:
     fp = nextFp
   result = frames
 
-proc walkStackAmd64With*(sec: SFrameSection; sectionBase, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] =
+proc walkStackAmd64With*(sec: SFrameSection; sectionBase, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [].} =
   ## AMD64 stack walker using a memory read callback.
   var pc = startPc
   var sp = startSp

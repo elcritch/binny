@@ -530,11 +530,15 @@ type FreOffsets* = object
   raFromCfa*: Option[int32]
   fpFromCfa*: Option[int32]
 
-proc freOffsetsForAbi*(abi: SFrameAbiArch; hdr: SFrameHeader; fre: SFrameFRE): FreOffsets =
+proc freOffsetsForAbi*(abi: SFrameAbiArch; hdr: SFrameHeader; fre: SFrameFRE): FreOffsets {.raises: [].} =
   ## Compute CFA/RA/FP offsets per ABI from a FRE and header.
   result.cfaBase = fre.info.freInfoGetCfaBase()
   if fre.offsets.len == 0:
-    raise newException(ValueError, "FRE has zero offsets; invalid")
+    # Gracefully handle empty offsets: leave RA/FP as none and cfaFromBase = 0.
+    result.cfaFromBase = 0
+    result.raFromCfa = none(int32)
+    result.fpFromCfa = none(int32)
+    return
   result.cfaFromBase = fre.offsets[0]
   case abi
   of sframeAbiAmd64Little:
