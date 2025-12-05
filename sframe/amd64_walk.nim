@@ -217,8 +217,8 @@ proc symbolizeStackTrace*(frames: seq[uint64]; exe: string = ""): seq[string] =
   # Primary: use ELF parser for symbol resolution
   let elf = parseElf(exePath)
   var symbols = newSeq[string](frames.len)
-  #let funcSymbols = elf.getDemangledFunctionSymbols()
-  let funcSymbols = elf.getFunctionSymbols()
+  let funcSymbols = elf.getDemangledFunctionSymbols()
+  #let funcSymbols = elf.getFunctionSymbols()
 
   for i, pc in frames:
     var found = false
