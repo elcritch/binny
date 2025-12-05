@@ -215,57 +215,25 @@ proc symbolizeStackTrace*(frames: seq[uint64]; exe: string = ""): seq[string] =
   let exePath = if exe.len > 0: exe else: getAppFilename()
 
   # Primary: use ELF parser for symbol resolution
-  try:
-    let elf = parseElf(exePath)
-    var symbols = newSeq[string](frames.len)
-    let funcSymbols = elf.getFunctionSymbols()
+  let elf = parseElf(exePath)
+  var symbols = newSeq[string](frames.len)
+  let funcSymbols = elf.getFunctionSymbols()
 
-    for i, pc in frames:
-      var found = false
-      # Find the closest function symbol
-      for sym in funcSymbols:
-        if pc >= sym.value and pc < (sym.value + sym.size):
-          let offset = pc - sym.value
-          symbols[i] = fmt"{sym.name} + 0x{offset.toHex}"
-          found = true
-          break
+  for i, pc in frames:
+    var found = false
+    # Find the closest function symbol
+    for sym in funcSymbols:
+      if pc >= sym.value and pc < (sym.value + sym.size):
+        let offset = pc - sym.value
+        symbols[i] = fmt"{sym.name} + 0x{offset.toHex}"
+        found = true
+        break
 
-      if not found:
-        symbols[i] = fmt"0x{pc.toHex} (no symbol)"
+    if not found:
+      symbols[i] = fmt"0x{pc.toHex} (no symbol)"
 
-    # If ELF symbols look good, try to enhance with addr2line source info
-    let addr2 = "/usr/local/bin/x86_64-unknown-freebsd15.0-addr2line"
-    if fileExists(addr2):
-      try:
-        let addrArgs = frames.mapIt("0x" & it.toHex.toLowerAscii()).join(" ")
-        let cmd = addr2 & " -e " & exePath & " -f -C -p " & addrArgs
-        let sym = execProcess(cmd)
-        let lines = sym.splitLines().filterIt(it.len > 0)
-        # If addr2line gives us good results, prefer those for source location info
-        if lines.len > 0 and lines.len >= frames.len:
-          return lines
 
-      except CatchableError:
-        discard
-
-    return symbols
-
-  except CatchableError:
-    # Fallback: try addr2line only
-    let addr2 = "/usr/local/bin/x86_64-unknown-freebsd15.0-addr2line"
-    if fileExists(addr2):
-      try:
-        let addrArgs = frames.mapIt("0x" & it.toHex.toLowerAscii()).join(" ")
-        let cmd = addr2 & " -e " & exePath & " -f -C -p " & addrArgs
-        let sym = execProcess(cmd)
-        let lines = sym.splitLines().filterIt(it.len > 0)
-        if lines.len > 0:
-          return lines
-      except CatchableError:
-        discard
-
-    # Last resort: just return hex addresses
-    return frames.mapIt(fmt"0x{it.toHex} (no symbol)")
+  return symbols
 
 proc printStackTrace*(frames: seq[uint64]; symbols: seq[string] = @[]) =
   ## Print a formatted stack trace with optional symbols
