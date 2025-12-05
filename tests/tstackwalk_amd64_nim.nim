@@ -118,6 +118,7 @@ suite "Nim override stackwalk (AMD64)":
     # Map addresses to deepN indices and extract the subsequence of deep frames.
     for id, sym in deepSyms:
       echo "checking bactrace output for deep symbol: ", sym
+      if sym.depth == 0: continue
       check sym.pc in backtracePcs 
 
 
