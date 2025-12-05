@@ -76,6 +76,16 @@ proc getSframeBase(exe: string): uint64 =
 proc readU64Ptr(address: uint64): uint64 {.raises: [], tags: [].} =
   cast[ptr uint64](cast[pointer](address))[]
 
+# Guarded reader to avoid faults when scanning under -fomit-frame-pointer
+var gSafeMinAddr: uint64
+var gSafeMaxAddr: uint64
+
+proc readU64PtrRanged(address: uint64): uint64 {.gcsafe, raises: [], tags: [].} =
+  if address >= gSafeMinAddr and address + 8'u64 <= gSafeMaxAddr:
+    cast[ptr uint64](cast[pointer](address))[]
+  else:
+    0'u64
+
 proc loadSelfSFrame(): (SFrameSection, uint64) =
   ## Extract and decode .sframe from the running executable, and return (section, baseVma).
   let exe = getAppFilename()
@@ -198,6 +208,9 @@ proc getProgramCounters*(maxLength: cint): seq[cuintptr_t] {.noinline, gcsafe, r
     # to an SFrame-covered function in the main executable, then compute CFA
     # from the RA location and resume a proper SFrame walk from there.
     let spNow = cast[uint64](nframe_get_sp())
+    # Restrict raw memory reads to a safe window above current SP to prevent faults
+    gSafeMinAddr = spNow
+    gSafeMaxAddr = spNow + 1'u64 shl 20 # ~1 MiB scan window
     var startPc: uint64 = 0
     var startSp: uint64 = 0
     var startFp: uint64 = 0
@@ -225,9 +238,9 @@ proc getProgramCounters*(maxLength: cint): seq[cuintptr_t] {.noinline, gcsafe, r
           else:
             startFp = cfa - cfaFromBase
             startSp = spNow
-          # Validate by attempting a short unwind from this start; prefer a
-          # candidate that yields multiple frames.
-          let testFrames = buildFramesFrom(candPc, startSp, startFp, maxFrames = 6)
+          # Validate by attempting a short unwind from this start using a
+          # guarded reader to avoid segfaults when FP is omitted.
+          let testFrames = walkStackAmd64With(gCache.sec, gCache.base, candPc, startSp, startFp, readU64PtrRanged, maxFrames = 6)
           if testFrames.len >= 4:
             startPc = candPc
             foundStart = true
@@ -238,7 +251,8 @@ proc getProgramCounters*(maxLength: cint): seq[cuintptr_t] {.noinline, gcsafe, r
       startPc = cast[uint64](nframe_get_ra())
       startSp = spNow
       startFp = cast[uint64](nframe_get_fp())
-    let frames = buildFramesFrom(startPc, startSp, startFp, maxFrames = maxLength.int + 32)
+    # Perform the actual walk with the guarded reader
+    let frames = walkStackAmd64With(gCache.sec, gCache.base, startPc, startSp, startFp, readU64PtrRanged, maxFrames = maxLength.int + 32)
     var skip = 0
     # Skip frames that point into nim_stacktraces (best-effort) by using address
     # range heuristics: prefer PCs in the main executable's lower VA range.

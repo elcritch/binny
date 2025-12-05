@@ -1,9 +1,10 @@
 import sframe/nim_stacktraces
+import system/stacktraces
 
 proc deep0() {.noinline.} =
-  # Print SFrame-derived backtrace via Nim override function
-  echo "SFrame backtrace (via override):"
-  echo getBacktrace()
+  # Print stacktrace using Nim's built-in API (overridden to use SFrame)
+  echo "Nim getStackTrace() output:"
+  echo getStackTrace()
 
 proc deep1() {.noinline.} = deep0()
 proc deep2() {.noinline.} = deep1()
