@@ -244,8 +244,27 @@ proc getBacktrace*(): string {.noinline, gcsafe, raises: [], tags: [].} =
       inc i
     result = lines.join("\n")
 
+# Provide minimal debugging info mapping: wrap PCs into entries.
+# Leave filename/procname empty to keep this effect-free; symbolization can
+# be done by the application outside the override path if desired.
+proc getDebuggingInfo*(programCounters: seq[cuintptr_t], maxLength: cint): seq[StackTraceEntry]
+    {.noinline, gcsafe, raises: [], tags: [].} =
+  var entries: seq[StackTraceEntry] = @[]
+  if programCounters.len == 0 or maxLength <= 0: return entries
+  let upto = min(programCounters.len, maxLength.int)
+  entries.setLen(upto)
+  var i = 0
+  while i < upto:
+    let pc = programCounters[i]
+    entries[i] = StackTraceEntry(programCounter: cast[uint](pc))
+    inc i
+  result = entries
+
 when defined(nimStackTraceOverride):
   when declared(registerStackTraceOverrideGetProgramCounters):
     registerStackTraceOverrideGetProgramCounters(getProgramCounters)
   when declared(registerStackTraceOverride):
     registerStackTraceOverride(getBacktrace)
+
+  when declared(registerStackTraceOverrideGetDebuggingInfo):
+    registerStackTraceOverrideGetDebuggingInfo(getDebuggingInfo)
