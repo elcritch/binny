@@ -165,7 +165,8 @@ proc parseUnqualifiedName(state: var DemangleState): string =
     else:
       discard
 
-  return fmt"<op:{state.peek()}>"
+  let c = state.consume()
+  return fmt"<op:{c}>"
 
 proc parseQualifiedName(state: var DemangleState): string =
   case state.peek():
@@ -193,12 +194,20 @@ proc parseType(state: var DemangleState): string =
     of 'V':
       discard state.consume()
       return "volatile " & parseType(state)
+    of 'S':
+      discard state.consume()
+      if state.peek().isDigit():
+        discard parseNumber(state)
+      if state.peek() == '_':
+        discard state.consume()
+      return "<subst>"
     of 'v', 'w', 'b', 'c', 'a', 'h', 's', 't', 'i', 'j', 'l', 'm', 'x', 'y', 'n', 'o', 'f', 'd', 'e', 'g', 'z':
       return parseBuiltinType(state)
     of '0'..'9', 'N':
       return parseQualifiedName(state)
     else:
-      return fmt"<unknown-type:{state.peek()}>"
+      let c = state.consume()
+      return fmt"<unknown-type:{c}>"
 
 proc parseBareFunctionType(state: var DemangleState): string =
   # Parse return type (if present) and parameter types
