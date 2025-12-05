@@ -48,8 +48,6 @@ type SFrameCache = object
   sec: SFrameSection
   base: uint64
 
-var gCache: SFrameCache
-
 proc chooseTool(cands: openArray[string]): string =
   for p in cands:
     if fileExists(p): return p
@@ -121,19 +119,19 @@ proc loadSelfSFrame(): (SFrameSection, uint64) =
     discard
   (sec, base)
 
+proc loadSFrameCache(): SFrameCache =
+  let (sec, base) = loadSelfSFrame()
+  if sec.header.preamble.isValid():
+    result.sec = sec
+    result.base = base
+    result.loaded = true
+
+var gCache: SFrameCache = loadSFrameCache()
+
 proc ensureCache() =
   {.cast(gcsafe).}:
     if not gCache.loaded:
-      let (sec, base) = loadSelfSFrame()
-      if sec.header.preamble.isValid():
-        gCache.sec = sec
-        gCache.base = base
-        gCache.loaded = true
-
-proc initSFrameCache*() =
-  ## Initialize SFrame cache for the current process (best-effort).
-  ## Call this early in program startup to enable SFrame-based overrides.
-  ensureCache()
+      gCache = loadSFrameCache()
 
 proc buildFramesFrom(startPc, startSp, startFp: uint64; maxFrames: int): seq[uint64] {.raises: [], tags: [].} =
   if not gCache.loaded:
