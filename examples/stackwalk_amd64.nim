@@ -21,9 +21,7 @@ proc deep1() {.noinline.} =
   if x > 0: deep0()
 
 proc deep2() {.noinline.} =
-  var x = 0
-  for i in 0 ..< 10: x += i
-  if x > 0: deep1()
+  deep1()
 
 proc deep3() {.noinline.} =
   var x = 0
@@ -36,9 +34,7 @@ proc deep4() {.noinline.} =
   if x > 0: deep3()
 
 proc deep5() {.noinline.} =
-  var x = 0
-  for i in 0 ..< 10: x += i
-  if x > 0: deep4()
+  deep4()
 
 proc deep6() {.noinline.} =
   var x = 0
