@@ -5,10 +5,11 @@ import std/[unittest, os, osproc, strutils, strformat, sequtils, tables]
 # in the expected order using objdump's symbol table.
 
 type SymInfo = object
-  start: uint64
+  pc: uint64
   size: uint64
   name: string   # function name (eg. "deep1")
   tok: string
+  depth: int
 
 proc chooseTool(cands: openArray[string]): string =
   for p in cands:
@@ -34,7 +35,7 @@ proc buildExample(exeOut: string): bool =
     return false
   return fileExists(outPath)
 
-proc parseDeepSymbols(exe: string): Table[int, SymInfo] =
+proc parseDeepSymbols(exe: string): Table[uint64, SymInfo] =
   ## Use objdump to locate deep0..deep7 symbols with addresses and sizes.
   let objdump = chooseTool([
     "/usr/local/bin/x86_64-unknown-freebsd15.0-objdump",
@@ -67,7 +68,7 @@ proc parseDeepSymbols(exe: string): Table[int, SymInfo] =
     let start = parseHexInt(addrHex).uint64
     let size = parseHexInt(sizeHex).uint64
     let fname = "deep" & $n
-    result[n] = SymInfo(start: start, size: size, name: fname, tok: symTok)
+    result[start] = SymInfo(pc: start, size: size, name: fname, depth: n, tok: symTok)
 
 proc parseBacktraceAddrs(output: string): seq[uint64] =
   ## Extract hex addresses from example's backtrace output lines.
@@ -94,17 +95,6 @@ proc runExample(exe: string): string =
     return ""
   outp
 
-proc mapAddrToDeep(pc: uint64, syms: Table[int, SymInfo]): int =
-  ## Return deepN (1..7) for an address that falls within deepN range; -1 otherwise.
-  for k, v in syms:
-    if k == 0: continue # we expect RA addresses to be in callers (deep1..)
-    if v.size == 0'u64:
-      # Skip zero-sized symbols
-      continue
-    if pc >= v.start and pc < v.start + v.size:
-      return k
-  return -1
-
 suite "Nim override stackwalk (AMD64)":
   test "Backtrace addresses map to deep1..deep7 via objdump":
     let testBinDir = splitFile(getAppFilename()).dir
@@ -121,18 +111,16 @@ suite "Nim override stackwalk (AMD64)":
     echo "Deep syms: ", deepSyms
     let runOut = runExample(exePath)
     check runOut.len > 0
-    let pcs = parseBacktraceAddrs(runOut)
-    check pcs.len > 0
+    let backtracePcs = parseBacktraceAddrs(runOut)
+    check backtracePcs.len > 0
+    echo "BT addrs: ", backtracePcs 
 
     # Map addresses to deepN indices and extract the subsequence of deep frames.
-    var deepSeq: seq[int] = @[]
-    for a in pcs:
-      let d = mapAddrToDeep(a, deepSyms)
-      if d >= 0: deepSeq.add(d)
+    for id, sym in deepSyms:
+      check sym.pc in backtracePcs 
 
-    # We expect to see deep1..deep7 in order as a subsequence of deepSeq.
-    var want = @[1,2,3,4,5,6,7]
-    var i = 0
-    for d in deepSeq:
-      if i < want.len and d == want[i]: inc i
-    check i == want.len
+    #var deepSeq: seq[int] = @[]
+    #for pc in pcs:
+    #  let pcInSyms = pc in deepSyms
+    #  check pcInSyms
+
