@@ -214,9 +214,12 @@ proc getProgramCounters*(maxLength: cint): seq[cuintptr_t] {.noinline, gcsafe, r
     var startPc: uint64 = 0
     var startSp: uint64 = 0
     var startFp: uint64 = 0
-    var foundStart = false
+    var bestLen = 0
+    var bestPc: uint64 = 0
+    var bestSp: uint64 = 0
+    var bestFp: uint64 = 0
     var k = 0
-    const ScanWords = 128
+    const ScanWords = 2048
     while k < ScanWords:
       let raLoc = spNow + uint64(k * 8)
       let candPc = readU64Ptr(raLoc)
@@ -232,25 +235,34 @@ proc getProgramCounters*(maxLength: cint): seq[cuintptr_t] {.noinline, gcsafe, r
           # Compute the corresponding base register value so that
           #    baseVal + cfaFromBase == cfa
           let cfaFromBase = uint64(cast[int64](off.cfaFromBase))
+          var candSp: uint64
+          var candFp: uint64
           if off.cfaBase == sframeCfaBaseSp:
-            startSp = cfa - cfaFromBase
-            startFp = cast[uint64](nframe_get_fp())
+            candSp = cfa - cfaFromBase
+            candFp = cast[uint64](nframe_get_fp())
           else:
-            startFp = cfa - cfaFromBase
-            startSp = spNow
+            candFp = cfa - cfaFromBase
+            candSp = spNow
           # Validate by attempting a short unwind from this start using a
           # guarded reader to avoid segfaults when FP is omitted.
-          let testFrames = walkStackAmd64With(gCache.sec, gCache.base, candPc, startSp, startFp, readU64PtrRanged, maxFrames = 6)
-          if testFrames.len >= 4:
-            startPc = candPc
-            foundStart = true
-            break
+          let testFrames = walkStackAmd64With(gCache.sec, gCache.base, candPc, candSp, candFp, readU64PtrRanged, maxFrames = 24)
+          if testFrames.len > bestLen:
+            bestLen = testFrames.len
+            bestPc = candPc
+            bestSp = candSp
+            bestFp = candFp
+            # Heuristic: once we have a reasonably long chain, we can stop early
+            if bestLen >= 12: break
       inc k
-    if not foundStart:
+    if bestLen == 0:
       # Fallback: attempt to start from our caller's RA (may be inside runtime)
       startPc = cast[uint64](nframe_get_ra())
       startSp = spNow
       startFp = cast[uint64](nframe_get_fp())
+    else:
+      startPc = bestPc
+      startSp = bestSp
+      startFp = bestFp
     # Perform the actual walk with the guarded reader
     let frames = walkStackAmd64With(gCache.sec, gCache.base, startPc, startSp, startFp, readU64PtrRanged, maxFrames = maxLength.int + 32)
     var skip = 0
