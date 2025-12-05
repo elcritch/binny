@@ -75,18 +75,22 @@ proc parseBacktraceAddrs(output: string): seq[uint64] =
   ## Lines look like: "  0: 0x0000000000414e78"
   var addrs: seq[uint64] = @[]
   for line in output.splitLines():
-    let p = line.find("0x")
-    if p >= 0:
-      let hexPart = line[p+2 .. ^1].strip()
-      # Trim any trailing non-hex
-      var j = 0
-      while j < hexPart.len and hexPart[j] in Digits + {'a'..'f'} + {'A'..'F'}:
-        inc j
-      if j > 0:
-        try:
-          addrs.add(parseHexInt(hexPart[0 ..< j]).uint64)
-        except CatchableError:
-          discard
+    let cols = line.splitWhitespace()
+    if cols.len() == 2:
+      let number = cols[0]
+      if not number.endsWith(":"): continue
+      try:
+        let res = parseInt(number[0..^2])
+      except:
+        echo "skipping non number prefix: ", cols
+        continue
+
+      let hexPart = cols[1]
+      try:
+        addrs.add(parseHexInt(hexPart).uint64)
+      except CatchableError:
+        echo "skipping non hex addr: ", cols
+        continue
   result = addrs
 
 proc runExample(exe: string): string =
