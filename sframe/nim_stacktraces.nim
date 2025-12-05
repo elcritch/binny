@@ -286,7 +286,7 @@ proc getDebuggingInfo*(programCounters: seq[cuintptr_t], maxLength: cint): seq[S
     {.noinline, gcsafe, raises: [], tags: [].} =
   ## Symbolize program counters to (proc, file, line) using addr2line/llvm-addr2line.
   ## Uses the main executable as the object file. Returns up to maxLength entries.
-  echo "get debugging info"
+  echo "get debugging info!!!!!"
   var entries: seq[StackTraceEntry] = @[]
   if programCounters.len == 0 or maxLength <= 0: return entries
   let upto = min(programCounters.len, maxLength.int)
@@ -328,6 +328,5 @@ when defined(nimStackTraceOverride):
     registerStackTraceOverrideGetProgramCounters(getProgramCounters)
   when declared(registerStackTraceOverride):
     registerStackTraceOverride(getBacktrace)
-
   when declared(registerStackTraceOverrideGetDebuggingInfo):
     registerStackTraceOverrideGetDebuggingInfo(getDebuggingInfo)

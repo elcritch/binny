@@ -5,6 +5,9 @@ proc deep0() {.noinline.} =
   # Print stacktrace using Nim's built-in API (overridden to use SFrame)
   echo "Nim getStackTrace() output:"
   echo getStackTrace()
+  #echo "\nstacktraces: ", $getStackTraceEntries()
+  for i in 1..10:
+    echo "i: ", $i
 
 proc deep1() {.noinline.} = deep0()
 proc deep2() {.noinline.} = deep1()
