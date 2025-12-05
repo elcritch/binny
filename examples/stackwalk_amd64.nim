@@ -1,4 +1,4 @@
-import std/[os, osproc, strutils, strformat, sequtils]
+import std/[os, osproc, strutils, strformat, sequtils, options]
 import sframe
 import sframe/amd64_walk
 
@@ -61,7 +61,30 @@ proc buildFramesFrom(startPc, startSp, startFp: uint64): seq[uint64] =
   for i in 0 ..< sdata.len: bytes[i] = byte(sdata[i])
   let sec = decodeSection(bytes)
   let sectionBase = getSframeBase(exeCopy)
-  walkStackAmd64With(sec, sectionBase, startPc, startSp, startFp, readU64Ptr, maxFrames = 16)
+  # Precompute the initial CFA so the first frame (caller) is not duplicated.
+  var pc = startPc
+  var sp = startSp
+  var fp = startFp
+  block preStep:
+    let (found, _, _, freIdx) = sec.pcToFre(pc, sectionBase)
+    if not found: break preStep
+    let fre = sec.fres[freIdx]
+    let off = freOffsetsForAbi(sframeAbiAmd64Little, sec.header, fre)
+    let baseVal = if off.cfaBase == sframeCfaBaseSp: sp else: fp
+    let cfa = baseVal + uint64(cast[int64](off.cfaFromBase))
+    if off.raFromCfa.isNone(): break preStep
+    let raAddr = cfa + uint64(cast[int64](off.raFromCfa.get()))
+    let nextPc = readU64Ptr(raAddr)
+    if nextPc == 0'u64: break preStep
+    var nextFp = fp
+    if off.fpFromCfa.isSome():
+      let fpAddr = cfa + uint64(cast[int64](off.fpFromCfa.get()))
+      nextFp = readU64Ptr(fpAddr)
+    # Seed walker from the precomputed state: next PC and computed CFA/FP.
+    pc = nextPc
+    sp = cfa
+    fp = nextFp
+  walkStackAmd64With(sec, sectionBase, pc, sp, fp, readU64Ptr, maxFrames = 16)
 
 proc buildFrames(): seq[uint64] =
   # Capture current frame state and walk (starting at caller of this function)
