@@ -9,13 +9,15 @@ when defined(nimStackTraceOverride) and defined(nimHasStacktracesModule):
 ## Low-level helpers to capture frame/return addresses (GCC/Clang builtins)
 when defined(gcc) or true:
   {.emit: """
-  static inline void* nframe_get_fp(void) { return __builtin_frame_address(0); }
-  static inline void* nframe_get_ra(void) { return __builtin_return_address(0); }
   static inline void* nframe_get_fp_0(void) { return __builtin_frame_address(0); }
   static inline void* nframe_get_ra_0(void) { return __builtin_return_address(0); }
+  static inline void* nframe_get_fp_1(void) { return __builtin_frame_address(1); }
+  static inline void* nframe_get_ra_1(void) { return __builtin_return_address(1); }
   """.}
   proc nframe_get_fp(): pointer {.importc: "nframe_get_fp_0".}
   proc nframe_get_ra(): pointer {.importc: "nframe_get_ra_0".}
+  proc nframe_get_fp_1(): pointer {.importc.}
+  proc nframe_get_ra_1(): pointer {.importc.}
 
 type SFrameCache = object
   loaded: bool
@@ -103,8 +105,12 @@ proc ensureCache() =
       gCache.base = base
       gCache.loaded = true
 
-proc buildFramesFrom(startPc, startSp, startFp: uint64; maxFrames: int): seq[uint64] =
+proc initSFrameCache*() =
+  ## Initialize SFrame cache for the current process (best-effort).
+  ## Call this early in program startup to enable SFrame-based overrides.
   ensureCache()
+
+proc buildFramesFrom(startPc, startSp, startFp: uint64; maxFrames: int): seq[uint64] =
   if not gCache.loaded:
     return @[]
   result = walkStackAmd64With(gCache.sec, gCache.base, startPc, startSp, startFp, readU64Ptr, maxFrames = maxFrames)
@@ -121,20 +127,27 @@ when not declared(cuintptr_t):
   # On some Nim platforms uintptr_t may map to unsigned long instead of uint
   type cuintptr_t* {.importc: "uintptr_t", nodecl.} = uint
 
-proc getProgramCounters*(maxLength: cint): seq[cuintptr_t] {.noinline.} =
+proc getProgramCounters*(maxLength: cint): seq[cuintptr_t] {.noinline, gcsafe.} =
   ## Return up to maxLength program counters, top->bottom.
-  let frames = block:
-    # Start from the current frame (level 0)
-    var local = 0
-    let sp0 = cast[uint64](addr local)
-    let fp0 = cast[uint64](nframe_get_fp())
-    let pc0 = cast[uint64](nframe_get_ra())
-    buildFramesFrom(pc0, sp0, fp0, maxLength.int)
-  result = newSeqOfCap[cuintptr_t](frames.len)
-  for pc in frames:
-    result.add(cast[cuintptr_t](pc))
+  ## GC-safe variant that walks the frame-pointer chain without touching GC data.
+  var pcsOut: seq[cuintptr_t] = @[]
+  if maxLength <= 0: return pcsOut
+  var fp = cast[uint64](nframe_get_fp_1())
+  var pc = cast[uint64](nframe_get_ra_1())
+  var count = 0
+  while fp != 0'u64 and pc != 0'u64 and count < maxLength.int:
+    pcsOut.add(cast[cuintptr_t](pc))
+    let nextFpPtr = cast[ptr uint64](cast[pointer](fp))
+    let nextRaPtr = cast[ptr uint64](cast[pointer](fp + 8))
+    let nextFp = nextFpPtr[]
+    let nextPc = nextRaPtr[]
+    if nextFp <= fp: break
+    fp = nextFp
+    pc = nextPc
+    inc count
+  result = pcsOut
 
-proc getBacktrace*(): string {.noinline.} =
+proc getBacktrace*(): string {.noinline, gcsafe.} =
   ## Return a human-readable backtrace string based on SFrame PCs.
   let pcs = getProgramCounters(64)
   if pcs.len == 0:

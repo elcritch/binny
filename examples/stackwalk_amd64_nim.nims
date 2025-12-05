@@ -2,4 +2,4 @@
 # Use Nim's stacktrace override instead of default stack traces
 switch("stackTrace", "off")
 switch("debugger", "native")
-
+switch("define", "nimStackTraceOverride")

@@ -14,5 +14,7 @@ proc deep6() {.noinline.} = deep5()
 proc deep7() {.noinline.} = deep6()
 
 when isMainModule:
+  # Initialize SFrame cache so overrides can walk without I/O in GC-safe context
+  initSFrameCache()
   # This will print our override, then abort on the assertion with the same override
   deep7()
