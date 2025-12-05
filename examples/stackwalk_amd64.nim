@@ -10,11 +10,23 @@ when defined(gcc) or true:
   static inline void* nframe_get_ra(void) { return __builtin_return_address(0); }
   static inline void* nframe_get_fp_n(int n) { return __builtin_frame_address(n); }
   static inline void* nframe_get_ra_n(int n) { return __builtin_return_address(n); }
+  static inline void* nframe_get_sp(void) {
+    void* sp;
+#if defined(__x86_64__) || defined(__amd64__)
+    __asm__ __volatile__("mov %%rsp, %0" : "=r"(sp));
+#elif defined(__aarch64__)
+    __asm__ __volatile__("mov %0, sp" : "=r"(sp));
+#else
+    sp = __builtin_frame_address(0);
+#endif
+    return sp;
+  }
   """.}
   proc nframe_get_fp(): pointer {.importc.}
   proc nframe_get_ra(): pointer {.importc.}
   proc nframe_get_fp_n(n: cint): pointer {.importc.}
   proc nframe_get_ra_n(n: cint): pointer {.importc.}
+  proc nframe_get_sp(): pointer {.importc.}
 
 proc getSframeBase(exe: string): uint64 =
   let objdump = "/usr/local/bin/x86_64-unknown-freebsd15.0-objdump"
@@ -62,12 +74,12 @@ proc buildFrames(): seq[uint64] =
 var lastFrames: seq[uint64] = @[]
 
 proc nframe_entry_build*() =
-  # Start from the caller frame (cdeep0): use level-1 frame/return address.
-  let fp1 = cast[uint64](nframe_get_fp_n(1))
-  let pc1 = cast[uint64](nframe_get_ra_n(1))
-  # Use caller FP as an approximation for caller SP base (FRE often uses FP base post-prologue)
-  let sp1 = fp1
-  lastFrames = buildFramesFrom(pc1, sp1, fp1)
+  # Start from the immediate caller of this function.
+  # Avoid __builtin_return_address/ frame_address with n>0 which breaks with -fomit-frame-pointer.
+  let fp0 = cast[uint64](nframe_get_fp())
+  let sp0 = cast[uint64](nframe_get_sp())
+  let pc0 = cast[uint64](nframe_get_ra())
+  lastFrames = buildFramesFrom(pc0, sp0, fp0)
 
 #proc cdeep7() {.importc.}
 proc deep0() {.noinline.} = nframe_entry_build()

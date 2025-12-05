@@ -35,6 +35,7 @@ proc dump(path: string; sectionBase: uint64 = 0) =
   let flagsStr = flagNames(flags).join(", ")
   echo fmt"SFrame: magic=0x{magicStr} ver={pre.version} flags=[{flagsStr}]"
   echo fmt"  ABI={abiName(sec.header.abiArch)} auxLen={sec.header.auxHdrLen}"
+  echo fmt"  cfaFixedFpOffset={sec.header.cfaFixedFpOffset} cfaFixedRaOffset={sec.header.cfaFixedRaOffset}"
   echo fmt"  fdes={sec.header.numFdes} fres={sec.header.numFres} freLen={sec.header.freLen}"
   echo fmt"  fdeOff={sec.header.fdeOff} freOff={sec.header.freOff}"
 
