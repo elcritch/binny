@@ -187,7 +187,10 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
     /* Get the current stack pointer */
     __asm__("movq %%rsp, %0" : "=r" (rsp));
 
-    printf("Starting from current stack pointer: 0x%lx\n", rsp);
+    printf("Stack Unwiding: Starting from current stack pointer: 0x%lx\n", rsp);
+    demonstrate_stack_unwinding(dctx, rsp, sframe_info);
+
+    printf("Custom Stack: Starting from current stack pointer: 0x%lx\n", rsp);
 
     /* Walk stack manually by examining return addresses */
     uint64_t start_rsp = rsp;
