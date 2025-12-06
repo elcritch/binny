@@ -41,10 +41,11 @@ proc getDebuggingInfo*(programCounters: seq[cuintptr_t], maxLength: cint): seq[S
 proc getBacktrace*(): string {.noinline, gcsafe, raises: [], tags: [].} =
   {.cast(gcsafe).}:
     let frames = captureStackTrace()
-    var s = ""
-    for frame in frames:
-      s.add(fmt"0x{frame.toHex()}")
-      s.add("\n")
+    let symbols = symbolizeStackTrace(frames, gFuncSymbols)
+    var s = "Traceback (most recent call last):\n"
+    for i, sym in symbols:
+      if i < frames.len:
+        s.add(&"{sym}\n")
     return s
 
 when defined(nimStackTraceOverride):
