@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -203,63 +204,66 @@ get_executable_path(void)
     return NULL;
 }
 
-/* Simple stack walking using frame pointers */
+/* SFrame-based stack unwinding without frame pointers */
 static void
 print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
-    void **frame_ptr;
-    uint64_t pc;
+    uint64_t rsp;
     int frame_count = 0;
     const int max_frames = 10;
 
     printf("\n=== Stack Trace ===\n");
 
-    /* Get the current frame pointer */
-    __asm__("movq %%rbp, %0" : "=r" (frame_ptr));
+    /* Get the current stack pointer */
+    __asm__("movq %%rsp, %0" : "=r" (rsp));
 
-    while (frame_ptr && frame_count < max_frames) {
-        /* The return address is stored at *(frame_ptr + 1) */
-        pc = (uint64_t)*(frame_ptr + 1);
+    printf("Starting from current stack pointer: 0x%lx\n", rsp);
 
-        /* Safety check: ensure we have a reasonable PC */
-        if (pc == 0 || pc < 0x400000 || pc > 0x800000000000ULL) {
-            break;
-        }
+    /* Walk stack manually by examining return addresses */
+    uint64_t start_rsp = rsp;
+    while (frame_count < max_frames && (rsp - start_rsp) < 1024) {
+        /* Look at return address at current stack position */
+        uint64_t *stack_ptr = (uint64_t *)rsp;
+        bool found_frame = false;
 
-        printf("Frame %d: PC=0x%lx", frame_count, pc);
+        /* Skip a few words to find a reasonable return address */
+        for (int i = 0; i < 8; i++) {
+            uint64_t candidate_pc = stack_ptr[i];
 
-        /* Try to find SFrame information for this PC */
-        sframe_frame_row_entry fre;
-        int32_t lookup_pc;
-        int err;
+            /* Check if this looks like a valid PC in our text section */
+            if (candidate_pc >= sframe_info->text_vaddr &&
+                candidate_pc < (sframe_info->text_vaddr + 0x10000)) {
 
-        /* Convert absolute PC to relative offset for sframe lookup */
-        if (pc >= sframe_info->text_vaddr && pc < (sframe_info->text_vaddr + 0x10000)) {
-            lookup_pc = (int32_t)(pc - sframe_info->text_vaddr);
+                printf("Frame %d: PC=0x%lx", frame_count, candidate_pc);
 
-            /* Find the Frame Row Entry for this PC */
-            err = sframe_find_fre(dctx, lookup_pc, &fre);
-            if (err == 0) {
-                printf(" [SFrame: start=0x%x", fre.fre_start_addr);
+                sframe_frame_row_entry fre;
+                /* SFrame uses signed relative addressing */
+                int32_t lookup_pc = (int32_t)(candidate_pc - sframe_info->text_vaddr);
+                printf(" (rel: 0x%x)", (uint32_t)lookup_pc);
+                int err = sframe_find_fre(dctx, lookup_pc, &fre);
 
-                int32_t cfa_offset = sframe_fre_get_cfa_offset(dctx, &fre, &err);
                 if (err == 0) {
-                    printf(" cfa=%d", cfa_offset);
+                    printf(" [SFrame: start=0x%x]", fre.fre_start_addr);
+                } else {
+                    printf(" [No SFrame]");
                 }
-                printf("]");
+                printf("\n");
+
+                /* Move up the stack for next frame */
+                rsp += (i + 1) * 8;
+                frame_count++;
+                found_frame = true;
+                break;
             }
         }
-        printf("\n");
 
-        /* Move to the next frame */
-        frame_ptr = (void **)*frame_ptr;
-        frame_count++;
-
-        /* Safety check to avoid infinite loops */
-        if (frame_ptr == NULL || (uint64_t)frame_ptr < 0x1000) {
-            break;
+        /* If we didn't find any valid PCs in this search, advance a bit */
+        if (!found_frame) {
+            rsp += 8;
         }
     }
+
+    printf("Total frames found: %d\n", frame_count);
 }
 
 /* Function to increment global counter and call next level */

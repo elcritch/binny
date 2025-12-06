@@ -28,7 +28,7 @@ echo "2. Building sframe stack example..."
 
 # Set up include and library paths
 # SFRAME_INCLUDES="-Ideps/binutils-gdb/include -Ideps/binutils-gdb/libsframe"
-SFRAME_INCLUDES="-Wa,--gsframe -fno-omit-frame-pointer "
+SFRAME_INCLUDES="-Wa,--gsframe -fomit-frame-pointer "
 SFRAME_LIBS="-lsframe -lctf -L/usr/local/lib/ "
 
 # Additional includes for dependencies
