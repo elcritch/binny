@@ -9,17 +9,18 @@ when defined(nimStackTraceOverride) and defined(nimHasStacktracesModule):
 proc getProgramCountersOverride*(
     maxLength: cint
 ): seq[cuintptr_t] {.nimcall, gcsafe, raises: [], tags: [], noinline.} =
-  let frames = captureStackTrace(maxLength)
-  var resultFrames = newSeqOfCap[cuintptr_t](frames.len()-8)
-  for i in 10..<frames.len():
-    resultFrames.add cast[cuintptr_t](frames[i])
-  return resultFrames
+  {.cast(gcsafe).}:
+    let frames = captureStackTrace(maxLength)
+    var resultFrames = newSeqOfCap[cuintptr_t](frames.len()-8)
+    for i in 10..<frames.len():
+      resultFrames.add cast[cuintptr_t](frames[i])
+    return resultFrames
 
 #let pc: StackTraceOverrideGetProgramCountersProc* = proc (maxLength: cint): seq[cuintptr_t] {. nimcall, gcsafe, raises: [], tags: [], noinline.}
  
 proc getDebuggingInfo*(programCounters: seq[cuintptr_t], maxLength: cint): seq[StackTraceEntry]
     {.noinline, gcsafe, raises: [], tags: [].} =
-  {.cast(gcsafe).}:
+  {.cast(gcsafe), cast(tags: []).}:
     var frames: seq[uint64] = @[]
     for pc in programCounters:
       frames.add cast[uint64](pc)
@@ -38,7 +39,7 @@ proc getDebuggingInfo*(programCounters: seq[cuintptr_t], maxLength: cint): seq[S
     return resultEntries
 
 proc getBacktrace*(): string {.noinline, gcsafe, raises: [], tags: [].} =
-  {.cast(gcsafe).}:
+  {.cast(gcsafe), cast(tags: []).}:
     let frames = captureStackTrace()
     let symbols = symbolizeStackTrace(frames[3..^1], gFuncSymbols)
     for i, sym in symbols:
