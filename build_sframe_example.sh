@@ -45,6 +45,10 @@ gcc -g -O2 \
     sframe_stack_example.c \
     $SFRAME_LIBS
 
+/usr/local/bin/x86_64-unknown-freebsd15.0-objcopy \
+  --dump-section .sframe=sframe_stack_example.sframe \
+  sframe_stack_example
+
 echo "3. Build complete!"
 echo ""
 echo "Usage:"
