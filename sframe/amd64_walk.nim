@@ -55,130 +55,138 @@ when defined(gcc) or true:
 #endif
     return sp;
   }
+  static inline void* nframe_get_pc(void) {
+    return __builtin_extract_return_addr(__builtin_return_address(0));
+  }
   """.}
   proc nframe_get_fp(): pointer {.importc.}
   proc nframe_get_ra(): pointer {.importc.}
   proc nframe_get_sp(): pointer {.importc.}
+  proc nframe_get_pc(): pointer {.importc.}
 
 proc readU64Ptr*(address: uint64): uint64 =
   ## Direct memory read helper for stack walking
   cast[ptr uint64](cast[pointer](address))[]
 
-# Hybrid stack walking for -fomit-frame-pointer scenarios
+# Follow SFrame Algorithm for efficient stack walking (for -fomit-frame-pointer scenarios)
 
 proc isValidCodePointer*(pc: uint64): bool =
   ## Basic heuristic: code addresses should be in a reasonable range
   ## and not look like stack addresses
-  pc >= 0x400000'u64 and pc < 0x800000'u64
+  if pc == 0:
+    return false
+  # Typical code sections are in lower memory ranges
+  # Stack addresses are typically high (like 0x7f... or 0x8...)
+  if pc >= 0x700000000000'u64:  # Likely stack or heap
+    return false
+  if pc < 0x400000'u64:  # Too low
+    return false
+  return true
 
-proc scanStackForReturnAddresses*(startSp: uint64; currentPc: uint64; maxScan: int = 2048): seq[tuple[offset: int, pc: uint64]] =
-  ## Scan stack memory looking for potential return addresses
-  var results: seq[tuple[offset: int, pc: uint64]] = @[]
-  for i in 0 ..< maxScan div 8:
-    let address = startSp + uint64(i * 8)
-    let val = readU64Ptr(address)
-    # Look for valid code pointers that are different from current PC
-    if isValidCodePointer(val) and val != currentPc:
-      results.add((i * 8, val))
-  result = results
-
-proc walkStackWithHybridApproach*(sec: SFrameSection; sectionBase, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
-  ## Hybrid stack walker that combines SFrame data with stack scanning for -fomit-frame-pointer
+proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
+  ## Stack walker implementing SFrame algorithm from Appendix A
   var frames: seq[uint64] = @[startPc]
 
-  # First, scan the stack to find potential return addresses
-  let stackRAs = scanStackForReturnAddresses(startSp, startPc, 1024)
-
-  if stackRAs.len == 0:
-    return frames
-
-  # Find potential return addresses by scanning stack memory
-
-  # For each potential return address, validate using SFrame data
-  var currentSp = startSp
-  for (offset, candidatePc) in stackRAs:
-    if frames.len >= maxFrames: break
-
-    # Check if this PC has SFrame data
-    let (found, fdeIdx, freLocalIdx, freGlobalIdx) = sec.pcToFre(candidatePc, sectionBase)
-    if found:
-      # Validate that this is a reasonable next frame
-      let funcStart = sec.funcStartAddress(fdeIdx, sectionBase)
-      let fde = sec.fdes[fdeIdx]
-
-      # If this looks like a valid caller, add it and search for deeper frames
-      if candidatePc > funcStart and candidatePc < (funcStart + uint64(fde.funcSize)):
-        frames.add candidatePc
-        currentSp = startSp + uint64(offset + 8)  # Move past this return address
-
-        # Recursively search for more frames from this new stack position
-        let remainingRAs = scanStackForReturnAddresses(currentSp, candidatePc, 1024)
-        for (nextOffset, nextPc) in remainingRAs:
-          if frames.len >= maxFrames: break
-          let (nextFound, nextFdeIdx, _, _) = sec.pcToFre(nextPc, sectionBase)
-          if nextFound:
-            let nextFuncStart = sec.funcStartAddress(nextFdeIdx, sectionBase)
-            let nextFde = sec.fdes[nextFdeIdx]
-            if nextPc > nextFuncStart and nextPc < (nextFuncStart + uint64(nextFde.funcSize)):
-              frames.add nextPc
-              currentSp += uint64(nextOffset + 8)
-        break
-
-  result = frames
-
-proc walkStackAmd64WithFallback*(sec: SFrameSection; sectionBase, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
-  ## AMD64 stack walker with fallback from FP to SP base for -fomit-frame-pointer scenarios.
-  ## This is the recommended walker for production use as it handles both normal and
-  ## -fomit-frame-pointer scenarios gracefully.
+  # Current frame state (as described in Appendix A)
   var pc = startPc
   var sp = startSp
   var fp = startFp
-  var frames: seq[uint64] = @[]
-  for _ in 0 ..< maxFrames:
-    frames.add pc
-    let (found, _, _, freGlobalIdx) = sec.pcToFre(pc, sectionBase)
+
+  when defined(debug):
+    try:
+      echo fmt"walkStackWithSFrame: starting with pc=0x{pc.toHex}, sp=0x{sp.toHex}, fp=0x{fp.toHex}"
+      echo fmt"SFrame section has {sec.fdes.len} FDEs, base=0x{sectionBase.toHex}"
+    except: discard
+
+  for frameIdx in 1 ..< maxFrames:
+    # Find the FRE for the current PC (sframe_find_fre equivalent)
+    let (found, fdeIdx, freLocalIdx, freGlobalIdx) = sec.pcToFre(pc, sectionBase)
+
+    when defined(debug):
+      try:
+        echo fmt"Frame {frameIdx}: pc=0x{pc.toHex}, found={found}"
+      except: discard
+
     if not found:
-      # Fall back to hybrid approach for the rest
-      let hybridFrames = walkStackWithHybridApproach(sec, sectionBase, pc, sp, fp, readU64, maxFrames - frames.len)
-      for i in 1 ..< hybridFrames.len:  # Skip first frame as it's already in our frames
-        frames.add hybridFrames[i]
+      # No SFrame info available - stop walking
+      when defined(debug):
+        try:
+          echo fmt"No SFrame info for pc=0x{pc.toHex}, stopping"
+        except: discard
       break
 
+    let fde = sec.fdes[fdeIdx]
     let fre = sec.fres[freGlobalIdx]
-    var off = freOffsetsForAbi(sframeAbiAmd64Little, sec.header, fre)
 
-    # First try the original CFA calculation
-    let originalCfaBase = off.cfaBase
-    var baseVal = if off.cfaBase == sframeCfaBaseSp: sp else: fp
-    var cfa = baseVal + uint64(cast[int64](off.cfaFromBase))
-    if off.raFromCfa.isNone(): break
-    let raAddr = cfa + uint64(cast[int64](off.raFromCfa.get()))
-    var nextPc = readU64(raAddr)
+    # Get ABI-specific offset interpretation
+    let abi = SFrameAbiArch(sec.header.abiArch)
+    let offsets = freOffsetsForAbi(abi, sec.header, fre)
 
-    # If the result doesn't look like a valid code pointer and we used FP base,
-    # fall back to hybrid approach (common with -fomit-frame-pointer)
-    if not isValidCodePointer(nextPc) and originalCfaBase == sframeCfaBaseFp:
-      let hybridFrames = walkStackWithHybridApproach(sec, sectionBase, pc, sp, fp, readU64, maxFrames - frames.len)
-      for i in 1 ..< hybridFrames.len:  # Skip first frame as it's already in our frames
-        frames.add hybridFrames[i]
+    when defined(debug):
+      try:
+        echo fmt"FDE {fdeIdx}, FRE offsets: cfaFromBase={offsets.cfaFromBase}, raFromCfa={offsets.raFromCfa}, cfaBase={offsets.cfaBase}"
+      except: discard
+
+    # Get base register value (sframe_fre_base_reg_fp_p equivalent)
+    let baseRegVal = if offsets.cfaBase == sframeCfaBaseFp: fp else: sp
+
+    # Calculate CFA: CFA = BASE_REG + offset1
+    let cfa = baseRegVal + uint64(cast[int64](offsets.cfaFromBase))
+
+    # Next frame SP = CFA (as per Appendix A pseudocode)
+    let nextSp = cfa
+
+    # Get RA offset and calculate next PC
+    if offsets.raFromCfa.isNone:
+      # No RA information available
+      when defined(debug):
+        try:
+          echo "No RA offset available, stopping"
+        except: discard
       break
 
-    if nextPc == 0'u64 or not isValidCodePointer(nextPc):
-      # Continue with hybrid approach for remaining frames
-      let hybridFrames = walkStackWithHybridApproach(sec, sectionBase, pc, sp, fp, readU64, maxFrames - frames.len)
-      for i in 1 ..< hybridFrames.len:  # Skip first frame as it's already in our frames
-        frames.add hybridFrames[i]
+    let raOffset = offsets.raFromCfa.get()
+    let raStackLoc = cfa + uint64(cast[int64](raOffset))
+
+    # Read the return address from stack (read_value equivalent)
+    let nextPc = readU64(raStackLoc)
+
+    when defined(debug):
+      try:
+        echo fmt"cfa=0x{cfa.toHex}, raStackLoc=0x{raStackLoc.toHex}, nextPc=0x{nextPc.toHex}"
+      except: discard
+
+    # Validate the PC looks reasonable
+    if not isValidCodePointer(nextPc):
+      when defined(debug):
+        try:
+          echo fmt"Invalid PC 0x{nextPc.toHex}, stopping"
+        except: discard
       break
 
-    var nextFp = fp
-    if off.fpFromCfa.isSome():
-      let fpAddr = cfa + uint64(cast[int64](off.fpFromCfa.get()))
-      nextFp = readU64(fpAddr)
+    # Get FP for next frame
+    let nextFp = if offsets.fpFromCfa.isSome:
+      let fpOffset = offsets.fpFromCfa.get()
+      let fpStackLoc = cfa + uint64(cast[int64](fpOffset))
+      readU64(fpStackLoc)
+    else:
+      # FP not saved, continue with current value
+      fp
 
+    # Update frame state for next iteration
     pc = nextPc
-    sp = cfa
+    sp = nextSp
     fp = nextFp
+
+    frames.add(pc)
+
+  when defined(debug):
+    try:
+      echo fmt"walkStackWithSFrame: completed with {frames.len} frames"
+    except: discard
+
   result = frames
+
 
 # High-level stack tracing interface
 
@@ -189,13 +197,19 @@ proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe.}
   {.cast(gcsafe).}:
     let fp0 = cast[uint64](nframe_get_fp())
     let sp0 = cast[uint64](nframe_get_sp())
-    let pc0 = cast[uint64](nframe_get_ra())
+    let ra0 = cast[uint64](nframe_get_ra())
 
     if gSframeSection.fdes.len == 0:
-      return @[pc0]
+      return @[ra0]
 
-    # Perform stack walking
-    result = walkStackAmd64WithFallback(gSframeSection, gSframeSectionBase, pc0, sp0, fp0, readU64Ptr, maxFrames)
+    when defined(debug):
+      try:
+        echo fmt"captureStackTrace: initial fp=0x{fp0.toHex}, sp=0x{sp0.toHex}, ra=0x{ra0.toHex}"
+      except: discard
+
+    # Start with return address as first frame, then use current register state
+    # to find the next frames using SFrame information
+    result = walkStackWithSFrame(gSframeSection, gSframeSectionBase, ra0, sp0, fp0, readU64Ptr, maxFrames)
 
 proc symbolizeStackTrace*(
     frames: openArray[uint64]; funcSymbols: openArray[ElfSymbol]
