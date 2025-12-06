@@ -12,7 +12,7 @@ proc getProgramCountersOverride*(
   {.cast(gcsafe).}:
     let frames = captureStackTrace(maxLength)
     var resultFrames = newSeqOfCap[cuintptr_t](frames.len()-8)
-    for i in 10..<frames.len():
+    for i in 0..<frames.len():
       resultFrames.add cast[cuintptr_t](frames[i])
     return resultFrames
 
