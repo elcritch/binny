@@ -238,11 +238,29 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 
 /* Function to increment global counter and call next level */
 static void
-stack_function_4(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
+stack_function_6(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
     printf("In stack_function_4, counter = %d\n", global_counter);
     print_sframe_stack_trace(dctx, sframe_info);
     global_counter += 4;
+}
+
+/* Function to increment global counter and call next level */
+static void
+stack_function_5(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
+{
+    printf("In stack_function_3, counter = %d\n", global_counter);
+    stack_function_6(dctx, sframe_info);
+    global_counter += 3;
+}
+
+/* Function to increment global counter and call next level */
+static void
+stack_function_4(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
+{
+    printf("In stack_function_3, counter = %d\n", global_counter);
+    stack_function_5(dctx, sframe_info);
+    global_counter += 3;
 }
 
 /* Function to increment global counter and call next level */
