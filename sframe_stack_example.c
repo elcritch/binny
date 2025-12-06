@@ -120,8 +120,8 @@ demonstrate_stack_unwinding(sframe_decoder_ctx *dctx, uint64_t pc,
     printf("\n=== Stack Unwinding Demo ===\n");
     printf("Looking up PC: 0x%lx\n", pc);
 
-    /* Convert absolute PC to relative offset for sframe lookup */
-    lookup_pc = (int32_t)(pc - sframe_info->text_vaddr);
+    /* PCs in libsframe are relative to the .sframe section load address. */
+    lookup_pc = (int32_t)(pc - sframe_info->sframe_vaddr);
 
     /* Find the Frame Row Entry for this PC */
     err = sframe_find_fre(dctx, lookup_pc, &fre);
@@ -194,7 +194,8 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
     __asm__("leaq (%%rip), %0" : "=r" (current_pc));
     demonstrate_stack_unwinding(dctx, current_pc, sframe_info);
 
-    printf("Custom Stack: Starting from current stack pointer: 0x%lx\n", rsp);
+    printf("\n=== Custom Stack ===");
+    printf("Starting from current stack pointer: 0x%lx ==\n", rsp);
 
     /* Start with current PC and use SFrame to properly unwind */
     uint64_t pc = current_pc;
@@ -206,7 +207,7 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
         /* Check if PC is in our text section */
         if (pc >= sframe_info->text_vaddr && pc < (sframe_info->text_vaddr + 0x10000)) {
             sframe_frame_row_entry fre;
-            int32_t lookup_pc = (int32_t)(pc - sframe_info->text_vaddr);
+            int32_t lookup_pc = (int32_t)(pc - sframe_info->sframe_vaddr);
             int err = sframe_find_fre(dctx, lookup_pc, &fre);
 
             if (err == 0) {

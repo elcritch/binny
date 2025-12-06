@@ -1,4 +1,4 @@
-#!env bash
+#!/usr/bin/env bash
 
 # build_sframe_example.sh - Script to build libsframe and the example program
 
