@@ -39,7 +39,7 @@ echo "   Compiling with:"
 echo "   Includes: $SFRAME_INCLUDES $ADDITIONAL_INCLUDES"
 echo "   Libraries: $SFRAME_LIBS"
 
-gcc -g -O2 \
+gcc -g -O1 \
     $SFRAME_INCLUDES $ADDITIONAL_INCLUDES \
     -o sframe_stack_example \
     sframe_stack_example.c \

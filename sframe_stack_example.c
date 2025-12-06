@@ -225,12 +225,26 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
                     uint64_t cfa = sp + cfa_offset;
                     uint64_t *ra_addr = (uint64_t *)(cfa + ra_offset);
 
+                    printf(" cfa=0x%lx ra_addr=0x%lx", cfa, (uint64_t)ra_addr);
+
+                    // /* Debug: examine stack memory to understand the layout */
+                    // printf(" stack_dump:");
+                    // for (int k = 0; k < 8; k++) {
+                    //     uint64_t *stack_addr = (uint64_t *)(sp + k * 8);
+                    //     uint64_t val = *stack_addr;
+                    //     if (val >= 0x400000 && val < 0x500000) {
+                    //         printf(" [%d:0x%lx=*0x%lx*]", k, (uint64_t)stack_addr, val);
+                    //     } else {
+                    //         printf(" [%d:0x%lx=0x%lx]", k, (uint64_t)stack_addr, val);
+                    //     }
+                    // }
+
                     if ((uint64_t)ra_addr > sp && (uint64_t)ra_addr < sp + 1024) {
                         pc = *ra_addr;
                         sp = cfa;
                         printf(" -> next_pc=0x%lx]", pc);
                     } else {
-                        printf(" invalid_ra]");
+                        printf(" invalid_ra(0x%lx not in 0x%lx-0x%lx)]", (uint64_t)ra_addr, sp, sp + 1024);
                         break;
                     }
                 } else {
@@ -260,57 +274,63 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 }
 
 /* Function to increment global counter and call next level */
-static void
+void
 stack_function_6(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
     global_counter += 6;
     printf("In stack_function_6, counter = %d\n", global_counter);
     print_sframe_stack_trace(dctx, sframe_info);
+    global_counter -= 6;
 }
 
 /* Function to increment global counter and call next level */
-static void
+void
 stack_function_5(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
     global_counter += 5;
     printf("In stack_function_5, counter = %d\n", global_counter);
     stack_function_6(dctx, sframe_info);
+    global_counter -= 5;
 }
 
 /* Function to increment global counter and call next level */
-static void
+void
 stack_function_4(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
     global_counter += 4;
     printf("In stack_function_4, counter = %d\n", global_counter);
     stack_function_5(dctx, sframe_info);
+    global_counter -= 4;
 }
 
 /* Function to increment global counter and call next level */
-static void
+void
 stack_function_3(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
     global_counter += 3;
     printf("In stack_function_3, counter = %d\n", global_counter);
     stack_function_4(dctx, sframe_info);
+    global_counter -= 3;
 }
 
 /* Function to increment global counter and call next level */
-static void
+void
 stack_function_2(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
     global_counter += 2;
     printf("In stack_function_2, counter = %d\n", global_counter);
     stack_function_3(dctx, sframe_info);
+    global_counter -= 2;
 }
 
 /* Function to increment global counter and call next level */
-static void
+void
 stack_function_1(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
     global_counter += 1;
     printf("In stack_function_1, counter = %d\n", global_counter);
     stack_function_2(dctx, sframe_info);
+    global_counter -= 1;
 }
 
 int main(int argc, char *argv[])
