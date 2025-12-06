@@ -128,7 +128,7 @@ demonstrate_stack_unwinding(sframe_decoder_ctx *dctx, uint64_t pc,
     if (err != 0) {
         printf("No FRE found for PC 0x%lx (relative: 0x%x)\n", pc, lookup_pc);
         printf("Error: %s\n", sframe_errmsg(err));
-        return;
+        exit(10);
     }
 
     printf("Found FRE for PC 0x%lx\n", pc);
