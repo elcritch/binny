@@ -63,29 +63,6 @@ proc readU64Ptr*(address: uint64): uint64 =
   ## Direct memory read helper for stack walking
   cast[ptr uint64](cast[pointer](address))[]
 
-# SFrame section loading utilities
-
-proc getSframeBase*(exe: string): uint64 =
-  ## Get the base address of the .sframe section from an executable using ELF parser
-  try:
-    let elf = parseElf(exe)
-    let sframeIdx = elf.findSection(".sframe")
-    if sframeIdx >= 0:
-      return elf.sections[sframeIdx].address
-    else:
-      return 0'u64
-  except CatchableError:
-    return 0'u64
-
-proc loadSframeSection*(exe: string = ""): (SFrameSection, uint64) =
-  ## Load and parse the SFrame section from the current executable or specified path using ELF parser
-  let exePath = if exe.len > 0: exe else: getAppFilename()
-
-  let elf = parseElf(exePath)
-  let (sframeData, sframeAddr) = elf.getSframeSection()
-  let sec = decodeSection(sframeData)
-  result = (sec, sframeAddr)
-
 # Hybrid stack walking for -fomit-frame-pointer scenarios
 
 proc isValidCodePointer*(pc: uint64): bool =
