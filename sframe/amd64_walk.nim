@@ -204,7 +204,7 @@ proc walkStackAmd64WithFallback*(sec: SFrameSection; sectionBase, startPc, start
 
 # High-level stack tracing interface
 
-proc captureStackTrace*(maxFrames: int = 16; verbose: bool = false): seq[uint64] =
+proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe.} =
   ## High-level function to capture a complete stack trace from the current location.
   ## Returns a sequence of program counter (PC) values representing the call stack.
 
@@ -212,18 +212,18 @@ proc captureStackTrace*(maxFrames: int = 16; verbose: bool = false): seq[uint64]
   let sp0 = cast[uint64](nframe_get_sp())
   let pc0 = cast[uint64](nframe_get_ra())
 
-  if verbose:
+  when defined(nframeVerbose):
     echo "Starting stack trace from PC: 0x", pc0.toHex(), " SP: 0x", sp0.toHex(), " FP: 0x", fp0.toHex()
 
   if gSframeSection.fdes.len == 0:
-    if verbose: echo "SFrame section not found or empty. Cannot walk stack."
+    when defined(nframeVerbose): echo "SFrame section not found or empty. Cannot walk stack."
     return @[pc0]
 
   # Use global SFrame section
   let sec = gSframeSection
   let sectionBase = gSframeSectionBase
 
-  if verbose:
+  when defined(nframeVerbose):
     echo "SFrame section: base=0x", sectionBase.toHex(), ", ", sec.fdes.len, " functions, ", sec.fres.len, " frame entries"
     echo "Header: RA offset=", sec.header.cfaFixedRaOffset, ", FP offset=", sec.header.cfaFixedFpOffset
 
@@ -232,19 +232,25 @@ proc captureStackTrace*(maxFrames: int = 16; verbose: bool = false): seq[uint64]
     if found:
       let fre = sec.fres[freGlobalIdx]
       let off = freOffsetsForAbi(sframeAbiAmd64Little, sec.header, fre)
-      echo "Found FDE[", fdeIdx, "]: function 0x", sec.funcStartAddress(fdeIdx, sectionBase).toHex()
-      echo "Found FRE[", freLocalIdx, "]: CFA base=", off.cfaBase, ", offset=", off.cfaFromBase
+      when defined(nframeVerbose):
+        echo "Found FDE[", fdeIdx, "]: function 0x", sec.funcStartAddress(fdeIdx, sectionBase).toHex()
+        echo "Found FRE[", freLocalIdx, "]: CFA base=", off.cfaBase, ", offset=", off.cfaFromBase
       let raInfo = if off.raFromCfa.isSome(): $off.raFromCfa.get() else: "fixed"
       let fpInfo = if off.fpFromCfa.isSome(): $off.fpFromCfa.get() else: "none"
-      echo "RA recovery: ", raInfo
-      echo "FP recovery: ", fpInfo
+      when defined(nframeVerbose):
+        echo "RA recovery: ", raInfo
+        echo "FP recovery: ", fpInfo
     else:
-      echo "No SFrame data found for current PC"
+      when defined(nframeVerbose):
+        echo "No SFrame data found for current PC"
+      discard
 
   # Perform stack walking
   result = walkStackAmd64WithFallback(sec, sectionBase, pc0, sp0, fp0, readU64Ptr, maxFrames)
 
-proc symbolizeStackTrace*(frames: seq[uint64]; funcSymbols: openArray[ElfSymbol]): seq[string] =
+proc symbolizeStackTrace*(
+    frames: seq[uint64]; funcSymbols: openArray[ElfSymbol]
+): seq[string] {.raises: [], gcsafe.} =
   ## Symbolize a stack trace using ELF parser for function symbols and addr2line for source locations.
   ## Uses ELF parser as primary method with addr2line fallback for enhanced source information.
   if frames.len == 0:
