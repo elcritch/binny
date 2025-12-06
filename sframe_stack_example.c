@@ -207,15 +207,46 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
                 printf("Frame %d: PC=0x%lx", frame_count, candidate_pc);
 
                 sframe_frame_row_entry fre;
-                /* SFrame uses signed relative addressing */
-                int32_t lookup_pc = (int32_t)(candidate_pc - sframe_info->text_vaddr);
-                printf(" (rel: 0x%x)", (uint32_t)lookup_pc);
-                int err = sframe_find_fre(dctx, lookup_pc, &fre);
+                /* Try different PC calculations */
+                int32_t lookup_pc1 = (int32_t)(candidate_pc - sframe_info->text_vaddr);
+                int32_t lookup_pc2 = (int32_t)(candidate_pc - sframe_info->sframe_vaddr);
+                int32_t lookup_pc3 = -(int32_t)(sframe_info->text_vaddr - candidate_pc);
+
+                printf(" (rel: text=0x%x sframe=0x%x neg=0x%x)",
+                       (uint32_t)lookup_pc1, (uint32_t)lookup_pc2, (uint32_t)lookup_pc3);
+
+                /* Try the standard text-relative approach first */
+                int err = sframe_find_fre(dctx, lookup_pc1, &fre);
+                if (err != 0) {
+                    /* Try sframe-relative approach */
+                    err = sframe_find_fre(dctx, lookup_pc2, &fre);
+                }
+                if (err != 0) {
+                    /* Try negative offset approach */
+                    err = sframe_find_fre(dctx, lookup_pc3, &fre);
+                }
 
                 if (err == 0) {
-                    printf(" [SFrame: start=0x%x]", fre.fre_start_addr);
+                    printf(" [SFrame: start=0x%x", fre.fre_start_addr);
+
+                    /* Extract unwinding information like demonstrate_stack_unwinding does */
+                    uint8_t base_reg_id = sframe_fre_get_base_reg_id(&fre, &err);
+                    if (err == 0) {
+                        printf(" base=%s", base_reg_id == SFRAME_BASE_REG_SP ? "SP" : "FP");
+                    }
+
+                    int32_t cfa_offset = sframe_fre_get_cfa_offset(dctx, &fre, &err);
+                    if (err == 0) {
+                        printf(" cfa=%d", cfa_offset);
+                    }
+
+                    int32_t ra_offset = sframe_fre_get_ra_offset(dctx, &fre, &err);
+                    if (err == 0) {
+                        printf(" ra=%d", ra_offset);
+                    }
+                    printf("]");
                 } else {
-                    printf(" [No SFrame]");
+                    printf(" [No SFrame: %s]", sframe_errmsg(err));
                 }
                 printf("\n");
 
@@ -240,54 +271,54 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 static void
 stack_function_6(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
-    printf("In stack_function_4, counter = %d\n", global_counter);
+    global_counter += 6;
+    printf("In stack_function_6, counter = %d\n", global_counter);
     print_sframe_stack_trace(dctx, sframe_info);
-    global_counter += 4;
 }
 
 /* Function to increment global counter and call next level */
 static void
 stack_function_5(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
-    printf("In stack_function_3, counter = %d\n", global_counter);
+    global_counter += 5;
+    printf("In stack_function_5, counter = %d\n", global_counter);
     stack_function_6(dctx, sframe_info);
-    global_counter += 3;
 }
 
 /* Function to increment global counter and call next level */
 static void
 stack_function_4(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
-    printf("In stack_function_3, counter = %d\n", global_counter);
+    global_counter += 4;
+    printf("In stack_function_4, counter = %d\n", global_counter);
     stack_function_5(dctx, sframe_info);
-    global_counter += 3;
 }
 
 /* Function to increment global counter and call next level */
 static void
 stack_function_3(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
+    global_counter += 3;
     printf("In stack_function_3, counter = %d\n", global_counter);
     stack_function_4(dctx, sframe_info);
-    global_counter += 3;
 }
 
 /* Function to increment global counter and call next level */
 static void
 stack_function_2(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
+    global_counter += 2;
     printf("In stack_function_2, counter = %d\n", global_counter);
     stack_function_3(dctx, sframe_info);
-    global_counter += 2;
 }
 
 /* Function to increment global counter and call next level */
 static void
 stack_function_1(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
 {
+    global_counter += 1;
     printf("In stack_function_1, counter = %d\n", global_counter);
     stack_function_2(dctx, sframe_info);
-    global_counter += 1;
 }
 
 int main(int argc, char *argv[])
