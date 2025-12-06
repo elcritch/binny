@@ -255,6 +255,7 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
         }
     }
 
+    printf("\n");
     printf("Total frames found: %d\n", frame_count);
 }
 
