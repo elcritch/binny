@@ -44,7 +44,6 @@ when defined(gcc) or true:
   {.emit: """
   static inline void* nframe_get_fp(void) { return __builtin_frame_address(0); }
   static inline void* nframe_get_ra(void) { return __builtin_return_address(0); }
-  static __attribute__((noinline)) void* nframe_get_pc(void) { return __builtin_return_address(0); }
   static inline void* nframe_get_sp(void) {
     void* sp;
 #if defined(__x86_64__) || defined(__amd64__)
@@ -59,32 +58,11 @@ when defined(gcc) or true:
   """.}
   proc nframe_get_fp(): pointer {.importc.}
   proc nframe_get_ra(): pointer {.importc.}
-  proc nframe_get_pc(): pointer {.importc.}
   proc nframe_get_sp(): pointer {.importc.}
 
 proc readU64Ptr*(address: uint64): uint64 =
   ## Direct memory read helper for stack walking
   cast[ptr uint64](cast[pointer](address))[]
-
-proc adjustedPc*(pc: uint64): uint64 {.inline.} =
-  ## Use pc-1 for lookup so we land inside the call site rather than the return.
-  if pc == 0'u64: 0'u64 else: pc - 1'u64
-
-proc walkViaFramePointer(pc: uint64; fp: uint64; maxFrames: int): seq[uint64] =
-  ## Fallback: follow the frame-pointer chain when SFrame data is unavailable.
-  var curPc = pc
-  var curFp = fp
-  var frames: seq[uint64] = @[]
-  for _ in 0 ..< maxFrames:
-    if curPc == 0'u64: break
-    frames.add(curPc)
-    if curFp == 0'u64: break
-    let savedRa = readU64Ptr(curFp + 8'u64)
-    let savedFp = readU64Ptr(curFp)
-    if savedRa == 0'u64: break
-    curPc = savedRa - 1'u64
-    curFp = savedFp
-  result = frames
 
 # Hybrid stack walking for -fomit-frame-pointer scenarios
 
@@ -122,7 +100,7 @@ proc walkStackWithHybridApproach*(sec: SFrameSection; sectionBase, startPc, star
     if frames.len >= maxFrames: break
 
     # Check if this PC has SFrame data
-    let (found, fdeIdx, freLocalIdx, freGlobalIdx) = sec.pcToFre(candidatePc.adjustedPc(), sectionBase)
+    let (found, fdeIdx, freLocalIdx, freGlobalIdx) = sec.pcToFre(candidatePc, sectionBase)
     if found:
       # Validate that this is a reasonable next frame
       let funcStart = sec.funcStartAddress(fdeIdx, sectionBase)
@@ -137,7 +115,7 @@ proc walkStackWithHybridApproach*(sec: SFrameSection; sectionBase, startPc, star
         let remainingRAs = scanStackForReturnAddresses(currentSp, candidatePc, 1024)
         for (nextOffset, nextPc) in remainingRAs:
           if frames.len >= maxFrames: break
-          let (nextFound, nextFdeIdx, _, _) = sec.pcToFre(nextPc.adjustedPc(), sectionBase)
+          let (nextFound, nextFdeIdx, _, _) = sec.pcToFre(nextPc, sectionBase)
           if nextFound:
             let nextFuncStart = sec.funcStartAddress(nextFdeIdx, sectionBase)
             let nextFde = sec.fdes[nextFdeIdx]
@@ -158,14 +136,9 @@ proc walkStackAmd64WithFallback*(sec: SFrameSection; sectionBase, startPc, start
   var frames: seq[uint64] = @[]
   for _ in 0 ..< maxFrames:
     frames.add pc
-    let (found, _, _, freGlobalIdx) = sec.pcToFre(pc.adjustedPc(), sectionBase)
+    let (found, _, _, freGlobalIdx) = sec.pcToFre(pc, sectionBase)
     if not found:
-      # Fall back to frame-pointer chain first; if that fails, try hybrid scanning.
-      let fpFrames = walkViaFramePointer(pc, fp, maxFrames - frames.len)
-      if fpFrames.len > 1:
-        for i in 1 ..< fpFrames.len:
-          frames.add fpFrames[i]
-        break
+      # Fall back to hybrid approach for the rest
       let hybridFrames = walkStackWithHybridApproach(sec, sectionBase, pc, sp, fp, readU64, maxFrames - frames.len)
       for i in 1 ..< hybridFrames.len:  # Skip first frame as it's already in our frames
         frames.add hybridFrames[i]
@@ -181,8 +154,6 @@ proc walkStackAmd64WithFallback*(sec: SFrameSection; sectionBase, startPc, start
     if off.raFromCfa.isNone(): break
     let raAddr = cfa + uint64(cast[int64](off.raFromCfa.get()))
     var nextPc = readU64(raAddr)
-    var nextSp = cfa
-    var nextFp = fp
 
     # If the result doesn't look like a valid code pointer and we used FP base,
     # fall back to hybrid approach (common with -fomit-frame-pointer)
@@ -193,30 +164,19 @@ proc walkStackAmd64WithFallback*(sec: SFrameSection; sectionBase, startPc, start
       break
 
     if nextPc == 0'u64 or not isValidCodePointer(nextPc):
-      var recovered = false
-      if fp != 0'u64:
-        let savedRa = readU64(fp + 8'u64)
-        let savedFp = readU64(fp)
-        if savedRa != 0'u64 and isValidCodePointer(savedRa - 1'u64):
-          nextPc = savedRa - 1'u64
-          nextSp = fp + 16'u64
-          nextFp = savedFp
-          recovered = true
-      if not recovered:
       # Continue with hybrid approach for remaining frames
-        let hybridFrames = walkStackWithHybridApproach(sec, sectionBase, pc, sp, fp, readU64, maxFrames - frames.len)
-        for i in 1 ..< hybridFrames.len:  # Skip first frame as it's already in our frames
-          frames.add hybridFrames[i]
-        break
-      else:
-        continue
+      let hybridFrames = walkStackWithHybridApproach(sec, sectionBase, pc, sp, fp, readU64, maxFrames - frames.len)
+      for i in 1 ..< hybridFrames.len:  # Skip first frame as it's already in our frames
+        frames.add hybridFrames[i]
+      break
 
+    var nextFp = fp
     if off.fpFromCfa.isSome():
       let fpAddr = cfa + uint64(cast[int64](off.fpFromCfa.get()))
       nextFp = readU64(fpAddr)
 
     pc = nextPc
-    sp = nextSp
+    sp = cfa
     fp = nextFp
   result = frames
 
@@ -227,17 +187,9 @@ proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe.}
   ## Returns a sequence of program counter (PC) values representing the call stack.
 
   {.cast(gcsafe).}:
-    var fp0 = cast[uint64](nframe_get_fp())
-    var sp0 = cast[uint64](nframe_get_sp())
-    var pc0 = cast[uint64](nframe_get_pc())
-    let savedFp = if fp0 != 0'u64: readU64Ptr(fp0) else: 0'u64
-    let savedRa = if fp0 != 0'u64: readU64Ptr(fp0 + 8'u64) else: 0'u64
-    if savedRa != 0'u64:
-      pc0 = savedRa - 1'u64
-      sp0 = fp0 + 16'u64
-      fp0 = savedFp
-    elif pc0 > 0'u64:
-      dec pc0
+    let fp0 = cast[uint64](nframe_get_fp())
+    let sp0 = cast[uint64](nframe_get_sp())
+    let pc0 = cast[uint64](nframe_get_ra())
 
     if gSframeSection.fdes.len == 0:
       return @[pc0]
