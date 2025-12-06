@@ -205,6 +205,10 @@ proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe.}
     when defined(debug):
       try:
         echo fmt"captureStackTrace: initial fp=0x{fp0.toHex}, sp=0x{sp0.toHex}, ra=0x{ra0.toHex}"
+        echo fmt"SFrame section has {gSframeSection.fdes.len} FDEs, base=0x{gSframeSectionBase.toHex}"
+        # Check if our RA is in the deep function range
+        if ra0 >= 0x41c400'u64 and ra0 <= 0x41c800'u64:
+          echo fmt"RA is in deep function range!"
       except: discard
 
     # Start with return address as first frame, then use current register state

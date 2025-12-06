@@ -10,10 +10,12 @@ proc getProgramCountersOverride*(
     maxLength: cint
 ): seq[cuintptr_t] {.nimcall, gcsafe, raises: [], tags: [], noinline.} =
   {.cast(gcsafe).}:
-    let frames = captureStackTrace(maxLength + 10)  # Get extra frames to account for skipped ones
+    let frames = captureStackTrace(maxLength + 20)  # Get extra frames to account for skipped ones
     var resultFrames = newSeqOfCap[cuintptr_t](frames.len())
-    # Skip the first few frames which are in the stacktrace infrastructure
-    let skipFrames = 3  # Skip getProgramCountersOverride, captureStackTrace, walkStackWithSFrame
+    # Skip the first several frames which are in the stacktrace infrastructure
+    # We need to skip: getProgramCountersOverride, captureStackTrace, walkStackWithSFrame,
+    # and several more frames in the Nim stacktrace system to get back to the original caller
+    let skipFrames = 8  # Increase skip count to get back to original calling context
     for i in skipFrames..<frames.len():
       if resultFrames.len >= maxLength:
         break
