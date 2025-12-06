@@ -111,7 +111,7 @@ load_sframe_section(const char *filename, sframe_info_t *info)
 /* Perform stack unwinding using SFrame information */
 static void
 demonstrate_stack_unwinding(sframe_decoder_ctx *dctx, uint64_t pc,
-                           uint64_t sframe_vaddr)
+                           sframe_info_t *sframe_info)
 {
     sframe_frame_row_entry fre;
     int32_t lookup_pc;
@@ -121,14 +121,14 @@ demonstrate_stack_unwinding(sframe_decoder_ctx *dctx, uint64_t pc,
     printf("Looking up PC: 0x%lx\n", pc);
 
     /* Convert absolute PC to relative offset for sframe lookup */
-    lookup_pc = (int32_t)(pc - sframe_vaddr);
+    lookup_pc = (int32_t)(pc - sframe_info->text_vaddr);
 
     /* Find the Frame Row Entry for this PC */
     err = sframe_find_fre(dctx, lookup_pc, &fre);
     if (err != 0) {
         printf("No FRE found for PC 0x%lx (relative: 0x%x)\n", pc, lookup_pc);
         printf("Error: %s\n", sframe_errmsg(err));
-        exit(10);
+        return;
     }
 
     printf("Found FRE for PC 0x%lx\n", pc);
@@ -188,82 +188,69 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
     __asm__("movq %%rsp, %0" : "=r" (rsp));
 
     printf("Stack Unwiding: Starting from current stack pointer: 0x%lx\n", rsp);
-    demonstrate_stack_unwinding(dctx, rsp, sframe_info);
+
+    /* Get current PC for demonstration */
+    uint64_t current_pc;
+    __asm__("leaq (%%rip), %0" : "=r" (current_pc));
+    demonstrate_stack_unwinding(dctx, current_pc, sframe_info);
 
     printf("Custom Stack: Starting from current stack pointer: 0x%lx\n", rsp);
 
-    /* Walk stack manually by examining return addresses */
-    uint64_t start_rsp = rsp;
-    while (frame_count < max_frames && (rsp - start_rsp) < 1024) {
-        /* Look at return address at current stack position */
-        uint64_t *stack_ptr = (uint64_t *)rsp;
-        bool found_frame = false;
+    /* Start with current PC and use SFrame to properly unwind */
+    uint64_t pc = current_pc;
+    uint64_t sp = rsp;
 
-        /* Skip a few words to find a reasonable return address */
-        for (int i = 0; i < 8; i++) {
-            uint64_t candidate_pc = stack_ptr[i];
+    while (frame_count < max_frames) {
+        printf("Frame %d: PC=0x%lx SP=0x%lx", frame_count, pc, sp);
 
-            /* Check if this looks like a valid PC in our text section */
-            if (candidate_pc >= sframe_info->text_vaddr &&
-                candidate_pc < (sframe_info->text_vaddr + 0x10000)) {
+        /* Check if PC is in our text section */
+        if (pc >= sframe_info->text_vaddr && pc < (sframe_info->text_vaddr + 0x10000)) {
+            sframe_frame_row_entry fre;
+            int32_t lookup_pc = (int32_t)(pc - sframe_info->text_vaddr);
+            int err = sframe_find_fre(dctx, lookup_pc, &fre);
 
-                printf("Frame %d: PC=0x%lx", frame_count, candidate_pc);
+            if (err == 0) {
+                printf(" [SFrame: start=0x%x", fre.fre_start_addr);
 
-                sframe_frame_row_entry fre;
-                /* Try different PC calculations */
-                int32_t lookup_pc1 = (int32_t)(candidate_pc - sframe_info->text_vaddr);
-                int32_t lookup_pc2 = (int32_t)(candidate_pc - sframe_info->sframe_vaddr);
-                int32_t lookup_pc3 = -(int32_t)(sframe_info->text_vaddr - candidate_pc);
+                /* Extract unwinding information */
+                uint8_t base_reg_id = sframe_fre_get_base_reg_id(&fre, &err);
+                int32_t cfa_offset = sframe_fre_get_cfa_offset(dctx, &fre, &err);
+                int32_t ra_offset = sframe_fre_get_ra_offset(dctx, &fre, &err);
 
-                printf(" (rel: text=0x%x sframe=0x%x neg=0x%x)",
-                       (uint32_t)lookup_pc1, (uint32_t)lookup_pc2, (uint32_t)lookup_pc3);
+                if (err == 0 && base_reg_id == SFRAME_BASE_REG_SP) {
+                    printf(" base=SP cfa=%d ra=%d", cfa_offset, ra_offset);
 
-                /* Try the standard text-relative approach first */
-                int err = sframe_find_fre(dctx, lookup_pc1, &fre);
-                if (err != 0) {
-                    /* Try sframe-relative approach */
-                    err = sframe_find_fre(dctx, lookup_pc2, &fre);
-                }
-                if (err != 0) {
-                    /* Try negative offset approach */
-                    err = sframe_find_fre(dctx, lookup_pc3, &fre);
-                }
+                    /* Use SFrame to unwind to next frame */
+                    uint64_t cfa = sp + cfa_offset;
+                    uint64_t *ra_addr = (uint64_t *)(cfa + ra_offset);
 
-                if (err == 0) {
-                    printf(" [SFrame: start=0x%x", fre.fre_start_addr);
-
-                    /* Extract unwinding information like demonstrate_stack_unwinding does */
-                    uint8_t base_reg_id = sframe_fre_get_base_reg_id(&fre, &err);
-                    if (err == 0) {
-                        printf(" base=%s", base_reg_id == SFRAME_BASE_REG_SP ? "SP" : "FP");
+                    if ((uint64_t)ra_addr > sp && (uint64_t)ra_addr < sp + 1024) {
+                        pc = *ra_addr;
+                        sp = cfa;
+                        printf(" -> next_pc=0x%lx]", pc);
+                    } else {
+                        printf(" invalid_ra]");
+                        break;
                     }
-
-                    int32_t cfa_offset = sframe_fre_get_cfa_offset(dctx, &fre, &err);
-                    if (err == 0) {
-                        printf(" cfa=%d", cfa_offset);
-                    }
-
-                    int32_t ra_offset = sframe_fre_get_ra_offset(dctx, &fre, &err);
-                    if (err == 0) {
-                        printf(" ra=%d", ra_offset);
-                    }
-                    printf("]");
                 } else {
-                    printf(" [No SFrame: %s]", sframe_errmsg(err));
+                    printf(" unsupported]");
+                    break;
                 }
-                printf("\n");
-
-                /* Move up the stack for next frame */
-                rsp += (i + 1) * 8;
-                frame_count++;
-                found_frame = true;
+            } else {
+                printf(" [No SFrame]");
                 break;
             }
+        } else {
+            printf(" [PC outside text]");
+            break;
         }
 
-        /* If we didn't find any valid PCs in this search, advance a bit */
-        if (!found_frame) {
-            rsp += 8;
+        printf("\n");
+        frame_count++;
+
+        /* Safety check */
+        if (pc == 0 || pc < 0x400000) {
+            break;
         }
     }
 
