@@ -42,19 +42,20 @@ proc isSubsequence(hay: openArray[string]; needle: openArray[string]): bool =
     if i < needle.len and x == needle[i]: inc i
   i == needle.len
 
-suite "Nim override stackwalk (AMD64)":
-  test "Printed backtrace contains deep0..deep7 in order":
-    let testBinDir = splitFile(getAppFilename()).dir
-    let rootDir = parentDir(testBinDir)
-    let exePath = rootDir / "examples/stackwalk_amd64_nim_test"
-    check buildExample(exePath)
+when defined(amd64):
+  suite "Nim override stackwalk (AMD64)":
+    test "Printed backtrace contains deep0..deep7 in order":
+      let testBinDir = splitFile(getAppFilename()).dir
+      let rootDir = parentDir(testBinDir)
+      let exePath = rootDir / "examples/stackwalk_amd64_nim_test"
+      check buildExample(exePath)
 
-    let (code, runOut) = runExample(exePath)
-    # The example terminates with an exception; non-zero exit is OK.
-    check runOut.len > 0
+      let (code, runOut) = runExample(exePath)
+      # The example terminates with an exception; non-zero exit is OK.
+      check runOut.len > 0
 
-    let deeps = parseDeepFromOutput(runOut)
-    check deeps.len >= 8
+      let deeps = parseDeepFromOutput(runOut)
+      check deeps.len >= 8
 
-    let expected = @["deep0()", "deep1()", "deep2()", "deep3()", "deep4()", "deep5()", "deep6()", "deep7()"]
-    check isSubsequence(deeps, expected)
+      let expected = @["deep0()", "deep1()", "deep2()", "deep3()", "deep4()", "deep5()", "deep6()", "deep7()"]
+      check isSubsequence(deeps, expected)
