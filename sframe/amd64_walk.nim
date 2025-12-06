@@ -34,6 +34,7 @@ proc initStackframes*() =
   gInitialized = true
 
 
+## Load stack frame data!!
 initStackframes()
 
 type U64Reader* = proc (address: uint64): uint64 {.gcsafe, raises: [], tags: [].}
