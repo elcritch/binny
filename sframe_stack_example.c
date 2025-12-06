@@ -157,36 +157,6 @@ demonstrate_stack_unwinding(sframe_decoder_ctx *dctx, uint64_t pc,
     }
 }
 
-/* Dump SFrame section information */
-static void
-dump_sframe_info(sframe_decoder_ctx *dctx)
-{
-    printf("\n=== SFrame Section Information ===\n");
-    printf("Version: %d\n", sframe_decoder_get_version(dctx));
-    printf("ABI/Arch: %d\n", sframe_decoder_get_abi_arch(dctx));
-    // printf("Flags: 0x%x\n", sframe_decoder_get_flags(dctx));
-    printf("Number of FDEs: %d\n", sframe_decoder_get_num_fidx(dctx));
-    printf("Fixed FP offset: %d\n", sframe_decoder_get_fixed_fp_offset(dctx));
-    printf("Fixed RA offset: %d\n", sframe_decoder_get_fixed_ra_offset(dctx));
-
-    /* List all functions */
-    printf("\n=== Function Descriptors ===\n");
-    uint32_t num_fdes = sframe_decoder_get_num_fidx(dctx);
-    for (uint32_t i = 0; i < num_fdes; i++) {
-        uint32_t num_fres, func_size;
-        int32_t func_start_addr;
-        unsigned char func_info;
-        int err;
-
-        err = sframe_decoder_get_funcdesc(dctx, i, &num_fres, &func_size,
-                                         &func_start_addr, &func_info);
-        if (err == 0) {
-            printf("FDE %d: start=0x%x, size=%d, fres=%d, info=0x%x\n",
-                   i, func_start_addr, func_size, num_fres, func_info);
-        }
-    }
-}
-
 /* Get the current executable path on FreeBSD */
 static char *
 get_executable_path(void)
