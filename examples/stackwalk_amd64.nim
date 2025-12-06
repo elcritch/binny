@@ -7,7 +7,7 @@ var lastFrames: seq[uint64] = @[]
 
 proc nframe_entry_build*() =
   # Capture stack trace with verbose output for demonstration
-  lastFrames = captureStackTrace(maxFrames = 16, verbose = true)
+  lastFrames = captureStackTrace(maxFrames = 16)
 
 # Force functions to not be inlined and add some computation to prevent optimization
 proc deep0() {.noinline.} =
