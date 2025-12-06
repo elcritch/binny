@@ -6,7 +6,9 @@ proc deep0() {.noinline.} =
   # Print stacktrace using Nim's built-in API (overridden to use SFrame)
   echo "Nim getStackTrace() output:"
   echo getStackTrace()
-  #echo "\nstacktraces: ", $getStackTraceEntries()
+  var steRaw = getStackTraceEntries()
+  let ste = addDebuggingInfo(steRaw)
+  echo "\nstacktraces: ", $ste
   for i in 1..10:
     echo "i: ", $i
 

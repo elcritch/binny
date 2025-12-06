@@ -28,6 +28,7 @@ proc getBacktrace*(): string {.noinline, gcsafe, raises: [], tags: [].} =
 proc getDebuggingInfo*(programCounters: seq[cuintptr_t], maxLength: cint): seq[StackTraceEntry]
     {.noinline, gcsafe, raises: [], tags: [].} =
   {.cast(gcsafe).}:
+    echo "GET_DEBUGGING_INFO!!"
     var frames: seq[uint64] = @[]
     for pc in programCounters:
       frames.add cast[uint64](pc)
