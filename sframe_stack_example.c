@@ -4,7 +4,7 @@
  * 1. Build and link against libsframe
  * 2. Read SFrame data from an executable
  * 3. Use sframe_find_fre() to get stack unwinding information
- * 4. Perform basic stack tracing
+ * 4. Perform actual stack tracing of its own execution
  */
 
 #include <stdio.h>
@@ -15,10 +15,14 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <elf.h>
 
 /* Include sframe headers */
 #include "sframe-api.h"
+
+/* Global counter to make stack deeper */
+static int global_counter = 0;
 
 /* Structure to hold SFrame section information */
 typedef struct {
@@ -182,17 +186,132 @@ dump_sframe_info(sframe_decoder_ctx *dctx)
     }
 }
 
+/* Get the current executable path on FreeBSD */
+static char *
+get_executable_path(void)
+{
+    static char exe_path[1024];
+    size_t len = sizeof(exe_path);
+
+    /* On FreeBSD, use sysctl to get the executable path */
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
+    if (sysctl(mib, 4, exe_path, &len, NULL, 0) == 0) {
+        return exe_path;
+    }
+
+    /* Fallback: try to read from argv[0] if it's an absolute path */
+    return NULL;
+}
+
+/* Simple stack walking using frame pointers */
+static void
+print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
+{
+    void **frame_ptr;
+    uint64_t pc;
+    int frame_count = 0;
+    const int max_frames = 10;
+
+    printf("\n=== Stack Trace ===\n");
+
+    /* Get the current frame pointer */
+    __asm__("movq %%rbp, %0" : "=r" (frame_ptr));
+
+    while (frame_ptr && frame_count < max_frames) {
+        /* The return address is stored at *(frame_ptr + 1) */
+        pc = (uint64_t)*(frame_ptr + 1);
+
+        /* Safety check: ensure we have a reasonable PC */
+        if (pc == 0 || pc < 0x400000 || pc > 0x800000000000ULL) {
+            break;
+        }
+
+        printf("Frame %d: PC=0x%lx", frame_count, pc);
+
+        /* Try to find SFrame information for this PC */
+        sframe_frame_row_entry fre;
+        int32_t lookup_pc;
+        int err;
+
+        /* Convert absolute PC to relative offset for sframe lookup */
+        if (pc >= sframe_info->text_vaddr && pc < (sframe_info->text_vaddr + 0x10000)) {
+            lookup_pc = (int32_t)(pc - sframe_info->text_vaddr);
+
+            /* Find the Frame Row Entry for this PC */
+            err = sframe_find_fre(dctx, lookup_pc, &fre);
+            if (err == 0) {
+                printf(" [SFrame: start=0x%x", fre.fre_start_addr);
+
+                int32_t cfa_offset = sframe_fre_get_cfa_offset(dctx, &fre, &err);
+                if (err == 0) {
+                    printf(" cfa=%d", cfa_offset);
+                }
+                printf("]");
+            }
+        }
+        printf("\n");
+
+        /* Move to the next frame */
+        frame_ptr = (void **)*frame_ptr;
+        frame_count++;
+
+        /* Safety check to avoid infinite loops */
+        if (frame_ptr == NULL || (uint64_t)frame_ptr < 0x1000) {
+            break;
+        }
+    }
+}
+
+/* Function to increment global counter and call next level */
+static void
+stack_function_4(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
+{
+    global_counter += 4;
+    printf("In stack_function_4, counter = %d\n", global_counter);
+    print_sframe_stack_trace(dctx, sframe_info);
+}
+
+/* Function to increment global counter and call next level */
+static void
+stack_function_3(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
+{
+    global_counter += 3;
+    printf("In stack_function_3, counter = %d\n", global_counter);
+    stack_function_4(dctx, sframe_info);
+}
+
+/* Function to increment global counter and call next level */
+static void
+stack_function_2(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
+{
+    global_counter += 2;
+    printf("In stack_function_2, counter = %d\n", global_counter);
+    stack_function_3(dctx, sframe_info);
+}
+
+/* Function to increment global counter and call next level */
+static void
+stack_function_1(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
+{
+    global_counter += 1;
+    printf("In stack_function_1, counter = %d\n", global_counter);
+    stack_function_2(dctx, sframe_info);
+}
+
 int main(int argc, char *argv[])
 {
     sframe_info_t sframe_info = {0};
     sframe_decoder_ctx *dctx;
     int err;
+    const char *filename;
+    char *exe_path;
 
     printf("SFrame Stack Tracing Example\n");
     printf("============================\n");
 
-    /* Use the current executable if no file specified */
-    const char *filename = (argc > 1) ? argv[1] : "/proc/self/exe";
+    /* Get the current executable path for FreeBSD */
+    exe_path = get_executable_path();
+    filename = (argc > 1) ? argv[1] : (exe_path ? exe_path : "./sframe_stack_example");
 
     printf("Loading SFrame data from: %s\n", filename);
 
@@ -211,27 +330,12 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* Dump SFrame information */
-    dump_sframe_info(dctx);
+    printf("\n=== Creating nested function calls to print stack trace ===\n");
 
-    /* Demonstrate stack unwinding for a few example PCs */
-    if (argc > 2) {
-        /* Use PC provided as command line argument */
-        uint64_t pc = strtoull(argv[2], NULL, 0);
-        demonstrate_stack_unwinding(dctx, pc, sframe_info.sframe_vaddr);
-    } else {
-        /* Use some example PCs relative to text section */
-        uint64_t example_pcs[] = {
-            sframe_info.text_vaddr + 0x10,
-            sframe_info.text_vaddr + 0x100,
-            sframe_info.text_vaddr + 0x1000
-        };
+    /* Start the chain of function calls that will print the stack trace */
+    stack_function_1(dctx, &sframe_info);
 
-        for (int i = 0; i < 3; i++) {
-            demonstrate_stack_unwinding(dctx, example_pcs[i],
-                                      sframe_info.sframe_vaddr);
-        }
-    }
+    printf("\nFinal counter value: %d\n", global_counter);
 
     /* Cleanup */
     sframe_decoder_free(&dctx);
