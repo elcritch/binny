@@ -11,6 +11,7 @@ proc deep0() {.noinline.} =
   #echo "\nstacktraces: ", $ste
   for i in 1..10:
     echo "i: ", $i
+  raise newException(ValueError, "error")
 
 proc deep1() {.noinline.} = deep0()
 proc deep2() {.noinline.} = deep1()

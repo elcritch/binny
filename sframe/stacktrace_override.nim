@@ -20,7 +20,6 @@ proc getProgramCountersOverride*(
 proc getDebuggingInfo*(programCounters: seq[cuintptr_t], maxLength: cint): seq[StackTraceEntry]
     {.noinline, gcsafe, raises: [], tags: [].} =
   {.cast(gcsafe).}:
-    echo "GET_DEBUGGING_INFO!!"
     var frames: seq[uint64] = @[]
     for pc in programCounters:
       frames.add cast[uint64](pc)
@@ -46,7 +45,16 @@ proc getBacktrace*(): string {.noinline, gcsafe, raises: [], tags: [].} =
       if i < frames.len:
         result.add(&"{sym}\n")
 
+proc unhandledExceptionOverride(e: ref Exception) {.nimcall, tags: [], raises: [].} =
+  {.cast(gcsafe), cast(tags: []).}:
+    try:
+      stderr.write("")
+    except:
+      discard
+
 when defined(nimStackTraceOverride):
+
+  system.unhandledExceptionHook = unhandledExceptionOverride
   when declared(registerStackTraceOverrideGetProgramCounters):
     registerStackTraceOverrideGetProgramCounters(getProgramCountersOverride)
   when declared(registerStackTraceOverride):
