@@ -88,7 +88,6 @@ proc walkStackAmd64*(sec: SFrameSection; sectionBase, startPc, startSp, startFp:
   ## -fomit-frame-pointer scenarios gracefully.
   var pc = startPc
   var sp = startSp
-  var fp = startFp
 
   var frames: seq[uint64] = @[startPc]
 
