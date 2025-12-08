@@ -291,8 +291,8 @@ type
     sframeFreOff2B = 1,
     sframeFreOff4B = 2
   SFrameCfaBase* = enum
-    sframeCfaBaseSp = 0,
-    sframeCfaBaseFp = 1
+    sframeCfaBaseFp = 0,
+    sframeCfaBaseSp = 1
   SFrameFreInfo* = distinct uint8
 
 proc `==`*(a, b: SFrameFreInfo): bool {.inline.} = uint8(a) == uint8(b)
