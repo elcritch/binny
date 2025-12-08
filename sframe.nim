@@ -299,14 +299,14 @@ proc `==`*(a, b: SFrameFreInfo): bool {.inline.} = uint8(a) == uint8(b)
 
 proc freInfo*(cfaBase: SFrameCfaBase; offsetCount: range[0..15]; offsetSize: SFrameOffsetSize; mangledRa=false): SFrameFreInfo =
   var v: uint8 = 0
-  if cfaBase == sframeCfaBaseFp: v = v or 0x01
+  if cfaBase == sframeCfaBaseSp: v = v or 0x01
   v = v or (uint8(offsetCount and 0x0F) shl 1)
   v = v or (uint8(offsetSize) shl 5)
   if mangledRa: v = v or 0x80'u8
   SFrameFreInfo(v)
 
 proc freInfoGetCfaBase*(info: SFrameFreInfo): SFrameCfaBase {.inline.} =
-  if (uint8(info) and 0x01) == 0: sframeCfaBaseSp else: sframeCfaBaseFp
+  if (uint8(info) and 0x01) == 0: sframeCfaBaseFp else: sframeCfaBaseSp
 proc freInfoGetOffsetCount*(info: SFrameFreInfo): int {.inline.} =
   int((uint8(info) shr 1) and 0x0F)
 proc freInfoGetOffsetSize*(info: SFrameFreInfo): SFrameOffsetSize {.inline.} =
