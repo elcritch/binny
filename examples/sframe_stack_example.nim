@@ -5,6 +5,14 @@
 ## 2. Read SFrame data from an executable
 ## 3. Use sframe_find_fre() to get stack unwinding information
 ## 4. Perform actual stack tracing of its own execution
+##
+## NOTE: This is a port of the C version (sframe_stack_example.c).
+## The Nim compiler currently generates FP-based SFrame metadata even with
+## `-fomit-frame-pointer`, but doesn't actually maintain a proper frame pointer
+## chain in RBP. This means stack unwinding may not work as expected for
+## Nim-compiled code. The example demonstrates how to handle both SP-based
+## and FP-based unwinding, though FP-based unwinding will fail when RBP
+## is not properly maintained as a frame pointer.
 
 import std/[strformat, strutils, os]
 
@@ -266,13 +274,23 @@ proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
   var currentPc: uint64
   {.emit: "asm volatile(\"leaq (%%rip), %0\" : \"=r\" (`currentPc`));".}
 
+  # Get current frame pointer
+  var initialRbp: uint64
+  {.emit: "asm volatile(\"movq %%rbp, %0\" : \"=r\" (`initialRbp`));".}
+
   echo ""
   echo "=== Custom Stack ==="
-  echo fmt"Starting from current stack pointer: 0x{rsp.toHex} =="
+  echo fmt"Starting RSP: 0x{rsp.toHex}, RBP: 0x{initialRbp.toHex} =="
+
+  # Check if RBP looks valid (should be near SP)
+  if initialRbp < rsp or initialRbp > rsp + 1024 * 64:
+    echo fmt"Warning: RBP (0x{initialRbp.toHex}) doesn't look valid relative to SP (0x{rsp.toHex})"
+    echo "RBP might not be set up correctly - frame pointer optimizations may be in effect"
 
   # Start with current PC and use SFrame to properly unwind
   var pc = currentPc
   var sp = rsp
+  var rbp = initialRbp
 
   while frameCount < maxFrames:
     stdout.write fmt"Frame {frameCount}: PC=0x{pc.toHex} SP=0x{sp.toHex}"
@@ -312,10 +330,32 @@ proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
               echo ""
               break
           else:
-            # FP-based unwinding - not implemented in this example
-            stdout.write fmt" base=FP (not implemented)]"
-            echo ""
-            break
+            # FP-based unwinding
+            # In standard x86-64 frame layout with -fno-omit-frame-pointer:
+            # [rbp+0] = saved rbp
+            # [rbp+8] = return address
+            # So CFA is rbp + 16
+            stdout.write fmt" base=FP"
+
+            # Standard x86-64 frame pointer layout
+            # The saved RBP is at [rbp], and return address is at [rbp+8]
+            let savedRbpAddr = cast[ptr uint64](rbp)
+            let returnAddr = cast[ptr uint64](rbp + 8)
+
+            stdout.write fmt" rbp=0x{rbp.toHex} saved_rbp_addr=0x{cast[uint64](savedRbpAddr).toHex}"
+
+            # Validate pointers are in a reasonable range
+            if cast[uint64](savedRbpAddr) >= sp and cast[uint64](savedRbpAddr) < sp + 1024 * 64:
+              let nextRbp = savedRbpAddr[]
+              pc = returnAddr[]
+              sp = rbp + 16  # CFA for standard frame
+              rbp = nextRbp
+
+              stdout.write fmt" -> next_rbp=0x{rbp.toHex} next_pc=0x{pc.toHex}]"
+            else:
+              stdout.write fmt" invalid_rbp_addr]"
+              echo ""
+              break
         else:
           stdout.write " error getting offsets]"
           echo ""
