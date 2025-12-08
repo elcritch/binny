@@ -14,6 +14,9 @@ proc deep0() {.noinline.} =
 
 var depthSink {.volatile.}: int
 
+when defined(noinlining):
+  {.push noinline.}
+
 template mkDeep(procName, nextName: untyped) =
   proc procName() {.noinline.} =
     nextName()
