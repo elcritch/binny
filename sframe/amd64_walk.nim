@@ -100,6 +100,7 @@ proc walkStackAmd64*(sec: SFrameSection; sectionBase, startPc, startSp: uint64; 
   # For each potential return address, validate using SFrame data
   var currentSp = startSp
   for (offset, candidatePc) in stackRAs:
+    echo "stackRAs: ", stackRAs
     if frames.len >= maxFrames: break
 
     # Check if this PC has SFrame data
@@ -116,6 +117,7 @@ proc walkStackAmd64*(sec: SFrameSection; sectionBase, startPc, startSp: uint64; 
 
         # Recursively search for more frames from this new stack position
         let remainingRAs = scanStackForReturnAddresses(currentSp, candidatePc, 1024)
+        echo "remainingRAs: ", remainingRAs
         for (nextOffset, nextPc) in remainingRAs:
           if frames.len >= maxFrames: break
           let (nextFound, nextFdeIdx, _, _) = sec.pcToFre(nextPc, sectionBase)
@@ -124,6 +126,7 @@ proc walkStackAmd64*(sec: SFrameSection; sectionBase, startPc, startSp: uint64; 
             let nextFde = sec.fdes[nextFdeIdx]
             if nextPc > nextFuncStart and nextPc < (nextFuncStart + uint64(nextFde.funcSize)):
               frames.add nextPc
+              echo "remainingRAs: ", "found PC: ", nextPc
               currentSp += uint64(nextOffset + 8)
         break
 
