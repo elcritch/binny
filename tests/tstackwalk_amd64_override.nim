@@ -14,7 +14,7 @@ proc buildExample(exeOut: string): bool =
   let rootDir = parentDir(testBinDir)
   let src = rootDir / "examples/stackwalk_amd64_override.nim"
   let outPath = exeOut
-  let cmd = fmt"nim c -d:noinlining -o:{outPath} {src}"
+  let cmd = fmt"nim c --opt:none -d:noinlining -o:{outPath} {src}"
   let (code, outp) = runCmd(cmd)
   if code != 0:
     echo "Compile failed:\n", outp
@@ -47,7 +47,7 @@ when defined(amd64):
     test "Printed backtrace contains deep0..deep7 in order":
       let testBinDir = splitFile(getAppFilename()).dir
       let rootDir = parentDir(testBinDir)
-      let exePath = rootDir / "examples/stackwalk_amd64_override"
+      let exePath = rootDir / "examples/stackwalk_amd64_override_test"
       check buildExample(exePath)
 
       let (code, runOut) = runExample(exePath)
