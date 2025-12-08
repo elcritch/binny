@@ -38,6 +38,9 @@ when defined(linux) or defined(freebsd):
 # Use direct library linking approach
 {.passL: "-lsframe".}
 
+type
+  SframeRowEntry {.importc: "sframe_frame_row_entry".} = object
+
 # Use direct C function calls with proper typing
 proc c_sframe_decode(buf: pointer, size: csize_t, errp: ptr cint): pointer {.
   importc: "sframe_decode", header: "<sframe-api.h>".}
@@ -239,40 +242,34 @@ proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
 
     # Check if PC is in our text section
     if pc >= sframeInfo.textVaddr and pc < (sframeInfo.textVaddr + sframeInfo.textSize):
-      var fre: array[1024, byte]
+      var fre: SframeRowEntry 
       # Cast to signed int to handle negative offsets (when PC < sframe_vaddr)
       let pcOffset = cast[int64](pc - sframeInfo.sframeVaddr)
       let lookupPc = int32(pcOffset)
       echo "\nlookupPc: ", lookupPc
-      var err: cint = c_sframe_find_fre(dctx, lookupPc, addr fre[0])
+      var err: cint = c_sframe_find_fre(dctx, lookupPc, addr fre)
 
       if err == 0:
 
         # Extract unwinding information
-        let baseRegId = c_sframe_fre_get_base_reg_id(addr fre[0], addr err)
+        let baseRegId = c_sframe_fre_get_base_reg_id(addr fre, addr err)
+        let cfaOffset = c_sframe_fre_get_cfa_offset(dctx, addr fre, addr err)
+        if err != 0:
+          echo fmt" [Error getting cfaoffset: {err}]"
+          break
+        let raOffset = c_sframe_fre_get_ra_offset(dctx, addr fre, addr err)
         echo "baseRegId: ", baseRegId, " SFRAME_BASE_REG_SP: ", SFRAME_BASE_REG_SP
+        echo fmt" [SP-based: cfa={cfaOffset} ra={raOffset}"
+
 
         if err != 0:
-          stdout.write fmt" [Error getting base reg: {err}]"
-          echo ""
+          echo fmt" [Error getting base reg: {err}]"
           break
 
         # Only handle SP-based unwinding
+
         if baseRegId == SFRAME_BASE_REG_SP:
           echo "SFRAME_BASE_REG_SP"
-          let cfaOffset = c_sframe_fre_get_cfa_offset(dctx, addr fre[0], addr err)
-          if err != 0:
-            stdout.write fmt" [Error getting CFA: {err}]"
-            echo ""
-            break
-
-          let raOffset = c_sframe_fre_get_ra_offset(dctx, addr fre[0], addr err)
-          if err != 0:
-            stdout.write fmt" [Error getting RA: {err}]"
-            echo ""
-            break
-
-          stdout.write fmt" [SP-based: cfa={cfaOffset} ra={raOffset}"
 
           # Use SFrame to unwind to next frame
           let cfa = sp + uint64(cfaOffset)
