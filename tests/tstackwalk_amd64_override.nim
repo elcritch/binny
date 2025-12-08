@@ -14,7 +14,7 @@ proc buildExample(exeOut: string): bool =
   let rootDir = parentDir(testBinDir)
   let src = rootDir / "examples/stackwalk_amd64_override.nim"
   let outPath = exeOut
-  let cmd = fmt"nim c -o:{outPath} {src}"
+  let cmd = fmt"nim c -d:noinlining -o:{outPath} {src}"
   let (code, outp) = runCmd(cmd)
   if code != 0:
     echo "Compile failed:\n", outp
