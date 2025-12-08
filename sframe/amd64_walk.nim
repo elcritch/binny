@@ -56,7 +56,6 @@ when defined(gcc) or true:
     return sp;
   }
   """.}
-  proc nframe_get_fp(): pointer {.importc.}
   proc nframe_get_ra(): pointer {.importc.}
   proc nframe_get_sp(): pointer {.importc.}
 
@@ -82,12 +81,11 @@ proc scanStackForReturnAddresses*(startSp: uint64; currentPc: uint64; maxScan: i
       results.add((i * 8, val))
   result = results
 
-proc walkStackAmd64*(sec: SFrameSection; sectionBase, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
+proc walkStackAmd64*(sec: SFrameSection; sectionBase, startPc, startSp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
   ## AMD64 stack walker with fallback from FP to SP base for -fomit-frame-pointer scenarios.
   ## This is the recommended walker for production use as it handles both normal and
   ## -fomit-frame-pointer scenarios gracefully.
   var pc = startPc
-  var sp = startSp
 
   var frames: seq[uint64] = @[startPc]
 
@@ -138,7 +136,6 @@ proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe.}
   ## Returns a sequence of program counter (PC) values representing the call stack.
 
   {.cast(gcsafe).}:
-    let fp0 = cast[uint64](nframe_get_fp())
     let sp0 = cast[uint64](nframe_get_sp())
     let pc0 = cast[uint64](nframe_get_ra())
 
@@ -146,7 +143,7 @@ proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe.}
       return @[pc0]
 
     # Perform stack walking
-    result = walkStackAmd64(gSframeSection, gSframeSectionBase, pc0, sp0, fp0, readU64Ptr, maxFrames)
+    result = walkStackAmd64(gSframeSection, gSframeSectionBase, pc0, sp0, readU64Ptr, maxFrames)
 
 proc symbolizeStackTrace*(
     frames: openArray[uint64]; funcSymbols: openArray[ElfSymbol]
