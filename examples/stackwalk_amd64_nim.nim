@@ -25,7 +25,7 @@ proc deep1() =
   dec depthSink
 proc deep2() =
   deep1()
-  inc depthSink
+  dec depthSink
 proc deep3() =
   deep2()
 proc deep4() =
@@ -33,13 +33,14 @@ proc deep4() =
 proc deep5() {.noinline.} =
   inc depthSink
   deep4()
-  inc depthSink
+  dec depthSink
 proc deep6() =
   deep5()
-  inc depthSink
+  dec depthSink
 proc deep7() {.noinline.} =
-  deep6()
   inc depthSink
+  deep6()
+  dec depthSink
 
 #proc deep1() {.noinline.} = deep0()
 #proc deep2() {.noinline.} = deep1()
