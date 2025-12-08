@@ -57,8 +57,8 @@ proc c_sframe_fre_get_fp_offset(dctx: pointer, fre: pointer, errp: ptr cint): in
 
 # Constants from sframe-api.h
 const
-  SFRAME_BASE_REG_SP = 0'u8
-  SFRAME_BASE_REG_FP = 1'u8
+  SFRAME_BASE_REG_FP = 0'u8
+  SFRAME_BASE_REG_SP = 1'u8
 
 # Structure to hold SFrame section information
 type
