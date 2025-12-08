@@ -8,5 +8,5 @@ switch("debugger", "native")
 
 switch("passC", "-O0 -Wa,--gsframe -fomit-frame-pointer -fasynchronous-unwind-tables")
 switch("passC", "-I/usr/local/include")
-switch("passL", "-Wa,--gsframe -L/usr/local/lib -lsframe")
+switch("passL", "-Wa,--gsframe -lctf -lsframe -L/usr/local/lib")
 # Disable Nim's frame tracking which adds frame pointers
