@@ -8,6 +8,8 @@ export mem_sim
 var
   gSframeSection*: SFrameSection
   gSframeSectionBase*: uint64
+  gTextSectionBase*: uint64
+  gTextSectionSize*: uint64
   gFuncSymbols*: seq[ElfSymbol]
   gInitialized*: bool = false
 
@@ -24,6 +26,11 @@ proc initStackframes*() =
     if sframeData.len > 0:
       gSframeSection = decodeSection(sframeData)
       gSframeSectionBase = sframeAddr
+
+    # Load text section
+    let (textData, textAddr) = elf.getTextSection()
+    gTextSectionBase = textAddr
+    gTextSectionSize = uint64(textData.len)
 
     # Load symbols
     gFuncSymbols = elf.getDemangledFunctionSymbols()
@@ -60,7 +67,6 @@ when defined(gcc) or true:
   }
   """.}
   proc nframe_get_fp(): pointer {.importc.}
-  proc nframe_get_ra(): pointer {.importc.}
   proc nframe_get_sp(): pointer {.importc.}
   proc nframe_get_pc(): pointer {.importc.}
 
@@ -83,77 +89,116 @@ proc isValidCodePointer*(pc: uint64): bool =
     return false
   return true
 
-proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
-  ## Stack walker implementing SFrame algorithm from Appendix A
-  var frames: seq[uint64] = @[startPc]
+proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, textVaddr, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
+  ## Stack walker implementing SFrame algorithm similar to sframe_stack_example.c
+  var frames: seq[uint64] = @[]
+  var frameCount = 0
 
-  # Current frame state (as described in Appendix A)
+  # Current frame state - start with current PC, SP, and FP
   var pc = startPc
   var sp = startSp
   var fp = startFp
 
   when defined(debug):
     try:
-      echo fmt"walkStackWithSFrame: starting with pc=0x{pc.toHex}, sp=0x{sp.toHex}, fp=0x{fp.toHex}"
-      echo fmt"SFrame section has {sec.fdes.len} FDEs, base=0x{sectionBase.toHex}"
+      echo fmt"walkStackWithSFrame: starting with pc=0x{pc.toHex}, sp=0x{sp.toHex}"
+      echo fmt"SFrame section has {sec.fdes.len} FDEs, base=0x{sectionBase.toHex}, text=0x{textVaddr.toHex}"
     except: discard
 
-  for frameIdx in 1 ..< maxFrames:
-    # Find the FRE for the current PC (sframe_find_fre equivalent)
-    let (found, fdeIdx, freLocalIdx, freGlobalIdx) = sec.pcToFre(pc, sectionBase)
+  while frameCount < maxFrames:
+    frames.add(pc)
 
     when defined(debug):
       try:
-        echo fmt"Frame {frameIdx}: pc=0x{pc.toHex}, found={found}"
+        echo fmt"Frame {frameCount}: PC=0x{pc.toHex} SP=0x{sp.toHex}"
       except: discard
 
-    if not found:
-      # No SFrame info available - stop walking
+    # Check if PC is in our text section (similar to C example check)
+    if pc < textVaddr or pc >= (textVaddr + gTextSectionSize):
       when defined(debug):
         try:
-          echo fmt"No SFrame info for pc=0x{pc.toHex}, stopping"
+          echo fmt"PC 0x{pc.toHex} outside text section (0x{textVaddr.toHex}-0x{(textVaddr + gTextSectionSize).toHex}), stopping"
+        except: discard
+      break
+
+    # Convert PC to relative to SFrame section for lookup (like C example)
+    let lookupPc = pc - sectionBase
+
+    # Find the FRE for this PC
+    let (found, fdeIdx, freLocalIdx, freGlobalIdx) = sec.pcToFre(pc, sectionBase)
+
+    if not found:
+      when defined(debug):
+        try:
+          echo fmt"No SFrame info for pc=0x{pc.toHex} (relative: 0x{lookupPc.toHex}), stopping"
         except: discard
       break
 
     let fde = sec.fdes[fdeIdx]
     let fre = sec.fres[freGlobalIdx]
 
+    when defined(debug):
+      try:
+        echo fmt" [SFrame: start=0x{fre.startAddr.toHex}"
+      except: discard
+
     # Get ABI-specific offset interpretation
     let abi = SFrameAbiArch(sec.header.abiArch)
     let offsets = freOffsetsForAbi(abi, sec.header, fre)
 
-    when defined(debug):
-      try:
-        echo fmt"FDE {fdeIdx}, FRE offsets: cfaFromBase={offsets.cfaFromBase}, raFromCfa={offsets.raFromCfa}, cfaBase={offsets.cfaBase}"
-      except: discard
-
-    # Get base register value (sframe_fre_base_reg_fp_p equivalent)
+    # Get base register value for CFA calculation
     let baseRegVal = if offsets.cfaBase == sframeCfaBaseFp: fp else: sp
+    let baseRegName = if offsets.cfaBase == sframeCfaBaseFp: "FP" else: "SP"
 
-    # Calculate CFA: CFA = BASE_REG + offset1
-    let cfa = baseRegVal + uint64(cast[int64](offsets.cfaFromBase))
-
-    # Next frame SP = CFA (as per Appendix A pseudocode)
-    let nextSp = cfa
-
-    # Get RA offset and calculate next PC
     if offsets.raFromCfa.isNone:
-      # No RA information available
       when defined(debug):
         try:
-          echo "No RA offset available, stopping"
+          echo " no RA offset available], stopping"
         except: discard
       break
 
+    let cfaOffset = offsets.cfaFromBase
     let raOffset = offsets.raFromCfa.get()
-    let raStackLoc = cfa + uint64(cast[int64](raOffset))
-
-    # Read the return address from stack (read_value equivalent)
-    let nextPc = readU64(raStackLoc)
 
     when defined(debug):
       try:
-        echo fmt"cfa=0x{cfa.toHex}, raStackLoc=0x{raStackLoc.toHex}, nextPc=0x{nextPc.toHex}"
+        echo fmt" base={baseRegName} cfa={cfaOffset} ra={raOffset}"
+      except: discard
+
+    # Use SFrame to unwind to next frame (using proper base register)
+    let cfa = baseRegVal + uint64(cast[int64](cfaOffset))
+    let raAddr = cfa + uint64(cast[int64](raOffset))
+
+    when defined(debug):
+      try:
+        echo fmt" cfa=0x{cfa.toHex} ra_addr=0x{raAddr.toHex}"
+      except: discard
+
+    # Basic sanity check on RA address (like C example)
+    # The RA should be within reasonable stack bounds
+    if raAddr < sp or raAddr >= sp + 1024'u64:
+      when defined(debug):
+        try:
+          echo fmt" invalid_ra(0x{raAddr.toHex} not in 0x{sp.toHex}-0x{(sp + 1024'u64).toHex})], stopping"
+        except: discard
+      break
+
+    # Read next PC from stack
+    let nextPc = readU64(raAddr)
+    let nextSp = cfa
+
+    # Get FP for next frame if available
+    let nextFp = if offsets.fpFromCfa.isSome:
+      let fpOffset = offsets.fpFromCfa.get()
+      let fpStackLoc = cfa + uint64(cast[int64](fpOffset))
+      readU64(fpStackLoc)
+    else:
+      # FP not saved, continue with current value
+      fp
+
+    when defined(debug):
+      try:
+        echo fmt" -> next_pc=0x{nextPc.toHex}]"
       except: discard
 
     # Validate the PC looks reasonable
@@ -164,21 +209,15 @@ proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, startPc, startSp, sta
         except: discard
       break
 
-    # Get FP for next frame
-    let nextFp = if offsets.fpFromCfa.isSome:
-      let fpOffset = offsets.fpFromCfa.get()
-      let fpStackLoc = cfa + uint64(cast[int64](fpOffset))
-      readU64(fpStackLoc)
-    else:
-      # FP not saved, continue with current value
-      fp
-
     # Update frame state for next iteration
     pc = nextPc
     sp = nextSp
     fp = nextFp
+    inc frameCount
 
-    frames.add(pc)
+    # Safety check to avoid infinite loops
+    if pc == 0 or pc < 0x400000'u64:
+      break
 
   when defined(debug):
     try:
@@ -195,25 +234,24 @@ proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe.}
   ## Returns a sequence of program counter (PC) values representing the call stack.
 
   {.cast(gcsafe).}:
-    let fp0 = cast[uint64](nframe_get_fp())
     let sp0 = cast[uint64](nframe_get_sp())
-    let ra0 = cast[uint64](nframe_get_ra())
+    let fp0 = cast[uint64](nframe_get_fp())
+    let pc0 = cast[uint64](nframe_get_pc())
 
     if gSframeSection.fdes.len == 0:
-      return @[ra0]
+      return @[pc0]
 
     when defined(debug):
       try:
-        echo fmt"captureStackTrace: initial fp=0x{fp0.toHex}, sp=0x{sp0.toHex}, ra=0x{ra0.toHex}"
-        echo fmt"SFrame section has {gSframeSection.fdes.len} FDEs, base=0x{gSframeSectionBase.toHex}"
-        # Check if our RA is in the deep function range
-        if ra0 >= 0x41c400'u64 and ra0 <= 0x41c800'u64:
-          echo fmt"RA is in deep function range!"
+        echo fmt"captureStackTrace: initial pc=0x{pc0.toHex}, sp=0x{sp0.toHex}, fp=0x{fp0.toHex}"
+        echo fmt"SFrame section has {gSframeSection.fdes.len} FDEs, base=0x{gSframeSectionBase.toHex}, text=0x{gTextSectionBase.toHex}"
+        # Check if our PC is in the deep function range
+        if pc0 >= 0x41c400'u64 and pc0 <= 0x41c800'u64:
+          echo fmt"PC is in deep function range!"
       except: discard
 
-    # Start with return address as first frame, then use current register state
-    # to find the next frames using SFrame information
-    result = walkStackWithSFrame(gSframeSection, gSframeSectionBase, ra0, sp0, fp0, readU64Ptr, maxFrames)
+    # Start with current PC, SP, and FP, then use SFrame information to unwind
+    result = walkStackWithSFrame(gSframeSection, gSframeSectionBase, gTextSectionBase, pc0, sp0, fp0, readU64Ptr, maxFrames)
 
 proc symbolizeStackTrace*(
     frames: openArray[uint64]; funcSymbols: openArray[ElfSymbol]
