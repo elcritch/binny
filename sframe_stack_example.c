@@ -31,6 +31,7 @@ typedef struct {
     size_t sframe_size;
     uint64_t sframe_vaddr;    /* Virtual address where sframe section is loaded */
     uint64_t text_vaddr;      /* Virtual address of .text section */
+    uint64_t text_size;      /* size of .text section */
 } sframe_info_t;
 
 /* Find and map the .sframe section from an ELF file */
@@ -93,6 +94,7 @@ load_sframe_section(const char *filename, sframe_info_t *info)
         }
         else if (strcmp(name, ".text") == 0) {
             info->text_vaddr = shdr_table[i].sh_addr;
+            info->text_size = shdr_table[i].sh_size;
             printf("Found .text section: vaddr=0x%lx\n", info->text_vaddr);
         }
     }
@@ -204,7 +206,7 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
         printf("Frame %d: PC=0x%lx SP=0x%lx", frame_count, pc, sp);
 
         /* Check if PC is in our text section */
-        if (pc >= sframe_info->text_vaddr && pc < (sframe_info->text_vaddr + 0x10000)) {
+        if (pc >= sframe_info->text_vaddr && pc < (sframe_info->text_vaddr + sframe_info->text_size)) {
             sframe_frame_row_entry fre;
             int32_t lookup_pc = (int32_t)(pc - sframe_info->sframe_vaddr);
             int err = sframe_find_fre(dctx, lookup_pc, &fre);
