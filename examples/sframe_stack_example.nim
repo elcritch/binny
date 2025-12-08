@@ -231,14 +231,14 @@ proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
   var currentPc: uint64
   {.emit: "asm volatile(\"leaq (%%rip), %0\" : \"=r\" (`currentPc`));".}
 
-  echo fmt"Starting from SP: 0x{rsp.toHex()}, PC: 0x{currentPc.toHex(6)}"
+  echo fmt"Starting from SP: 0x{rsp.toHex(10)}, PC: 0x{currentPc.toHex(6)}"
 
   # Start with current PC and use SFrame to properly unwind
   var pc = currentPc
   var sp = rsp
 
   while frameCount < maxFrames:
-    stdout.write fmt"Frame {frameCount}: PC=0x{pc.toHex(6)} SP=0x{sp.toHex()}"
+    stdout.write fmt"Frame {frameCount}: PC=0x{pc.toHex(6)} SP=0x{sp.toHex(10)}"
 
     # Check if PC is in our text section
     if pc >= sframeInfo.textVaddr and pc < (sframeInfo.textVaddr + sframeInfo.textSize):
@@ -246,7 +246,6 @@ proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
       # Cast to signed int to handle negative offsets (when PC < sframe_vaddr)
       let pcOffset = cast[int64](pc - sframeInfo.sframeVaddr)
       let lookupPc = int32(pcOffset)
-      echo "\nlookupPc: ", lookupPc
       var err: cint = c_sframe_find_fre(dctx, lookupPc, addr fre)
 
       if err == 0:
@@ -258,8 +257,6 @@ proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
           echo fmt" [Error getting cfaoffset: {err}]"
           break
         let raOffset = c_sframe_fre_get_ra_offset(dctx, addr fre, addr err)
-        echo "baseRegId: ", baseRegId, " SFRAME_BASE_REG_SP: ", SFRAME_BASE_REG_SP
-        echo fmt" [SP-based: cfa={cfaOffset} ra={raOffset}"
 
 
         if err != 0:
@@ -269,8 +266,6 @@ proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
         # Only handle SP-based unwinding
 
         if baseRegId == SFRAME_BASE_REG_SP:
-          echo "SFRAME_BASE_REG_SP"
-
           # Use SFrame to unwind to next frame
           let cfa = sp + uint64(cfaOffset)
           let raAddr = cast[ptr uint64](cfa + uint64(raOffset))
