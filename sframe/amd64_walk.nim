@@ -90,14 +90,13 @@ proc isValidCodePointer*(pc: uint64): bool =
   return true
 
 proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, textVaddr, textSize, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
-  ## Stack walker implementing SFrame algorithm similar to sframe_stack_example.c
-  ## This follows the algorithm from lines 179-274 of sframe_stack_example.c
+  ## Stack walker implementing SFrame algorithm matching sframe_stack_example.nim
+  ## This follows the algorithm from sframe_stack_example.nim:219-305
   var frames: seq[uint64] = @[]
 
-  # Current frame state - start with current PC, SP, and FP
+  # Current frame state - start with current PC and SP
   var pc = startPc
   var sp = startSp
-  var fp = startFp
   var frameCount = 0
 
   when defined(debug):
@@ -116,7 +115,7 @@ proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, textVaddr, textSize, 
         echo fmt"Frame {frameCount}: PC=0x{pc.toHex} SP=0x{sp.toHex}"
       except: discard
 
-    # Check if PC is in our text section (similar to lines 208-260 in C example)
+    # Check if PC is in our text section (matching sframe_stack_example.nim:244)
     if pc < textVaddr or pc >= (textVaddr + textSize):
       when defined(debug):
         try:
@@ -125,7 +124,7 @@ proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, textVaddr, textSize, 
       break
 
     # Find the FRE for this PC using our Nim library
-    # This replaces sframe_find_fre from the C example
+    # This replaces sframe_find_fre from the C example (sframe_stack_example.nim:245-249)
     let lookup = sec.pcToFre(pc, sectionBase)
     if not lookup.found:
       when defined(debug):
@@ -158,24 +157,25 @@ proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, textVaddr, textSize, 
         except: discard
       break
 
-    # Calculate CFA (Canonical Frame Address) based on the base register
-    var cfa: uint64
-    if offsets.cfaBase == sframeCfaBaseSp:
-      # SP-based: CFA = SP + cfa_offset (matching line 225 in C example)
-      cfa = sp + uint64(offsets.cfaFromBase)
-    elif offsets.cfaBase == sframeCfaBaseFp:
-      # FP-based: CFA = FP + cfa_offset
-      cfa = fp + uint64(offsets.cfaFromBase)
-    else:
+    # Only handle SP-based unwinding (matching sframe_stack_example.nim:268-287)
+    # The libsframe example skips FP-based frames because Nim doesn't maintain proper frame pointers
+    if offsets.cfaBase != sframeCfaBaseSp:
       when defined(debug):
         try:
-          echo fmt"  Unknown CFA base register"
+          echo fmt"  FP-based frame - skipping (Nim doesn't maintain proper frame pointers)"
         except: discard
       break
 
-    # Calculate return address location: CFA + ra_offset
-    # This matches line 226 in the C example
-    # Note: offsets are signed, so we need to handle them properly
+    # SP-based: CFA = SP + cfa_offset (matching sframe_stack_example.nim:270)
+    # Note: cfaFromBase is signed, but typically positive for SP-based unwinding
+    let cfaOffset = offsets.cfaFromBase
+    let cfa = if cfaOffset >= 0:
+                sp + uint64(cfaOffset)
+              else:
+                sp - uint64(-cfaOffset)
+
+    # Calculate return address location: CFA + ra_offset (sframe_stack_example.nim:271)
+    # Note: raOffset is signed and can be negative
     let raOffset = offsets.raFromCfa.get()
     let raAddr = if raOffset >= 0:
                    cfa + uint64(raOffset)
@@ -184,17 +184,17 @@ proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, textVaddr, textSize, 
 
     when defined(debug):
       try:
-        echo fmt"  CFA=0x{cfa.toHex}, RA addr=0x{raAddr.toHex}"
+        echo fmt"  cfaOffset={cfaOffset}, raOffset={raOffset}"
+        echo fmt"  SP=0x{sp.toHex} + {cfaOffset} = CFA=0x{cfa.toHex}"
+        echo fmt"  CFA=0x{cfa.toHex} + ({raOffset}) = RA addr=0x{raAddr.toHex}"
       except: discard
 
-    # Validate RA address is within reasonable stack bounds (lines 242-249 in C example)
-    # For FP-based unwinding, we need a wider range check
-    let stackCheckLower = if offsets.cfaBase == sframeCfaBaseFp: sp else: sp
-    let stackCheckUpper = if offsets.cfaBase == sframeCfaBaseFp: sp + 4096'u64 else: sp + 1024'u64
-    if raAddr <= stackCheckLower or raAddr >= stackCheckUpper:
+    # Validate RA address is within reasonable stack bounds (sframe_stack_example.nim:275)
+    # Note: raAddr can equal sp when the return address is stored at the current stack pointer
+    if raAddr < sp or raAddr >= sp + 1024'u64:
       when defined(debug):
         try:
-          echo fmt"  Invalid RA address (not in stack range 0x{stackCheckLower.toHex} - 0x{stackCheckUpper.toHex})"
+          echo fmt"  Invalid RA address (not in stack range 0x{sp.toHex} - 0x{(sp + 1024'u64).toHex})"
         except: discard
       break
 
@@ -204,7 +204,11 @@ proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, textVaddr, textSize, 
 
       when defined(debug):
         try:
-          echo fmt"  Next PC=0x{nextPc.toHex}"
+          echo fmt"  Read from raAddr=0x{raAddr.toHex}: nextPc=0x{nextPc.toHex}"
+          # Also dump nearby memory for debugging
+          if raAddr >= sp and raAddr < sp + 256:
+            let offset = raAddr - sp
+            echo fmt"  (raAddr is at SP+{offset})"
         except: discard
 
       # Validate the next PC
@@ -215,46 +219,9 @@ proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, textVaddr, textSize, 
           except: discard
         break
 
-      # Update frame state for next iteration
-      # For FP-based unwinding, read the previous FP from the stack
-      var nextFp = fp
-      if offsets.cfaBase == sframeCfaBaseFp:
-        # In standard calling conventions, the saved FP is typically at FP+0 or from the FP offset
-        if offsets.fpFromCfa.isSome:
-          let fpOffset = offsets.fpFromCfa.get()
-          let fpAddr = if fpOffset >= 0:
-                         cfa + uint64(fpOffset)
-                       else:
-                         cfa - uint64(-fpOffset)
-          try:
-            nextFp = readU64(fpAddr)
-            when defined(debug):
-              try:
-                echo fmt"  Next FP=0x{nextFp.toHex} (from CFA+{fpOffset}, addr=0x{fpAddr.toHex})"
-              except: discard
-          except:
-            when defined(debug):
-              try:
-                echo fmt"  Failed to read FP at 0x{fpAddr.toHex}, using current FP"
-              except: discard
-        else:
-          # Standard x86-64 convention: saved FP is at current FP
-          try:
-            nextFp = readU64(fp)
-            when defined(debug):
-              try:
-                echo fmt"  Next FP=0x{nextFp.toHex} (from *FP)"
-              except: discard
-          except:
-            when defined(debug):
-              try:
-                echo fmt"  Failed to read FP at 0x{fp.toHex}"
-              except: discard
-
-      # Update frame state (matching line 244 in C example)
+      # Update frame state (matching sframe_stack_example.nim:276-277)
       pc = nextPc
       sp = cfa
-      fp = nextFp
       frameCount += 1
 
     except:
@@ -274,14 +241,24 @@ proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, textVaddr, textSize, 
 
 # High-level stack tracing interface
 
-proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe.} =
+proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe, noinline.} =
   ## High-level function to capture a complete stack trace from the current location.
   ## Returns a sequence of program counter (PC) values representing the call stack.
 
   {.cast(gcsafe).}:
-    let sp0 = cast[uint64](nframe_get_sp())
-    let fp0 = cast[uint64](nframe_get_fp())
-    let pc0 = cast[uint64](nframe_get_pc())
+    # Capture SP, FP, and PC directly using inline assembly to avoid function call overhead
+    # This matches the approach in sframe_stack_example.nim:228-232
+    var sp0, fp0, pc0: uint64
+    when defined(amd64) or defined(x86_64):
+      {.emit: """
+      asm volatile("movq %%rsp, %0" : "=r" (`sp0`));
+      asm volatile("movq %%rbp, %0" : "=r" (`fp0`));
+      asm volatile("leaq (%%rip), %0" : "=r" (`pc0`));
+      """.}
+    else:
+      sp0 = cast[uint64](nframe_get_sp())
+      fp0 = cast[uint64](nframe_get_fp())
+      pc0 = cast[uint64](nframe_get_pc())
 
     if gSframeSection.fdes.len == 0:
       return @[pc0]
