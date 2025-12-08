@@ -192,7 +192,6 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
     /* Get current PC for demonstration */
     uint64_t current_pc;
     __asm__("leaq (%%rip), %0" : "=r" (current_pc));
-    demonstrate_stack_unwinding(dctx, current_pc, sframe_info);
 
     printf("\n=== Custom Stack ===");
     printf("Starting from current stack pointer: 0x%lx ==\n", rsp);

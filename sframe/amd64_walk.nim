@@ -89,16 +89,188 @@ proc isValidCodePointer*(pc: uint64): bool =
     return false
   return true
 
-proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, textVaddr, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
+proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, textVaddr, textSize, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
   ## Stack walker implementing SFrame algorithm similar to sframe_stack_example.c
+  ## This follows the algorithm from lines 179-274 of sframe_stack_example.c
   var frames: seq[uint64] = @[]
-  var frameCount = 0
 
   # Current frame state - start with current PC, SP, and FP
   var pc = startPc
   var sp = startSp
+  var fp = startFp
+  var frameCount = 0
 
-  ## Implement
+  when defined(debug):
+    try:
+      echo fmt"walkStackWithSFrame: Starting from PC=0x{pc.toHex}, SP=0x{sp.toHex}"
+      echo fmt"  sectionBase=0x{sectionBase.toHex}, textVaddr=0x{textVaddr.toHex}, textSize=0x{textSize.toHex}"
+    except: discard
+
+  # Walk the stack using SFrame information
+  while frameCount < maxFrames:
+    # Add current PC to frames
+    frames.add(pc)
+
+    when defined(debug):
+      try:
+        echo fmt"Frame {frameCount}: PC=0x{pc.toHex} SP=0x{sp.toHex}"
+      except: discard
+
+    # Check if PC is in our text section (similar to lines 208-260 in C example)
+    if pc < textVaddr or pc >= (textVaddr + textSize):
+      when defined(debug):
+        try:
+          echo fmt"  PC outside text section (0x{textVaddr.toHex} - 0x{(textVaddr + textSize).toHex})"
+        except: discard
+      break
+
+    # Find the FRE for this PC using our Nim library
+    # This replaces sframe_find_fre from the C example
+    let lookup = sec.pcToFre(pc, sectionBase)
+    if not lookup.found:
+      when defined(debug):
+        try:
+          echo fmt"  No FRE found for PC"
+        except: discard
+      break
+
+    # Extract offsets using our ABI-specific helper
+    let fdeIdx = lookup.fdeIdx
+    let freGlobalIdx = lookup.freGlobalIdx
+    let fre = sec.fres[freGlobalIdx]
+    let abi = SFrameAbiArch(sec.header.abiArch)
+
+    let offsets = freOffsetsForAbi(abi, sec.header, fre)
+
+    when defined(debug):
+      try:
+        echo fmt"  Found FRE: fdeIdx={fdeIdx}, freIdx={freGlobalIdx}, startAddr=0x{fre.startAddr.toHex}"
+        echo fmt"  CFA base: {offsets.cfaBase}, offset: {offsets.cfaFromBase}"
+        if offsets.raFromCfa.isSome:
+          echo fmt"  RA offset: {offsets.raFromCfa.get()}"
+      except: discard
+
+    # Check if we have RA offset
+    if offsets.raFromCfa.isNone:
+      when defined(debug):
+        try:
+          echo fmt"  No RA offset available"
+        except: discard
+      break
+
+    # Calculate CFA (Canonical Frame Address) based on the base register
+    var cfa: uint64
+    if offsets.cfaBase == sframeCfaBaseSp:
+      # SP-based: CFA = SP + cfa_offset (matching line 225 in C example)
+      cfa = sp + uint64(offsets.cfaFromBase)
+    elif offsets.cfaBase == sframeCfaBaseFp:
+      # FP-based: CFA = FP + cfa_offset
+      cfa = fp + uint64(offsets.cfaFromBase)
+    else:
+      when defined(debug):
+        try:
+          echo fmt"  Unknown CFA base register"
+        except: discard
+      break
+
+    # Calculate return address location: CFA + ra_offset
+    # This matches line 226 in the C example
+    # Note: offsets are signed, so we need to handle them properly
+    let raOffset = offsets.raFromCfa.get()
+    let raAddr = if raOffset >= 0:
+                   cfa + uint64(raOffset)
+                 else:
+                   cfa - uint64(-raOffset)
+
+    when defined(debug):
+      try:
+        echo fmt"  CFA=0x{cfa.toHex}, RA addr=0x{raAddr.toHex}"
+      except: discard
+
+    # Validate RA address is within reasonable stack bounds (lines 242-249 in C example)
+    # For FP-based unwinding, we need a wider range check
+    let stackCheckLower = if offsets.cfaBase == sframeCfaBaseFp: sp else: sp
+    let stackCheckUpper = if offsets.cfaBase == sframeCfaBaseFp: sp + 4096'u64 else: sp + 1024'u64
+    if raAddr <= stackCheckLower or raAddr >= stackCheckUpper:
+      when defined(debug):
+        try:
+          echo fmt"  Invalid RA address (not in stack range 0x{stackCheckLower.toHex} - 0x{stackCheckUpper.toHex})"
+        except: discard
+      break
+
+    # Read the return address from the stack
+    try:
+      let nextPc = readU64(raAddr)
+
+      when defined(debug):
+        try:
+          echo fmt"  Next PC=0x{nextPc.toHex}"
+        except: discard
+
+      # Validate the next PC
+      if nextPc == 0 or not isValidCodePointer(nextPc):
+        when defined(debug):
+          try:
+            echo fmt"  Invalid next PC"
+          except: discard
+        break
+
+      # Update frame state for next iteration
+      # For FP-based unwinding, read the previous FP from the stack
+      var nextFp = fp
+      if offsets.cfaBase == sframeCfaBaseFp:
+        # In standard calling conventions, the saved FP is typically at FP+0 or from the FP offset
+        if offsets.fpFromCfa.isSome:
+          let fpOffset = offsets.fpFromCfa.get()
+          let fpAddr = if fpOffset >= 0:
+                         cfa + uint64(fpOffset)
+                       else:
+                         cfa - uint64(-fpOffset)
+          try:
+            nextFp = readU64(fpAddr)
+            when defined(debug):
+              try:
+                echo fmt"  Next FP=0x{nextFp.toHex} (from CFA+{fpOffset}, addr=0x{fpAddr.toHex})"
+              except: discard
+          except:
+            when defined(debug):
+              try:
+                echo fmt"  Failed to read FP at 0x{fpAddr.toHex}, using current FP"
+              except: discard
+        else:
+          # Standard x86-64 convention: saved FP is at current FP
+          try:
+            nextFp = readU64(fp)
+            when defined(debug):
+              try:
+                echo fmt"  Next FP=0x{nextFp.toHex} (from *FP)"
+              except: discard
+          except:
+            when defined(debug):
+              try:
+                echo fmt"  Failed to read FP at 0x{fp.toHex}"
+              except: discard
+
+      # Update frame state (matching line 244 in C example)
+      pc = nextPc
+      sp = cfa
+      fp = nextFp
+      frameCount += 1
+
+    except:
+      # If we can't read memory, stop unwinding
+      when defined(debug):
+        try:
+          echo fmt"  Failed to read memory at 0x{raAddr.toHex}"
+        except: discard
+      break
+
+  when defined(debug):
+    try:
+      echo fmt"walkStackWithSFrame: Found {frames.len} frames"
+    except: discard
+
+  return frames
 
 # High-level stack tracing interface
 
@@ -124,7 +296,7 @@ proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe.}
       except: discard
 
     # Start with current PC, SP, and FP, then use SFrame information to unwind
-    result = walkStackWithSFrame(gSframeSection, gSframeSectionBase, gTextSectionBase, pc0, sp0, fp0, readU64Ptr, maxFrames)
+    result = walkStackWithSFrame(gSframeSection, gSframeSectionBase, gTextSectionBase, gTextSectionSize, pc0, sp0, fp0, readU64Ptr, maxFrames)
 
 proc symbolizeStackTrace*(
     frames: openArray[uint64]; funcSymbols: openArray[ElfSymbol]
