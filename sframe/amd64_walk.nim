@@ -82,8 +82,14 @@ proc scanStackForReturnAddresses*(startSp: uint64; currentPc: uint64; maxScan: i
       results.add((i * 8, val))
   result = results
 
-proc walkStackWithHybridApproach*(sec: SFrameSection; sectionBase, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
-  ## Hybrid stack walker that combines SFrame data with stack scanning for -fomit-frame-pointer
+proc walkStackAmd64*(sec: SFrameSection; sectionBase, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
+  ## AMD64 stack walker with fallback from FP to SP base for -fomit-frame-pointer scenarios.
+  ## This is the recommended walker for production use as it handles both normal and
+  ## -fomit-frame-pointer scenarios gracefully.
+  var pc = startPc
+  var sp = startSp
+  var fp = startFp
+
   var frames: seq[uint64] = @[startPc]
 
   # First, scan the stack to find potential return addresses
@@ -126,60 +132,6 @@ proc walkStackWithHybridApproach*(sec: SFrameSection; sectionBase, startPc, star
 
   result = frames
 
-proc walkStackAmd64WithFallback*(sec: SFrameSection; sectionBase, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
-  ## AMD64 stack walker with fallback from FP to SP base for -fomit-frame-pointer scenarios.
-  ## This is the recommended walker for production use as it handles both normal and
-  ## -fomit-frame-pointer scenarios gracefully.
-  var pc = startPc
-  var sp = startSp
-  var fp = startFp
-  var frames: seq[uint64] = @[]
-  for _ in 0 ..< maxFrames:
-    frames.add pc
-    let (found, _, _, freGlobalIdx) = sec.pcToFre(pc, sectionBase)
-    if not found:
-      # Fall back to hybrid approach for the rest
-      let hybridFrames = walkStackWithHybridApproach(sec, sectionBase, pc, sp, fp, readU64, maxFrames - frames.len)
-      for i in 1 ..< hybridFrames.len:  # Skip first frame as it's already in our frames
-        frames.add hybridFrames[i]
-      break
-
-    let fre = sec.fres[freGlobalIdx]
-    var off = freOffsetsForAbi(sframeAbiAmd64Little, sec.header, fre)
-
-    # First try the original CFA calculation
-    let originalCfaBase = off.cfaBase
-    var baseVal = if off.cfaBase == sframeCfaBaseSp: sp else: fp
-    var cfa = baseVal + uint64(cast[int64](off.cfaFromBase))
-    if off.raFromCfa.isNone(): break
-    let raAddr = cfa + uint64(cast[int64](off.raFromCfa.get()))
-    var nextPc = readU64(raAddr)
-
-    # If the result doesn't look like a valid code pointer and we used FP base,
-    # fall back to hybrid approach (common with -fomit-frame-pointer)
-    if not isValidCodePointer(nextPc) and originalCfaBase == sframeCfaBaseFp:
-      let hybridFrames = walkStackWithHybridApproach(sec, sectionBase, pc, sp, fp, readU64, maxFrames - frames.len)
-      for i in 1 ..< hybridFrames.len:  # Skip first frame as it's already in our frames
-        frames.add hybridFrames[i]
-      break
-
-    if nextPc == 0'u64 or not isValidCodePointer(nextPc):
-      # Continue with hybrid approach for remaining frames
-      let hybridFrames = walkStackWithHybridApproach(sec, sectionBase, pc, sp, fp, readU64, maxFrames - frames.len)
-      for i in 1 ..< hybridFrames.len:  # Skip first frame as it's already in our frames
-        frames.add hybridFrames[i]
-      break
-
-    var nextFp = fp
-    if off.fpFromCfa.isSome():
-      let fpAddr = cfa + uint64(cast[int64](off.fpFromCfa.get()))
-      nextFp = readU64(fpAddr)
-
-    pc = nextPc
-    sp = cfa
-    fp = nextFp
-  result = frames
-
 # High-level stack tracing interface
 
 proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe.} =
@@ -195,7 +147,7 @@ proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe.}
       return @[pc0]
 
     # Perform stack walking
-    result = walkStackAmd64WithFallback(gSframeSection, gSframeSectionBase, pc0, sp0, fp0, readU64Ptr, maxFrames)
+    result = walkStackAmd64(gSframeSection, gSframeSectionBase, pc0, sp0, fp0, readU64Ptr, maxFrames)
 
 proc symbolizeStackTrace*(
     frames: openArray[uint64]; funcSymbols: openArray[ElfSymbol]
