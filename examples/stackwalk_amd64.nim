@@ -16,8 +16,9 @@ var depthSink {.volatile.}: int
 
 template mkDeep(procName, nextName: untyped) =
   proc procName() {.noinline.} =
-    nextName()
     inc depthSink
+    nextName()
+    dec depthSink
 
 mkDeep(deep1, deep0)
 mkDeep(deep2, deep1)
