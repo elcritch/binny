@@ -19,13 +19,27 @@ template mkDeep(procName, nextName: untyped) =
     nextName()
     inc depthSink
 
-mkDeep(deep1, deep0)
-mkDeep(deep2, deep1)
-mkDeep(deep3, deep2)
-mkDeep(deep4, deep3)
-mkDeep(deep5, deep4)
-mkDeep(deep6, deep5)
-mkDeep(deep7, deep6)
+proc deep1() =
+  inc depthSink
+  deep0()
+  dec depthSink
+proc deep2() =
+  deep1()
+  inc depthSink
+proc deep3() =
+  deep2()
+proc deep4() =
+  deep3()
+proc deep5() {.noinline.} =
+  inc depthSink
+  deep4()
+  inc depthSink
+proc deep6() =
+  deep5()
+  inc depthSink
+proc deep7() {.noinline.} =
+  deep6()
+  inc depthSink
 
 #proc deep1() {.noinline.} = deep0()
 #proc deep2() {.noinline.} = deep1()

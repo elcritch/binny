@@ -44,7 +44,7 @@ proc getBacktrace*(): string {.noinline, gcsafe, raises: [], tags: [].} =
     let symbols = symbolizeStackTrace(frames, gFuncSymbols)
     for i, sym in symbols:
       if i < frames.len:
-        result.add(&"{sym} (at 0x{frames[i].toHex()})\n")
+        result.add(&"{sym} \n")
 
 proc unhandledExceptionOverride(e: ref Exception) {.nimcall, tags: [], raises: [].} =
   {.cast(gcsafe), cast(tags: []).}:
