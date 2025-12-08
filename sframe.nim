@@ -542,10 +542,6 @@ proc freOffsetsForAbi*(abi: SFrameAbiArch; hdr: SFrameHeader; fre: SFrameFRE): F
   result.cfaFromBase = fre.offsets[0]
   case abi
   of sframeAbiAmd64Little:
-    # If FRE claims FP base but there is no FP offset (neither per-FRE nor fixed in header),
-    # fall back to SP base to avoid stalling the walk on FP-less frames.
-    if result.cfaBase == sframeCfaBaseFp and fre.offsets.len < 2 and hdr.cfaFixedFpOffset == 0'i8:
-      result.cfaBase = sframeCfaBaseSp
     # RA fixed from header; FP in FRE if present
     result.raFromCfa = some(int32(hdr.cfaFixedRaOffset))
     # Prefer per-FRE FP offset when present; otherwise fall back to fixed header FP offset
@@ -554,6 +550,9 @@ proc freOffsetsForAbi*(abi: SFrameAbiArch; hdr: SFrameHeader; fre: SFrameFRE): F
     elif hdr.cfaFixedFpOffset != 0'i8:
       # Some toolchains encode a fixed FP-from-CFA offset in the header for amd64
       result.fpFromCfa = some(int32(hdr.cfaFixedFpOffset))
+    else:
+      # For AMD64, when no explicit FP offset is present, use -1 as sentinel (matching libsframe)
+      result.fpFromCfa = some(-1'i32)
   of sframeAbiAarch64Big, sframeAbiAarch64Little:
     # RA and FP tracked in FRE when present (N == 3)
     if fre.offsets.len >= 2:
