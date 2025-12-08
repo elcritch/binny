@@ -243,31 +243,30 @@ proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
       # Cast to signed int to handle negative offsets (when PC < sframe_vaddr)
       let pcOffset = cast[int64](pc - sframeInfo.sframeVaddr)
       let lookupPc = int32(pcOffset)
-      let err = c_sframe_find_fre(dctx, lookupPc, addr fre[0])
+      echo "\nlookupPc: ", lookupPc
+      var err: int = c_sframe_find_fre(dctx, lookupPc, addr fre[0])
 
       if err == 0:
-        var getErr: cint = 0
 
         # Extract unwinding information
-        let baseRegId = c_sframe_fre_get_base_reg_id(addr fre[0], addr getErr)
+        let baseRegId = c_sframe_fre_get_base_reg_id(addr fre[0], addr err)
+        echo "baseRegId: ", baseRegId
 
-        if getErr != 0:
+        if err != 0:
           stdout.write fmt" [Error getting base reg: {getErr}]"
           echo ""
           break
 
         # Only handle SP-based unwinding
         if baseRegId == SFRAME_BASE_REG_SP:
-          getErr = 0
-          let cfaOffset = c_sframe_fre_get_cfa_offset(dctx, addr fre[0], addr getErr)
-          if getErr != 0:
+          let cfaOffset = c_sframe_fre_get_cfa_offset(dctx, addr fre[0], addr err)
+          if err != 0:
             stdout.write fmt" [Error getting CFA: {getErr}]"
             echo ""
             break
 
-          getErr = 0
-          let raOffset = c_sframe_fre_get_ra_offset(dctx, addr fre[0], addr getErr)
-          if getErr != 0:
+          let raOffset = c_sframe_fre_get_ra_offset(dctx, addr fre[0], addr err)
+          if err != 0:
             stdout.write fmt" [Error getting RA: {getErr}]"
             echo ""
             break
@@ -294,7 +293,7 @@ proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
           echo ""
           break
       else:
-        stdout.write " [No SFrame]"
+        stdout.write " [No SFrame] ", err
         echo ""
         break
     else:

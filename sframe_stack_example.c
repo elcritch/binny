@@ -209,6 +209,7 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
         if (pc >= sframe_info->text_vaddr && pc < (sframe_info->text_vaddr + sframe_info->text_size)) {
             sframe_frame_row_entry fre;
             int32_t lookup_pc = (int32_t)(pc - sframe_info->sframe_vaddr);
+            printf(" [SFrame: lookupPC=%d\n", lookup_pc);
             int err = sframe_find_fre(dctx, lookup_pc, &fre);
 
             if (err == 0) {
@@ -218,6 +219,10 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
                 uint8_t base_reg_id = sframe_fre_get_base_reg_id(&fre, &err);
                 int32_t cfa_offset = sframe_fre_get_cfa_offset(dctx, &fre, &err);
                 int32_t ra_offset = sframe_fre_get_ra_offset(dctx, &fre, &err);
+                printf(" [SFrame: base_reg_id=%d\n", base_reg_id);
+                printf(" [SFrame: cfa_offset =%d\n", cfa_offset );
+                printf(" [SFrame: ra_offset  =%d\n", ra_offset  );
+                printf(" [SFrame: SFRAME_BASE_REG_SP  =%d\n", SFRAME_BASE_REG_SP    );
 
                 if (err == 0 && base_reg_id == SFRAME_BASE_REG_SP) {
                     printf(" base=SP cfa=%d ra=%d", cfa_offset, ra_offset);
@@ -227,19 +232,6 @@ print_sframe_stack_trace(sframe_decoder_ctx *dctx, sframe_info_t *sframe_info)
                     uint64_t *ra_addr = (uint64_t *)(cfa + ra_offset);
 
                     printf(" cfa=0x%lx ra_addr=0x%lx", cfa, (uint64_t)ra_addr);
-
-                    // /* Debug: examine stack memory to understand the layout */
-                    // printf(" stack_dump:");
-                    // for (int k = 0; k < 8; k++) {
-                    //     uint64_t *stack_addr = (uint64_t *)(sp + k * 8);
-                    //     uint64_t val = *stack_addr;
-                    //     if (val >= 0x400000 && val < 0x500000) {
-                    //         printf(" [%d:0x%lx=*0x%lx*]", k, (uint64_t)stack_addr, val);
-                    //     } else {
-                    //         printf(" [%d:0x%lx=0x%lx]", k, (uint64_t)stack_addr, val);
-                    //     }
-                    // }
-
                     if ((uint64_t)ra_addr > sp && (uint64_t)ra_addr < sp + 1024) {
                         pc = *ra_addr;
                         sp = cfa;
