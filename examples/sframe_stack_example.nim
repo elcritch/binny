@@ -65,8 +65,8 @@ proc c_sframe_errmsg(err: cint): cstring {.
 
 # Constants from sframe-api.h
 const
-  SFRAME_BASE_REG_SP = 0'u8
-  SFRAME_BASE_REG_FP = 1'u8
+  SFRAME_BASE_REG_FP = 0'u8
+  SFRAME_BASE_REG_SP = 1'u8
 
 # Global counter to make stack deeper
 var globalCounter = 0
@@ -244,30 +244,31 @@ proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
       let pcOffset = cast[int64](pc - sframeInfo.sframeVaddr)
       let lookupPc = int32(pcOffset)
       echo "\nlookupPc: ", lookupPc
-      var err: int = c_sframe_find_fre(dctx, lookupPc, addr fre[0])
+      var err: cint = c_sframe_find_fre(dctx, lookupPc, addr fre[0])
 
       if err == 0:
 
         # Extract unwinding information
         let baseRegId = c_sframe_fre_get_base_reg_id(addr fre[0], addr err)
-        echo "baseRegId: ", baseRegId
+        echo "baseRegId: ", baseRegId, " SFRAME_BASE_REG_SP: ", SFRAME_BASE_REG_SP
 
         if err != 0:
-          stdout.write fmt" [Error getting base reg: {getErr}]"
+          stdout.write fmt" [Error getting base reg: {err}]"
           echo ""
           break
 
         # Only handle SP-based unwinding
         if baseRegId == SFRAME_BASE_REG_SP:
+          echo "SFRAME_BASE_REG_SP"
           let cfaOffset = c_sframe_fre_get_cfa_offset(dctx, addr fre[0], addr err)
           if err != 0:
-            stdout.write fmt" [Error getting CFA: {getErr}]"
+            stdout.write fmt" [Error getting CFA: {err}]"
             echo ""
             break
 
           let raOffset = c_sframe_fre_get_ra_offset(dctx, addr fre[0], addr err)
           if err != 0:
-            stdout.write fmt" [Error getting RA: {getErr}]"
+            stdout.write fmt" [Error getting RA: {err}]"
             echo ""
             break
 
