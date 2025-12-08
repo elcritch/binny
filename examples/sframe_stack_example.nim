@@ -4,15 +4,11 @@
 ## 1. Build and link against libsframe
 ## 2. Read SFrame data from an executable
 ## 3. Use sframe_find_fre() to get stack unwinding information
-## 4. Perform actual stack tracing of its own execution
+## 4. Perform SP-based stack tracing
 ##
-## NOTE: This is a port of the C version (sframe_stack_example.c).
-## The Nim compiler currently generates FP-based SFrame metadata even with
-## `-fomit-frame-pointer`, but doesn't actually maintain a proper frame pointer
-## chain in RBP. This means stack unwinding may not work as expected for
-## Nim-compiled code. The example demonstrates how to handle both SP-based
-## and FP-based unwinding, though FP-based unwinding will fail when RBP
-## is not properly maintained as a frame pointer.
+## NOTE: This is a simplified port of the C version (sframe_stack_example.c).
+## It only demonstrates SP-based unwinding, as the Nim compiler currently
+## generates FP-based SFrame metadata but doesn't maintain proper frame pointers.
 
 import std/[strformat, strutils, os]
 
@@ -185,46 +181,6 @@ proc loadSframeSection(filename: string): SframeInfo =
     if result.sframeData.len == 0:
       raise newException(ValueError, "No .sframe section found")
 
-# Perform stack unwinding using SFrame information
-proc demonstrateStackUnwinding(dctx: pointer, pc: uint64, sframeInfo: SframeInfo) =
-  var fre: array[1024, byte]  # Allocate space for FRE
-  var err: cint = 0
-
-  echo ""
-  echo "=== Stack Unwinding Demo ==="
-  echo fmt"Looking up PC: 0x{pc.toHex}"
-
-  # PCs in libsframe are relative to the .sframe section load address
-  let lookupPc = int32(pc - sframeInfo.sframeVaddr)
-
-  # Find the Frame Row Entry for this PC
-  err = c_sframe_find_fre(dctx, lookupPc, addr fre[0])
-  if err != 0:
-    echo fmt"No FRE found for PC 0x{pc.toHex} (relative: 0x{lookupPc.toHex})"
-    echo fmt"Error: {c_sframe_errmsg(err)}"
-    return
-
-  echo fmt"Found FRE for PC 0x{pc.toHex}"
-
-  # Extract unwinding information
-  var getErr: cint = 0
-  let baseRegId = c_sframe_fre_get_base_reg_id(addr fre[0], addr getErr)
-  if getErr == 0:
-    let regName = if baseRegId == SFRAME_BASE_REG_SP: "SP" else: "FP"
-    echo fmt"Base register: {regName}"
-
-  let cfaOffset = c_sframe_fre_get_cfa_offset(dctx, addr fre[0], addr getErr)
-  if getErr == 0:
-    echo fmt"CFA offset: {cfaOffset}"
-
-  let raOffset = c_sframe_fre_get_ra_offset(dctx, addr fre[0], addr getErr)
-  if getErr == 0:
-    echo fmt"RA offset: {raOffset}"
-
-  let fpOffset = c_sframe_fre_get_fp_offset(dctx, addr fre[0], addr getErr)
-  if getErr == 0:
-    echo fmt"FP offset: {fpOffset}"
-
 # Get the current executable path on FreeBSD
 proc getExecutablePath(): string =
   when defined(freebsd):
@@ -256,41 +212,27 @@ proc getExecutablePath(): string =
   # Fallback to getAppFilename()
   return getAppFilename()
 
-# SFrame-based stack unwinding without frame pointers
+# SFrame-based stack unwinding (SP-based only)
 proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
   var rsp: uint64
   var frameCount = 0
   const maxFrames = 10
 
   echo ""
-  echo "=== Stack Trace ==="
+  echo "=== SP-Based Stack Trace ==="
 
   # Get the current stack pointer
   {.emit: "asm volatile(\"movq %%rsp, %0\" : \"=r\" (`rsp`));".}
-
-  echo fmt"Stack Unwinding: Starting from current stack pointer: 0x{rsp.toHex}"
 
   # Get current PC for demonstration
   var currentPc: uint64
   {.emit: "asm volatile(\"leaq (%%rip), %0\" : \"=r\" (`currentPc`));".}
 
-  # Get current frame pointer
-  var initialRbp: uint64
-  {.emit: "asm volatile(\"movq %%rbp, %0\" : \"=r\" (`initialRbp`));".}
-
-  echo ""
-  echo "=== Custom Stack ==="
-  echo fmt"Starting RSP: 0x{rsp.toHex}, RBP: 0x{initialRbp.toHex} =="
-
-  # Check if RBP looks valid (should be near SP)
-  if initialRbp < rsp or initialRbp > rsp + 1024 * 64:
-    echo fmt"Warning: RBP (0x{initialRbp.toHex}) doesn't look valid relative to SP (0x{rsp.toHex})"
-    echo "RBP might not be set up correctly - frame pointer optimizations may be in effect"
+  echo fmt"Starting from SP: 0x{rsp.toHex}, PC: 0x{currentPc.toHex}"
 
   # Start with current PC and use SFrame to properly unwind
   var pc = currentPc
   var sp = rsp
-  var rbp = initialRbp
 
   while frameCount < maxFrames:
     stdout.write fmt"Frame {frameCount}: PC=0x{pc.toHex} SP=0x{sp.toHex}"
@@ -308,56 +250,47 @@ proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
 
         # Extract unwinding information
         let baseRegId = c_sframe_fre_get_base_reg_id(addr fre[0], addr getErr)
-        let cfaOffset = c_sframe_fre_get_cfa_offset(dctx, addr fre[0], addr getErr)
-        let raOffset = c_sframe_fre_get_ra_offset(dctx, addr fre[0], addr getErr)
 
-        if getErr == 0:
-          if baseRegId == SFRAME_BASE_REG_SP:
-            stdout.write fmt" base=SP cfa={cfaOffset} ra={raOffset}"
+        if getErr != 0:
+          stdout.write fmt" [Error getting base reg: {getErr}]"
+          echo ""
+          break
 
-            # Use SFrame to unwind to next frame
-            let cfa = sp + uint64(cfaOffset)
-            let raAddr = cast[ptr uint64](cfa + uint64(raOffset))
+        # Only handle SP-based unwinding
+        if baseRegId == SFRAME_BASE_REG_SP:
+          getErr = 0
+          let cfaOffset = c_sframe_fre_get_cfa_offset(dctx, addr fre[0], addr getErr)
+          if getErr != 0:
+            stdout.write fmt" [Error getting CFA: {getErr}]"
+            echo ""
+            break
 
-            stdout.write fmt" cfa=0x{cfa.toHex} ra_addr=0x{cast[uint64](raAddr).toHex}"
+          getErr = 0
+          let raOffset = c_sframe_fre_get_ra_offset(dctx, addr fre[0], addr getErr)
+          if getErr != 0:
+            stdout.write fmt" [Error getting RA: {getErr}]"
+            echo ""
+            break
 
-            if cast[uint64](raAddr) > sp and cast[uint64](raAddr) < sp + 1024:
-              pc = raAddr[]
-              sp = cfa
-              stdout.write fmt" -> next_pc=0x{pc.toHex}]"
-            else:
-              stdout.write fmt" invalid_ra(0x{cast[uint64](raAddr).toHex} not in 0x{sp.toHex}-0x{(sp + 1024).toHex})]"
-              echo ""
-              break
+          stdout.write fmt" [SP-based: cfa={cfaOffset} ra={raOffset}"
+
+          # Use SFrame to unwind to next frame
+          let cfa = sp + uint64(cfaOffset)
+          let raAddr = cast[ptr uint64](cfa + uint64(raOffset))
+
+          stdout.write fmt" -> cfa=0x{cfa.toHex}"
+
+          if cast[uint64](raAddr) > sp and cast[uint64](raAddr) < sp + 1024:
+            pc = raAddr[]
+            sp = cfa
+            stdout.write fmt" next_pc=0x{pc.toHex}]"
           else:
-            # FP-based unwinding
-            # In standard x86-64 frame layout with -fno-omit-frame-pointer:
-            # [rbp+0] = saved rbp
-            # [rbp+8] = return address
-            # So CFA is rbp + 16
-            stdout.write fmt" base=FP"
-
-            # Standard x86-64 frame pointer layout
-            # The saved RBP is at [rbp], and return address is at [rbp+8]
-            let savedRbpAddr = cast[ptr uint64](rbp)
-            let returnAddr = cast[ptr uint64](rbp + 8)
-
-            stdout.write fmt" rbp=0x{rbp.toHex} saved_rbp_addr=0x{cast[uint64](savedRbpAddr).toHex}"
-
-            # Validate pointers are in a reasonable range
-            if cast[uint64](savedRbpAddr) >= sp and cast[uint64](savedRbpAddr) < sp + 1024 * 64:
-              let nextRbp = savedRbpAddr[]
-              pc = returnAddr[]
-              sp = rbp + 16  # CFA for standard frame
-              rbp = nextRbp
-
-              stdout.write fmt" -> next_rbp=0x{rbp.toHex} next_pc=0x{pc.toHex}]"
-            else:
-              stdout.write fmt" invalid_rbp_addr]"
-              echo ""
-              break
+            stdout.write fmt" invalid_ra]"
+            echo ""
+            break
         else:
-          stdout.write " error getting offsets]"
+          # Skip FP-based frames - Nim doesn't maintain proper frame pointers
+          stdout.write " [FP-based - skipping]"
           echo ""
           break
       else:
