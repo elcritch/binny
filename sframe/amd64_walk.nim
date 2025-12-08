@@ -212,9 +212,9 @@ proc symbolizeStackTrace*(
     var found = false
     # Find the closest function symbol
     for sym in funcSymbols:
-      if pc >= sym.value and pc < (sym.value + sym.size):
+      if pc > sym.value and pc <= (sym.value + sym.size):
         let offset = pc - sym.value
-        symbols[i] = fmt"{sym.name} + 0x{offset.toHex(4)} (at 0x{(frames[i]-1).toHex(6)} )"
+        symbols[i] = fmt"{sym.name} + 0x{offset.toHex(4)} (at 0x{(frames[i]).toHex(6)} )"
         echo "PC: ", pc.toHex(8)
         found = true
         break
