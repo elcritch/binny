@@ -353,7 +353,8 @@ proc testSFrameComparison() =
   if matchCount == totalTests and totalTests > 0:
     echo "🎉 All tests passed! Our implementation matches libsframe."
   elif totalTests > 0:
-    echo "❌ Some tests failed. There may be differences in implementation."
+    echo "❌ Some tests failed."
+    quit(2)
   else:
     echo "ERROR!!! No tests could be run. Check that SFrame data is present."
     quit(2)
