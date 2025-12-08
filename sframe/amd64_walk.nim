@@ -215,7 +215,6 @@ proc symbolizeStackTrace*(
       if pc >= sym.value and pc < (sym.value + sym.size):
         let offset = pc - sym.value
         symbols[i] = fmt"{sym.name} + 0x{offset.toHex(4)} (PC 0x{(frames[i]-offset).toHex(8)} ) (at 0x{(frames[i]-1).toHex(8)} )" # the -1 seems to give us a more accurate addr2line lookup (?)
-        echo "PC: ", pc.toHex(8)
         found = true
         break
 

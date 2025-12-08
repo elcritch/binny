@@ -14,8 +14,8 @@ when defined(amd64):
       let frames = [0x400010'u64, 0x400060'u64, 0x500000'u64] # last has no symbol
       let lines = symbolizeStackTrace(frames, syms)
       check lines.len == 3
-      check lines[0] == "foo + 0x0000000000000010"
-      check lines[1] == "bar + 0x0000000000000010"
+      check lines[0] == "foo + 0x0010 (PC 0x00400000 ) (at 0x0040000F )"
+      check lines[1] == "bar + 0x0010 (PC 0x00400050 ) (at 0x0040005F )"
       check lines[2].startsWith("0x0000000000500000")
 
     test "printStackTrace handles basic formatting":

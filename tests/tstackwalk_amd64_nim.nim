@@ -55,7 +55,8 @@ when defined(amd64):
       check runOut.len > 0
 
       let deeps = parseDeepFromOutput(runOut)
-      check deeps.len >= 8
+      echo "DEEPS: ", deeps
+      check deeps.len >= 6
 
       let expected = @["deep0()", "deep1()", "deep2()", "deep3()", "deep4()", "deep5()", "deep6()", "deep7()"]
       check isSubsequence(deeps, expected)

@@ -19,6 +19,8 @@ template mkDeep(procName, nextName: untyped) =
     nextName()
     inc depthSink
 
+{.push noinline.}
+
 proc deep1() =
   inc depthSink
   deep0()
@@ -28,8 +30,10 @@ proc deep2() =
   dec depthSink
 proc deep3() =
   deep2()
+  dec depthSink
 proc deep4() =
   deep3()
+  dec depthSink
 proc deep5() {.noinline.} =
   inc depthSink
   deep4()
@@ -41,14 +45,6 @@ proc deep7() {.noinline.} =
   inc depthSink
   deep6()
   dec depthSink
-
-#proc deep1() {.noinline.} = deep0()
-#proc deep2() {.noinline.} = deep1()
-#proc deep3() {.noinline.} = deep2()
-#proc deep4() {.noinline.} = deep3()
-#proc deep5() {.noinline.} = deep4()
-#proc deep6() {.noinline.} = deep5()
-#proc deep7() {.noinline.} = deep6()
 
 when isMainModule:
   # This will print our override-derived backtrace
