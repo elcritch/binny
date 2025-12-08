@@ -8,6 +8,8 @@ export mem_sim
 var
   gSframeSection*: SFrameSection
   gSframeSectionBase*: uint64
+  gTextSectionBase*: uint64
+  gTextSectionSize*: uint64
   gFuncSymbols*: seq[ElfSymbol]
   gInitialized*: bool = false
 
@@ -24,6 +26,11 @@ proc initStackframes*() =
     if sframeData.len > 0:
       gSframeSection = decodeSection(sframeData)
       gSframeSectionBase = sframeAddr
+
+    # Load text section
+    let (textData, textAddr) = elf.getTextSection()
+    gTextSectionBase = textAddr
+    gTextSectionSize = uint64(textData.len)
 
     # Load symbols
     gFuncSymbols = elf.getDemangledFunctionSymbols()
@@ -55,95 +62,218 @@ when defined(gcc) or true:
 #endif
     return sp;
   }
+  static inline void* nframe_get_pc(void) {
+    return __builtin_extract_return_addr(__builtin_return_address(0));
+  }
   """.}
-  proc nframe_get_ra(): pointer {.importc.}
+  proc nframe_get_fp(): pointer {.importc.}
   proc nframe_get_sp(): pointer {.importc.}
+  proc nframe_get_pc(): pointer {.importc.}
 
 proc readU64Ptr*(address: uint64): uint64 =
   ## Direct memory read helper for stack walking
   cast[ptr uint64](cast[pointer](address))[]
 
-# Hybrid stack walking for -fomit-frame-pointer scenarios
+# Follow SFrame Algorithm for efficient stack walking (for -fomit-frame-pointer scenarios)
 
 proc isValidCodePointer*(pc: uint64): bool =
   ## Basic heuristic: code addresses should be in a reasonable range
   ## and not look like stack addresses
-  pc >= 0x400000'u64 and pc < 0x800000'u64
+  if pc == 0:
+    return false
+  # Typical code sections are in lower memory ranges
+  # Stack addresses are typically high (like 0x7f... or 0x8...)
+  if pc >= 0x700000000000'u64:  # Likely stack or heap
+    return false
+  if pc < 0x400000'u64:  # Too low
+    return false
+  return true
 
-proc scanStackForReturnAddresses*(startSp: uint64; currentPc: uint64; maxScan: int = 2048): seq[tuple[offset: int, pc: uint64]] =
-  ## Scan stack memory looking for potential return addresses
-  var results: seq[tuple[offset: int, pc: uint64]] = @[]
-  for i in 0 ..< maxScan div 8:
-    let address = startSp + uint64(i * 8)
-    let val = readU64Ptr(address)
-    # Look for valid code pointers that are different from current PC
-    if isValidCodePointer(val) and val != currentPc:
-      results.add((i * 8, val))
-  result = results
+proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, textVaddr, textSize, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
+  ## Stack walker implementing SFrame algorithm matching sframe_stack_example.nim
+  ## This follows the algorithm from sframe_stack_example.nim:219-305
+  var frames: seq[uint64] = @[]
 
-proc walkStackAmd64*(sec: SFrameSection; sectionBase, startPc, startSp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
-  ## AMD64 stack walker with fallback from FP to SP base for -fomit-frame-pointer scenarios.
-  ## This is the recommended walker for production use as it handles both normal and
-  ## -fomit-frame-pointer scenarios gracefully.
+  # Current frame state - start with current PC and SP
   var pc = startPc
+  var sp = startSp
+  var frameCount = 0
 
-  var frames: seq[uint64] = @[startPc]
+  when defined(debug):
+    try:
+      echo fmt"walkStackWithSFrame: Starting from PC=0x{pc.toHex}, SP=0x{sp.toHex}"
+      echo fmt"  sectionBase=0x{sectionBase.toHex}, textVaddr=0x{textVaddr.toHex}, textSize=0x{textSize.toHex}"
+    except: discard
 
-  # First, scan the stack to find potential return addresses
-  let stackRAs = scanStackForReturnAddresses(startSp, startPc, 1024)
+  # Walk the stack using SFrame information
+  while frameCount < maxFrames:
+    # Add current PC to frames
+    frames.add(pc)
 
-  if stackRAs.len == 0:
-    return frames
+    when defined(debug):
+      try:
+        echo fmt"Frame {frameCount}: PC=0x{pc.toHex} SP=0x{sp.toHex}"
+      except: discard
 
-  # Find potential return addresses by scanning stack memory
+    # Check if PC is in our text section (matching sframe_stack_example.nim:244)
+    if pc < textVaddr or pc >= (textVaddr + textSize):
+      when defined(debug):
+        try:
+          echo fmt"  PC outside text section (0x{textVaddr.toHex} - 0x{(textVaddr + textSize).toHex})"
+        except: discard
+      break
 
-  # For each potential return address, validate using SFrame data
-  var currentSp = startSp
-  for (offset, candidatePc) in stackRAs:
-    if frames.len >= maxFrames: break
+    # Find the FRE for this PC using our Nim library
+    # This replaces sframe_find_fre from the C example (sframe_stack_example.nim:245-249)
+    let lookup = sec.pcToFre(pc, sectionBase)
+    if not lookup.found:
+      when defined(debug):
+        try:
+          echo fmt"  No FRE found for PC"
+        except: discard
+      break
 
-    # Check if this PC has SFrame data
-    let (found, fdeIdx, freLocalIdx, freGlobalIdx) = sec.pcToFre(candidatePc, sectionBase)
-    if found:
-      # Validate that this is a reasonable next frame
-      let funcStart = sec.funcStartAddress(fdeIdx, sectionBase)
-      let fde = sec.fdes[fdeIdx]
+    # Extract offsets using our ABI-specific helper
+    let fdeIdx = lookup.fdeIdx
+    let freGlobalIdx = lookup.freGlobalIdx
+    let fre = sec.fres[freGlobalIdx]
+    let abi = SFrameAbiArch(sec.header.abiArch)
 
-      # If this looks like a valid caller, add it and search for deeper frames
-      if candidatePc > funcStart and candidatePc < (funcStart + uint64(fde.funcSize)):
-        frames.add candidatePc
-        currentSp = startSp + uint64(offset + 8)  # Move past this return address
+    let offsets = freOffsetsForAbi(abi, sec.header, fre)
 
-        # Recursively search for more frames from this new stack position
-        let remainingRAs = scanStackForReturnAddresses(currentSp, candidatePc, 1024)
-        for (nextOffset, nextPc) in remainingRAs:
-          if frames.len >= maxFrames: break
-          let (nextFound, nextFdeIdx, _, _) = sec.pcToFre(nextPc, sectionBase)
-          if nextFound:
-            let nextFuncStart = sec.funcStartAddress(nextFdeIdx, sectionBase)
-            let nextFde = sec.fdes[nextFdeIdx]
-            if nextPc > nextFuncStart and nextPc < (nextFuncStart + uint64(nextFde.funcSize)):
-              frames.add nextPc
-              currentSp += uint64(nextOffset + 8)
+    when defined(debug):
+      try:
+        echo fmt"  Found FRE: fdeIdx={fdeIdx}, freIdx={freGlobalIdx}, startAddr=0x{fre.startAddr.toHex}"
+        echo fmt"  CFA base: {offsets.cfaBase}, offset: {offsets.cfaFromBase}"
+        if offsets.raFromCfa.isSome:
+          echo fmt"  RA offset: {offsets.raFromCfa.get()}"
+      except: discard
+
+    # Check if we have RA offset
+    if offsets.raFromCfa.isNone:
+      when defined(debug):
+        try:
+          echo fmt"  No RA offset available"
+        except: discard
+      break
+
+    # Only handle SP-based unwinding (matching sframe_stack_example.nim:268-287)
+    # The libsframe example skips FP-based frames because Nim doesn't maintain proper frame pointers
+    if offsets.cfaBase != sframeCfaBaseSp:
+      when defined(debug):
+        try:
+          echo fmt"  FP-based frame - skipping (Nim doesn't maintain proper frame pointers)"
+        except: discard
+      break
+
+    # SP-based: CFA = SP + cfa_offset (matching sframe_stack_example.nim:270)
+    # Note: cfaFromBase is signed, but typically positive for SP-based unwinding
+    let cfaOffset = offsets.cfaFromBase
+    let cfa = if cfaOffset >= 0:
+                sp + uint64(cfaOffset)
+              else:
+                sp - uint64(-cfaOffset)
+
+    # Calculate return address location: CFA + ra_offset (sframe_stack_example.nim:271)
+    # Note: raOffset is signed and can be negative
+    let raOffset = offsets.raFromCfa.get()
+    let raAddr = if raOffset >= 0:
+                   cfa + uint64(raOffset)
+                 else:
+                   cfa - uint64(-raOffset)
+
+    when defined(debug):
+      try:
+        echo fmt"  cfaOffset={cfaOffset}, raOffset={raOffset}"
+        echo fmt"  SP=0x{sp.toHex} + {cfaOffset} = CFA=0x{cfa.toHex}"
+        echo fmt"  CFA=0x{cfa.toHex} + ({raOffset}) = RA addr=0x{raAddr.toHex}"
+      except: discard
+
+    # Validate RA address is within reasonable stack bounds (sframe_stack_example.nim:275)
+    # Note: raAddr can equal sp when the return address is stored at the current stack pointer
+    if raAddr < sp or raAddr >= sp + 1024'u64:
+      when defined(debug):
+        try:
+          echo fmt"  Invalid RA address (not in stack range 0x{sp.toHex} - 0x{(sp + 1024'u64).toHex})"
+        except: discard
+      break
+
+    # Read the return address from the stack
+    try:
+      let nextPc = readU64(raAddr)
+
+      when defined(debug):
+        try:
+          echo fmt"  Read from raAddr=0x{raAddr.toHex}: nextPc=0x{nextPc.toHex}"
+          # Also dump nearby memory for debugging
+          if raAddr >= sp and raAddr < sp + 256:
+            let offset = raAddr - sp
+            echo fmt"  (raAddr is at SP+{offset})"
+        except: discard
+
+      # Validate the next PC
+      if nextPc == 0 or not isValidCodePointer(nextPc):
+        when defined(debug):
+          try:
+            echo fmt"  Invalid next PC"
+          except: discard
         break
 
-  result = frames
+      # Update frame state (matching sframe_stack_example.nim:276-277)
+      pc = nextPc
+      sp = cfa
+      frameCount += 1
+
+    except:
+      # If we can't read memory, stop unwinding
+      when defined(debug):
+        try:
+          echo fmt"  Failed to read memory at 0x{raAddr.toHex}"
+        except: discard
+      break
+
+  when defined(debug):
+    try:
+      echo fmt"walkStackWithSFrame: Found {frames.len} frames"
+    except: discard
+
+  return frames
 
 # High-level stack tracing interface
 
-proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe.} =
+proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe, noinline.} =
   ## High-level function to capture a complete stack trace from the current location.
   ## Returns a sequence of program counter (PC) values representing the call stack.
 
   {.cast(gcsafe).}:
-    let sp0 = cast[uint64](nframe_get_sp())
-    let pc0 = cast[uint64](nframe_get_ra())
+    # Capture SP, FP, and PC directly using inline assembly to avoid function call overhead
+    # This matches the approach in sframe_stack_example.nim:228-232
+    var sp0, fp0, pc0: uint64
+    when defined(amd64) or defined(x86_64):
+      {.emit: """
+      asm volatile("movq %%rsp, %0" : "=r" (`sp0`));
+      asm volatile("movq %%rbp, %0" : "=r" (`fp0`));
+      asm volatile("leaq (%%rip), %0" : "=r" (`pc0`));
+      """.}
+    else:
+      sp0 = cast[uint64](nframe_get_sp())
+      fp0 = cast[uint64](nframe_get_fp())
+      pc0 = cast[uint64](nframe_get_pc())
 
     if gSframeSection.fdes.len == 0:
       return @[pc0]
 
-    # Perform stack walking
-    result = walkStackAmd64(gSframeSection, gSframeSectionBase, pc0, sp0, readU64Ptr, maxFrames)
+    when defined(debug):
+      try:
+        echo fmt"captureStackTrace: initial pc=0x{pc0.toHex}, sp=0x{sp0.toHex}, fp=0x{fp0.toHex}"
+        echo fmt"SFrame section has {gSframeSection.fdes.len} FDEs, base=0x{gSframeSectionBase.toHex}, text=0x{gTextSectionBase.toHex}"
+        # Check if our PC is in the deep function range
+        if pc0 >= 0x41c400'u64 and pc0 <= 0x41c800'u64:
+          echo fmt"PC is in deep function range!"
+      except: discard
+
+    # Start with current PC, SP, and FP, then use SFrame information to unwind
+    result = walkStackWithSFrame(gSframeSection, gSframeSectionBase, gTextSectionBase, gTextSectionSize, pc0, sp0, fp0, readU64Ptr, maxFrames)
 
 proc symbolizeStackTrace*(
     frames: openArray[uint64]; funcSymbols: openArray[ElfSymbol]
@@ -162,7 +292,7 @@ proc symbolizeStackTrace*(
     for sym in funcSymbols:
       if pc >= sym.value and pc < (sym.value + sym.size):
         let offset = pc - sym.value
-        symbols[i] = fmt"{sym.name} + 0x{offset.toHex(4)} (PC 0x{(frames[i]-offset).toHex(8)} ) (at 0x{(frames[i]-1).toHex(8)} )" # the -1 seems to give us a more accurate addr2line lookup (?)
+        symbols[i] = fmt"{sym.name} + 0x{offset.toHex}"
         found = true
         break
 

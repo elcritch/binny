@@ -10,9 +10,15 @@ proc getProgramCountersOverride*(
     maxLength: cint
 ): seq[cuintptr_t] {.nimcall, gcsafe, raises: [], tags: [], noinline.} =
   {.cast(gcsafe).}:
-    let frames = captureStackTrace(maxLength)
-    var resultFrames = newSeqOfCap[cuintptr_t](frames.len()-8)
-    for i in 0..<frames.len():
+    let frames = captureStackTrace(maxLength + 20)  # Get extra frames to account for skipped ones
+    var resultFrames = newSeqOfCap[cuintptr_t](frames.len())
+    # Skip the first several frames which are in the stacktrace infrastructure
+    # We need to skip: getProgramCountersOverride, captureStackTrace, walkStackWithSFrame,
+    # and several more frames in the Nim stacktrace system to get back to the original caller
+    let skipFrames = 8  # Increase skip count to get back to original calling context
+    for i in skipFrames..<frames.len():
+      if resultFrames.len >= maxLength:
+        break
       resultFrames.add cast[cuintptr_t](frames[i])
     return resultFrames
 
@@ -44,7 +50,7 @@ proc getBacktrace*(): string {.noinline, gcsafe, raises: [], tags: [].} =
     let symbols = symbolizeStackTrace(frames, gFuncSymbols)
     for i, sym in symbols:
       if i < frames.len:
-        result.add(&"{sym} \n")
+        result.add(&"{sym} (at 0x{(frames[i]-1).toHex()})\n")
 
 proc unhandledExceptionOverride(e: ref Exception) {.nimcall, tags: [], raises: [].} =
   {.cast(gcsafe), cast(tags: []).}:

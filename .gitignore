@@ -16,3 +16,4 @@ deps/
 .nimcache
 *.sframe
 .claude
+*core

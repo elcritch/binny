@@ -12,9 +12,9 @@ proc buildExample(exeOut: string): bool =
   # Compile the example with its per-file .nims settings and a fixed output.
   let testBinDir = splitFile(getAppFilename()).dir
   let rootDir = parentDir(testBinDir)
-  let src = rootDir / "examples/stackwalk_amd64_nim.nim"
+  let src = rootDir / "examples/stackwalk_amd64_override.nim"
   let outPath = exeOut
-  let cmd = fmt"nim c --nimcache:{rootDir}/.nimcache -o:{outPath} {src}"
+  let cmd = fmt"nim c --opt:none -d:noinlining -o:{outPath} {src}"
   let (code, outp) = runCmd(cmd)
   if code != 0:
     echo "Compile failed:\n", outp
@@ -29,7 +29,7 @@ proc parseDeepFromOutput(output: string): seq[string] =
   ## Extract lines like "stackwalk_amd64_nim::deepN() + 0x..." and return the function names
   for line in output.splitLines():
     let trimmed = line.strip()
-    if "stackwalk_amd64_nim::deep" in trimmed:
+    if "stackwalk_amd64_override::deep" in trimmed:
       let namePart = trimmed.split(" + ")[0]
       if namePart.endsWith(")"):
         let parts = namePart.split("::")
@@ -47,7 +47,7 @@ when defined(amd64):
     test "Printed backtrace contains deep0..deep7 in order":
       let testBinDir = splitFile(getAppFilename()).dir
       let rootDir = parentDir(testBinDir)
-      let exePath = rootDir / "examples/stackwalk_amd64_nim_test"
+      let exePath = rootDir / "examples/stackwalk_amd64_override_test"
       check buildExample(exePath)
 
       let (code, runOut) = runExample(exePath)
@@ -55,8 +55,7 @@ when defined(amd64):
       check runOut.len > 0
 
       let deeps = parseDeepFromOutput(runOut)
-      echo "DEEPS: ", deeps
-      check deeps.len >= 6
+      check deeps.len >= 8
 
       let expected = @["deep0()", "deep1()", "deep2()", "deep3()", "deep4()", "deep5()", "deep6()", "deep7()"]
       check isSubsequence(deeps, expected)

@@ -5,46 +5,28 @@ import sframe/amd64_walk
 
 var lastFrames: seq[uint64] = @[]
 
-proc nframe_entry_build*() =
+proc deep0() {.noinline.} =
   # Capture stack trace with verbose output for demonstration
   lastFrames = captureStackTrace(maxFrames = 16)
+  let frames = lastFrames
+  let symbols = symbolizeStackTrace(frames)
+  printStackTrace(frames, symbols)
 
-# Force functions to not be inlined and add some computation to prevent optimization
-proc deep0() {.noinline.} =
-  var x = 0
-  for i in 0 ..< 10: x += i
-  if x > 0: nframe_entry_build()
+var depthSink {.volatile.}: int
 
-proc deep1() {.noinline.} =
-  var x = 0
-  for i in 0 ..< 10: x += i
-  if x > 0: deep0()
+template mkDeep(procName, nextName: untyped) =
+  proc procName() {.noinline.} =
+    inc depthSink
+    nextName()
+    dec depthSink
 
-proc deep2() {.noinline.} =
-  deep1()
-
-proc deep3() {.noinline.} =
-  var x = 0
-  for i in 0 ..< 10: x += i
-  if x > 0: deep2()
-
-proc deep4() {.noinline.} =
-  var x = 0
-  for i in 0 ..< 10: x += i
-  if x > 0: deep3()
-
-proc deep5() {.noinline.} =
-  deep4()
-
-proc deep6() {.noinline.} =
-  var x = 0
-  for i in 0 ..< 10: x += i
-  if x > 0: deep5()
-
-proc deep7() {.noinline.} =
-  var x = 0
-  for i in 0 ..< 10: x += i
-  if x > 0: deep6()
+mkDeep(deep1, deep0)
+mkDeep(deep2, deep1)
+mkDeep(deep3, deep2)
+mkDeep(deep4, deep3)
+mkDeep(deep5, deep4)
+mkDeep(deep6, deep5)
+mkDeep(deep7, deep6)
 
 
 when isMainModule:
