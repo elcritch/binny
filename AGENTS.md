@@ -27,6 +27,8 @@
   - `nim c -r tests/tfile.nim`
   - `nim c -r tests/twalk_amd64.nim`
 - Keep tests deterministic and fast; prefer minimal fixtures under `tests/`.
+- Use the GNU/GCC tools for addr2line, objdump, etc
+  - On FreeBSD they're found like: /usr/local/bin/x86_64-unknown-freebsd15.0-addr2line
 
 ## Commit & Pull Request Guidelines
 - Commit messages: clear, present tense. Prefer Conventional Commits:
