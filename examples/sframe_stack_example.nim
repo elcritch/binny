@@ -172,11 +172,11 @@ proc loadSframeSection(filename: string): SframeInfo =
         copyMem(addr result.sframeData[0], sectionData, int(shdr.sh_size))
         result.sframeSize = csize_t(shdr.sh_size)
         result.sframeVaddr = shdr.sh_addr
-        echo fmt"Found .sframe section: size={result.sframeSize}, vaddr=0x{result.sframeVaddr.toHex}"
+        echo fmt"Found .sframe section: size={result.sframeSize}, vaddr=0x{result.sframeVaddr.toHex(6)}"
       elif name == ".text":
         result.textVaddr = shdr.sh_addr
         result.textSize = shdr.sh_size
-        echo fmt"Found .text section: vaddr=0x{result.textVaddr.toHex}, size=0x{result.textSize.toHex}"
+        echo fmt"Found .text section: vaddr=0x{result.textVaddr.toHex(6)}, size=0x{result.textSize.toHex(6)}"
 
     if result.sframeData.len == 0:
       raise newException(ValueError, "No .sframe section found")
@@ -228,14 +228,14 @@ proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
   var currentPc: uint64
   {.emit: "asm volatile(\"leaq (%%rip), %0\" : \"=r\" (`currentPc`));".}
 
-  echo fmt"Starting from SP: 0x{rsp.toHex}, PC: 0x{currentPc.toHex}"
+  echo fmt"Starting from SP: 0x{rsp.toHex()}, PC: 0x{currentPc.toHex(6)}"
 
   # Start with current PC and use SFrame to properly unwind
   var pc = currentPc
   var sp = rsp
 
   while frameCount < maxFrames:
-    stdout.write fmt"Frame {frameCount}: PC=0x{pc.toHex} SP=0x{sp.toHex}"
+    stdout.write fmt"Frame {frameCount}: PC=0x{pc.toHex(6)} SP=0x{sp.toHex()}"
 
     # Check if PC is in our text section
     if pc >= sframeInfo.textVaddr and pc < (sframeInfo.textVaddr + sframeInfo.textSize):
@@ -278,12 +278,12 @@ proc printSframeStackTrace(dctx: pointer, sframeInfo: SframeInfo) =
           let cfa = sp + uint64(cfaOffset)
           let raAddr = cast[ptr uint64](cfa + uint64(raOffset))
 
-          stdout.write fmt" -> cfa=0x{cfa.toHex}"
+          stdout.write fmt" -> cfa=0x{cfa.toHex(6)}"
 
           if cast[uint64](raAddr) > sp and cast[uint64](raAddr) < sp + 1024:
             pc = raAddr[]
             sp = cfa
-            stdout.write fmt" next_pc=0x{pc.toHex}]"
+            stdout.write fmt" next_pc=0x{pc.toHex(6)}]"
           else:
             stdout.write fmt" invalid_ra]"
             echo ""
