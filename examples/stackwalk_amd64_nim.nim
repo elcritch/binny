@@ -34,14 +34,14 @@ proc deep3() =
 proc deep4() =
   deep3()
   dec depthSink
-proc deep5() {.noinline.} =
+proc deep5() =
   inc depthSink
   deep4()
   dec depthSink
 proc deep6() =
   deep5()
   dec depthSink
-proc deep7() {.noinline.} =
+proc deep7() =
   inc depthSink
   deep6()
   dec depthSink
