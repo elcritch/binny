@@ -4,8 +4,8 @@
 ## libsframe, then compares the results of key functions.
 
 import std/[strformat, strutils, options, os]
-import sframe
-import sframe/elfparser
+import binny/sframe
+import binny/elfparser
 
 # POSIX system calls for mmap
 when defined(linux) or defined(freebsd):
