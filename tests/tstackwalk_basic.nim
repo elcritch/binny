@@ -1,7 +1,7 @@
 import std/[unittest, strformat, strutils]
-import sframe
-import sframe/stackwalk
-import sframe/elfparser
+import binny/sframe
+import binny/elfparser
+import binny/sframe/stackwalk
 
 when defined(amd64):
   suite "AMD64 walker helpers":

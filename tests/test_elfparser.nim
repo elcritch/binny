@@ -1,6 +1,6 @@
 import std/unittest
-import sframe/elfparser
-import sframe/demangler # For getDemangledFunctionSymbols
+import binny/elfparser
+import binny/sframe/demangler # For getDemangledFunctionSymbols
 
 suite "ELF Parser Tests":
 

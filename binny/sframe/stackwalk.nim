@@ -1,6 +1,6 @@
 import std/[options, os, strutils, strformat]
+import ../elfparser
 import ./mem_sim
-import ./elfparser
 import ./symbolize
 export mem_sim, symbolize
 

@@ -1,7 +1,8 @@
 import std/[strutils, os, strformat]
+
+import ../elfparser
 import ./types
 import ./decoder
-import ./elfparser
 
 export types
 

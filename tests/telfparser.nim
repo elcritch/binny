@@ -1,6 +1,6 @@
 import std/[os, strformat, unittest, strutils, osproc, parseopt, cmdline]
-import sframe/elfparser
-import sframe
+import binny/elfparser
+import binny/sframe
 
 proc testElfParser*(exePath: string = "") =
   echo "Testing ELF Parser"

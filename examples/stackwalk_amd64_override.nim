@@ -1,6 +1,6 @@
-import sframe/stacktrace_override
-import system/stacktraces
 import std/[strformat, strutils]
+import system/stacktraces
+import binny/sframe/stacktrace_override
 
 proc deep0() {.noinline.} =
   # Print stacktrace using Nim's built-in API (overridden to use SFrame)
