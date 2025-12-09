@@ -1,6 +1,6 @@
 import std/[unittest, strformat, strutils]
 import sframe
-import sframe/amd64_walk
+import sframe/stackwalk
 import sframe/elfparser
 
 when defined(amd64):
