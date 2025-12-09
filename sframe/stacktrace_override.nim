@@ -1,6 +1,6 @@
 import std/[os, osproc, strutils, strformat, options]
-import sframe
-import sframe/amd64_walk
+
+import ./stackwalk
 
 # Optional Nim stacktraces module import for registration symbols
 when defined(nimStackTraceOverride) and defined(nimHasStacktracesModule):
