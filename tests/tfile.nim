@@ -1,5 +1,5 @@
 import std/[unittest, options]
-import sframe
+import binny/sframe
 
 suite "SFrame minimal":
   test "Preamble struct size is 4 bytes":
