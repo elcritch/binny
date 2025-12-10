@@ -14,7 +14,6 @@ var
   gTextSectionBase*: uint64
   gTextSectionSize*: uint64
   gFuncSymbols*: seq[ElfSymbol]
-  gLineTable*: DwarfLineTable
   gInitialized*: bool = false
 
 proc initStackframes*() =
@@ -38,7 +37,6 @@ proc initStackframes*() =
 
     # Load symbols
     gFuncSymbols = elf.getDemangledFunctionSymbols()
-    gLineTable = elf.parseDwarfLineTable()
   except CatchableError as e:
     # In case of error, we can't do much. The stack trace will be less informative.
     echo "NFrame: Error during initialization: ", e.msg
