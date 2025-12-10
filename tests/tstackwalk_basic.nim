@@ -13,7 +13,7 @@ when defined(amd64):
         ElfSymbol(name: "bar", value: 0x400050'u64, size: 0x30'u64),
       ]
       let frames = [0x400010'u64, 0x400060'u64, 0x500000'u64] # last has no symbol
-      let lines = symbolizeStackTraceImpl(frames, syms, DwarfLineTable())
+      let lines = symbolizeStackTraceImpl(frames, syms)
       check lines.len == 3
       check lines[0] == "foo + 0x0000000000000010"
       check lines[1] == "bar + 0x0000000000000010"

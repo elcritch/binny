@@ -47,7 +47,7 @@ proc initStackframes*() =
 initStackframes()
 
 proc symbolizeStackTraceImpl*(
-  frames: openArray[uint64]; funcSymbols: openArray[ElfSymbol], lineInfo: DwarfLineTable
+  frames: openArray[uint64]; funcSymbols: openArray[ElfSymbol]
 ): seq[string] {.raises: [], gcsafe.} =
   ## Symbolize a stack trace using ELF parser for function symbols and addr2line for source locations.
   ## Uses ELF parser as primary method with addr2line fallback for enhanced source information.
@@ -70,16 +70,16 @@ proc symbolizeStackTraceImpl*(
 
     if not found:
       symbols[i] = fmt"0x{pc.toHex} (no symbol)"
-    else:
-      let (file, line) = lineInfo.findLineInfo(symbol)
-      echo "SYMBOL: ", symbol.toHex(8), " ", file, ":", line
-      #symbols[i] = fmt"{file}:{line}"
+    #else:
+    #  let (file, line) = lineInfo.findLineInfo(symbol)
+    #  echo "SYMBOL: ", symbol.toHex(8), " ", file, ":", line
+    #  #symbols[i] = fmt"{file}:{line}"
 
   echo "\n"
   return symbols
 
 proc symbolizeStackTrace*(frames: openArray[uint64]): seq[string] =
-  symbolizeStackTraceImpl(frames, gFuncSymbols, gLineTable)
+  symbolizeStackTraceImpl(frames, gFuncSymbols)
 
 proc printStackTrace*(frames: openArray[uint64]; symbols: openArray[string] = @[]) =
   ## Print a formatted stack trace with optional symbols
