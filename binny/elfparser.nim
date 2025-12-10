@@ -1,7 +1,7 @@
 import std/[strformat, tables, algorithm]
 
+import ./demangler
 import ./utils
-import sframe/demangler
 
 # ELF constants and structures based on System V ABI
 const
