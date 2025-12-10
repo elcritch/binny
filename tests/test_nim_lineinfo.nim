@@ -7,9 +7,11 @@ suite "elf line info":
     # Handle both running from project root and tests directory
     let exe = "./tests/simple_test_program"
     if not fileExists(exe):
-      discard execCmd("nim c -r --debugger:native -f ./tests/simple_test_program")
+      discard execCmd("nim c --debugger:native -f tests/simple_test_program.nim")
+    echo "CWD: ", getCurrentDir()
+    echo "EXE: ", exe
 
-    let elf = parseElf(exe)
+    let elf = parseElf(exe.absolutePath())
     let dwarfLineInfo = elf.parseDwarfLineTable()
 
     # Test with specific addresses we know are from our Nim code
