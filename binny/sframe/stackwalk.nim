@@ -1,8 +1,9 @@
 import std/[options, os, strutils, strformat]
 import ../elfparser
-import ./mem_sim
+import ./types
 import ./symbolize
-export mem_sim, symbolize
+import ./mem_sim
+export types, mem_sim, symbolize
 
 type U64Reader* = proc (address: uint64): uint64 {.gcsafe, raises: [], tags: [].}
 
@@ -49,7 +50,12 @@ proc isValidCodePointer*(pc: uint64): bool =
     return false
   return true
 
-proc walkStackWithSFrame*(sec: SFrameSection; sectionBase, textVaddr, textSize, startPc, startSp, startFp: uint64; readU64: U64Reader; maxFrames: int = 16): seq[uint64] {.raises: [], tags: [].} =
+proc walkStackWithSFrame*(
+    sec: SFrameSection;
+    sectionBase, textVaddr, textSize, startPc, startSp, startFp: uint64;
+    readU64: U64Reader;
+    maxFrames: int = 16
+): seq[uint64] {.raises: [], tags: [].} =
   ## Stack walker implementing SFrame algorithm matching sframe_stack_example.nim
   ## This follows the algorithm from sframe_stack_example.nim:219-305
   var frames: seq[uint64] = @[]
