@@ -1,7 +1,5 @@
 import std/[strformat, tables, algorithm]
-
 import ./demangler
-import ./utils
 
 # ELF constants and structures based on System V ABI
 const
@@ -131,6 +129,19 @@ const
   DW_LNE_define_file = 3'u8
   DW_LNE_set_discriminator = 4'u8
   DW_LNE_HP_source_file_correlation = 0x80'u8
+
+proc getU16LE(data: openArray[byte]; offset: int): uint16 =
+  uint16(data[offset]) or (uint16(data[offset + 1]) shl 8)
+
+proc getU32LE(data: openArray[byte]; offset: int): uint32 =
+  uint32(data[offset]) or (uint32(data[offset + 1]) shl 8) or
+  (uint32(data[offset + 2]) shl 16) or (uint32(data[offset + 3]) shl 24)
+
+proc getU64LE(data: openArray[byte]; offset: int): uint64 =
+  uint64(data[offset]) or (uint64(data[offset + 1]) shl 8) or
+  (uint64(data[offset + 2]) shl 16) or (uint64(data[offset + 3]) shl 24) or
+  (uint64(data[offset + 4]) shl 32) or (uint64(data[offset + 5]) shl 40) or
+  (uint64(data[offset + 6]) shl 48) or (uint64(data[offset + 7]) shl 56)
 
 proc readString(data: openArray[byte]; offset: int): string =
   var i = offset
