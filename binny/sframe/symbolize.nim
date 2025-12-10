@@ -13,6 +13,7 @@ var
   gTextSectionBase*: uint64
   gTextSectionSize*: uint64
   gFuncSymbols*: seq[ElfSymbol]
+  gLineTable*: DwarfLineTable
   gInitialized*: bool = false
 
 proc initStackframes*() =
@@ -36,6 +37,7 @@ proc initStackframes*() =
 
     # Load symbols
     gFuncSymbols = elf.getDemangledFunctionSymbols()
+    gLineTable = elf.parseDwarfLineTable()
   except CatchableError as e:
     # In case of error, we can't do much. The stack trace will be less informative.
     echo "NFrame: Error during initialization: ", e.msg
@@ -45,8 +47,8 @@ proc initStackframes*() =
 ## Load stack frame data!!
 initStackframes()
 
-proc symbolizeStackTrace*(
-    frames: openArray[uint64]; funcSymbols: openArray[ElfSymbol]
+proc symbolizeStackTraceImpl*(
+  frames: openArray[uint64]; funcSymbols: openArray[ElfSymbol], lineInfo: DwarfLineTable
 ): seq[string] {.raises: [], gcsafe.} =
   ## Symbolize a stack trace using ELF parser for function symbols and addr2line for source locations.
   ## Uses ELF parser as primary method with addr2line fallback for enhanced source information.
@@ -71,7 +73,7 @@ proc symbolizeStackTrace*(
   return symbols
 
 proc symbolizeStackTrace*(frames: openArray[uint64]): seq[string] =
-  symbolizeStackTrace(frames, gFuncSymbols)
+  symbolizeStackTraceImpl(frames, gFuncSymbols, gLineTable)
 
 proc printStackTrace*(frames: openArray[uint64]; symbols: openArray[string] = @[]) =
   ## Print a formatted stack trace with optional symbols

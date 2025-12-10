@@ -35,7 +35,7 @@ proc getDebuggingInfo*(programCounters: seq[cuintptr_t], maxLength: cint): seq[S
     if maxLength > 0 and frames.len > maxLength:
       frames.setLen(maxLength)
 
-    let symbols = symbolizeStackTrace(frames, gFuncSymbols)
+    let symbols = symbolizeStackTrace(frames)
 
     var resultEntries: seq[StackTraceEntry] = @[]
     for sym in symbols:
@@ -47,7 +47,7 @@ proc getDebuggingInfo*(programCounters: seq[cuintptr_t], maxLength: cint): seq[S
 proc getBacktrace*(): string {.noinline, gcsafe, raises: [], tags: [].} =
   {.cast(gcsafe), cast(tags: []).}:
     let frames = captureStackTrace()
-    let symbols = symbolizeStackTrace(frames, gFuncSymbols)
+    let symbols = symbolizeStackTrace(frames)
     for i, sym in symbols:
       if i < frames.len:
         result.add(&"{sym} (at 0x{(frames[i]-1).toHex()})\n")
