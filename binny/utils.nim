@@ -82,3 +82,31 @@ proc getU64LE*(data: openArray[byte]; offset: int): uint64 =
   (uint64(data[offset + 4]) shl 32) or (uint64(data[offset + 5]) shl 40) or
   (uint64(data[offset + 6]) shl 48) or (uint64(data[offset + 7]) shl 56)
 
+# LEB128 decoding (used in DWARF)
+proc readULeb128*(data: openArray[byte]; offset: var int): uint64 =
+  result = 0
+  var shift = 0
+  while offset < data.len:
+    let b = data[offset]
+    inc offset
+    result = result or (uint64(b and 0x7F) shl shift)
+    if (b and 0x80) == 0:
+      break
+    shift += 7
+
+proc readSLeb128*(data: openArray[byte]; offset: var int): int64 =
+  result = 0
+  var shift = 0
+  var b: byte
+  while offset < data.len:
+    b = data[offset]
+    inc offset
+    result = result or (int64(b and 0x7F) shl shift)
+    shift += 7
+    if (b and 0x80) == 0:
+      break
+
+  # Sign extend if needed
+  if shift < 64 and (b and 0x40) != 0:
+    result = result or (not 0'i64 shl shift)
+

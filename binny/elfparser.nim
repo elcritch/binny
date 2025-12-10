@@ -325,34 +325,6 @@ proc getDemangledFunctionSymbols*(elf: ElfFile): seq[ElfSymbol] =
     demangledSym.name = demangle(sym.name)
     result.add(demangledSym)
 
-# LEB128 decoding (used in DWARF)
-proc readULeb128(data: openArray[byte]; offset: var int): uint64 =
-  result = 0
-  var shift = 0
-  while offset < data.len:
-    let b = data[offset]
-    inc offset
-    result = result or (uint64(b and 0x7F) shl shift)
-    if (b and 0x80) == 0:
-      break
-    shift += 7
-
-proc readSLeb128(data: openArray[byte]; offset: var int): int64 =
-  result = 0
-  var shift = 0
-  var b: byte
-  while offset < data.len:
-    b = data[offset]
-    inc offset
-    result = result or (int64(b and 0x7F) shl shift)
-    shift += 7
-    if (b and 0x80) == 0:
-      break
-
-  # Sign extend if needed
-  if shift < 64 and (b and 0x40) != 0:
-    result = result or (not 0'i64 shl shift)
-
 proc parseDwarfLineTable*(elf: ElfFile): DwarfLineTable =
   ## Parse the DWARF .debug_line section to extract line number information
   ## Parses all compilation units and merges their line entries
