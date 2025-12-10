@@ -7,7 +7,7 @@ suite "elf line info":
     # Handle both running from project root and tests directory
     let exe = "./tests/simple_test_program"
     if not fileExists(exe):
-      discard execCmd("nim c --debugger:native " & exe)
+      discard execCmd("nim c -f --debugger:native " & exe)
     echo "EXE: ", exe
 
     let elf = parseElf(exe.absolutePath())
@@ -47,7 +47,7 @@ suite "elf line info":
     # Handle both running from project root and tests directory
     let exe = "./tests/simple_test_program_opts"
     if not fileExists(exe):
-      discard execCmd("nim c --debugger:native " & exe)
+      discard execCmd("nim c -f " & exe)
     echo "EXE: ", exe
 
     let elf = parseElf(exe.absolutePath())
