@@ -1,7 +1,7 @@
 import std/[strformat]
 import std/options
 
-import ./utils
+import ../utils
 export utils
 
 # Minimal SFrame scaffolding based on docs/sframe-spec.md
