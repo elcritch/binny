@@ -42,6 +42,8 @@ suite "elf line info":
       #of "fibonacci": check line == 3
       #of "factorial": check line == 10
       #of "main": check line == 17
+      
+      #TODO: fixme!!!
       check line > 0 and line < 1000
 
   test "parse simple test program with opts":
@@ -82,5 +84,6 @@ suite "elf line info":
       # With optimization flags, we get generated C files
       check "simple_test_program" in file
       # Line numbers are from the generated C file, so we just check they're reasonable
+      #TODO: fixme!!!
       check line > 0 and line < 1000
 
