@@ -56,8 +56,8 @@ proc testDwarfLineInfo*(exePath: string = "") =
       elif i == 10:
         echo "  ... (showing first 10)"
         #break
-      if "0041FB60" in fmt"{entry.address.toHex:>16}":
-        echo fmt"  0x{entry.address.toHex:>16} -> file {entry.file:>3}, line {entry.line:>5}"
+      #if "0041FB60" in fmt"{entry.address.toHex:>16}":
+      #  echo fmt"  0x{entry.address.toHex:>16} -> file {entry.file:>3}, line {entry.line:>5}"
     echo ""
 
     # Test addr2line-like functionality
@@ -69,10 +69,15 @@ proc testDwarfLineInfo*(exePath: string = "") =
     if funcSyms.len > 0:
       for i in 0 ..< funcSyms.len:
         let sym = funcSyms[i]
-        if "_ZN19" notin sym.name: continue
         try:
-          let (file, line) =  dwarfLineInfo.findLineInfo(sym.value)
-          echo fmt"  {sym.name:<30} @ 0x{sym.value.toHex:>16} -> {file}:{line}"
+          if i < 10:
+            let (file, line) =  dwarfLineInfo.findLineInfo(sym.value)
+            echo fmt"  {sym.name:<30} @ 0x{sym.value.toHex:>16} -> {file}:{line}"
+          elif "_ZN19" notin sym.name:
+            let (file, line) =  dwarfLineInfo.findLineInfo(sym.value)
+            echo fmt"  {sym.name:<30} @ 0x{sym.value.toHex:>16} -> {file}:{line}"
+          else:
+            discard
         except CatchableError as e:
           echo fmt"  {sym.name:<30} @ 0x{sym.value.toHex:>16} -> Error: {e.msg}"
     else:
@@ -154,7 +159,7 @@ proc compareWithAddr2line*(exePath: string = "") =
     echo fmt"Error in comparison: {e.msg}"
 
 when isMainModule:
-  var exePath = ""
+  var exePath = "tests/simple_test_program"
 
   # Simple argument parsing
   let params = commandLineParams()
