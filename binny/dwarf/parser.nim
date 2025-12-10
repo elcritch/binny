@@ -1,5 +1,11 @@
-import std/algorithm
+## DWARF Parser - High-level API for parsing DWARF debug information
+##
+## This module provides high-level functions for parsing DWARF sections
+## from ELF files, using the state machine implementation from line.nim.
+
+import std/[algorithm, options]
 import ./dwarftypes
+import ./line
 import ../utils
 import ../elfparser
 
@@ -39,15 +45,181 @@ proc readDwarfForm(data: openArray[byte]; offset: var int; form: uint8; lineStrS
     # Unknown form, try to skip
     result = ""
 
+proc parseLineHeader(data: openArray[byte];
+                     offset: var int;
+                     addressSize: uint8;
+                     lineStrData: seq[byte]): tuple[header: DwarfLineHeader,
+                                                     directories: seq[string],
+                                                     files: seq[tuple[name: string, dirIndex: uint32]],
+                                                     programStart: int,
+                                                     programEnd: int] =
+  ## Parse a DWARF line number program header
+  ## Returns header, directories, files, and program bounds
+  var header: DwarfLineHeader
+
+  # Read total length (can be 32 or 64 bit)
+  let initialLength = getU32LE(data, offset)
+  offset += 4
+
+  var offsetSize = 4
+  if initialLength == 0xffffffff'u32:
+    # 64-bit DWARF format
+    header.totalLength = getU64LE(data, offset)
+    offset += 8
+    offsetSize = 8
+  else:
+    header.totalLength = initialLength
+
+  if header.totalLength == 0:
+    raise newException(ValueError, "Invalid header length")
+
+  let endOffset = offset + int(header.totalLength)
+
+  # Version
+  header.version = getU16LE(data, offset)
+  offset += 2
+
+  if header.version < 2 or header.version > 5:
+    raise newException(ValueError, "Unsupported DWARF version: " & $header.version)
+
+  # Handle DWARF 5 address/segment size
+  var actualAddressSize = addressSize
+  if header.version >= 5:
+    actualAddressSize = data[offset]
+    inc offset
+    let segmentSize = data[offset]
+    inc offset
+    if segmentSize != 0:
+      raise newException(ValueError, "Segment selectors not supported")
+
+  # Prologue length
+  if offsetSize == 8:
+    header.prologueLength = getU64LE(data, offset)
+    offset += 8
+  else:
+    header.prologueLength = uint64(getU32LE(data, offset))
+    offset += 4
+
+  let headerEnd = offset + int(header.prologueLength)
+
+  # Instruction lengths
+  header.minInstructionLength = data[offset]
+  inc offset
+
+  if header.version >= 4:
+    header.maxOpsPerInsn = data[offset]
+    inc offset
+  else:
+    header.maxOpsPerInsn = 1
+
+  header.defaultIsStmt = data[offset]
+  inc offset
+
+  header.lineBase = cast[int8](data[offset])
+  inc offset
+
+  header.lineRange = data[offset]
+  inc offset
+
+  header.opcodeBase = data[offset]
+  inc offset
+
+  # Standard opcode lengths
+  header.standardOpcodeLengths = newSeq[uint8](header.opcodeBase)
+  header.standardOpcodeLengths[0] = 1
+  for i in 1 ..< int(header.opcodeBase):
+    header.standardOpcodeLengths[i] = data[offset]
+    inc offset
+
+  # Read directory and file tables
+  var directories: seq[string] = @[]
+  var files: seq[tuple[name: string, dirIndex: uint32]] = @[]
+
+  if header.version < 5:
+    # DWARF 2-4 format
+    while offset < headerEnd and data[offset] != 0:
+      let dirName = readString(data, offset)
+      directories.add(dirName)
+      offset += dirName.len + 1
+    if offset < headerEnd:
+      inc offset  # Skip null terminator
+
+    # Read file table
+    while offset < headerEnd and data[offset] != 0:
+      let fileName = readString(data, offset)
+      offset += fileName.len + 1
+      let dirIdx = uint32(readULeb128(data, offset))
+      discard readULeb128(data, offset)  # mod time
+      discard readULeb128(data, offset)  # file size
+      files.add((name: fileName, dirIndex: dirIdx))
+  else:
+    # DWARF 5 format
+    # Read directory entry format description
+    let dirFormatCount = data[offset]
+    inc offset
+
+    var dirFormats: seq[tuple[contentType: uint8, form: uint8]] = @[]
+    for i in 0..<int(dirFormatCount):
+      let contentType = uint8(readULeb128(data, offset))
+      let form = uint8(readULeb128(data, offset))
+      dirFormats.add((contentType: contentType, form: form))
+
+    # Read directories
+    let dirCount = readULeb128(data, offset)
+    for i in 0..<int(dirCount):
+      var dirPath = ""
+      for fmt in dirFormats:
+        if fmt.contentType == DW_LNCT_path:
+          dirPath = readDwarfForm(data, offset, fmt.form, lineStrData)
+        else:
+          discard readDwarfForm(data, offset, fmt.form, lineStrData)
+      if dirPath.len > 0:
+        directories.add(dirPath)
+
+    # Read file entry format description
+    let fileFormatCount = data[offset]
+    inc offset
+
+    var fileFormats: seq[tuple[contentType: uint8, form: uint8]] = @[]
+    for i in 0..<int(fileFormatCount):
+      let contentType = uint8(readULeb128(data, offset))
+      let form = uint8(readULeb128(data, offset))
+      fileFormats.add((contentType: contentType, form: form))
+
+    # Read files
+    let fileCount = readULeb128(data, offset)
+    for i in 0..<int(fileCount):
+      var filePath = ""
+      var dirIdx: uint32 = 0
+      for fmt in fileFormats:
+        if fmt.contentType == DW_LNCT_path:
+          filePath = readDwarfForm(data, offset, fmt.form, lineStrData)
+        elif fmt.contentType == DW_LNCT_directory_index:
+          let val = readULeb128(data, offset)
+          dirIdx = uint32(val)
+        else:
+          discard readDwarfForm(data, offset, fmt.form, lineStrData)
+      if filePath.len > 0:
+        files.add((name: filePath, dirIndex: dirIdx))
+
+  let programStart = headerEnd
+  let programEnd = endOffset
+
+  result = (header: header, directories: directories, files: files,
+            programStart: programStart, programEnd: programEnd)
+
 proc parseDwarfLineTable*(elf: ElfFile): DwarfLineTable =
   ## Parse the DWARF .debug_line section to extract line number information
-  ## Parses all compilation units and merges their line entries
+  ## Parses all compilation units and merges their line entries using the new state machine
   let debugLineIdx = elf.findSection(".debug_line")
   if debugLineIdx < 0:
     raise newException(ValueError, "No .debug_line section found")
 
   let section = elf.sections[debugLineIdx]
   let data = section.data
+
+  # Determine address size from ELF header
+  let addressSize = if elf.header.e_ident[EI_CLASS] == ELFCLASS64: 8'u8 else: 4'u8
 
   # Try to get .debug_line_str section for DWARF 5
   var lineStrData: seq[byte] = @[]
@@ -65,291 +237,64 @@ proc parseDwarfLineTable*(elf: ElfFile): DwarfLineTable =
   while sectionOffset < data.len - 4:
     var offset = sectionOffset
 
-    # Read header for this compilation unit
-    var header: DwarfLineHeader
-
-    # Read total length (can be 32 or 64 bit)
-    let initialLength = getU32LE(data, offset)
-    offset += 4
-
-    var offsetSize = 4
-    if initialLength == 0xffffffff'u32:
-      # 64-bit DWARF format
-      header.totalLength = getU64LE(data, offset)
-      offset += 8
-      offsetSize = 8
-    else:
-      header.totalLength = initialLength
-
-    if header.totalLength == 0:
-      break  # End of compilation units
-
-    let endOffset = offset + int(header.totalLength)
-    if endOffset > data.len:
-      break  # Invalid length, stop parsing
-
-    # Version
-    header.version = getU16LE(data, offset)
-    offset += 2
-
-    if header.version < 2 or header.version > 5:
-      # Skip unsupported versions
-      sectionOffset = endOffset
-      continue
-
-    # Handle DWARF 5 address/segment size
-    if header.version >= 5:
-      offset += 1  # Skip address size
-      let segmentSize = data[offset]
-      inc offset
-      if segmentSize != 0:
-        sectionOffset = endOffset
-        continue
-
-    # Prologue length
-    if offsetSize == 8:
-      header.prologueLength = getU64LE(data, offset)
-      offset += 8
-    else:
-      header.prologueLength = uint64(getU32LE(data, offset))
-      offset += 4
-
-    let headerEnd = offset + int(header.prologueLength)
-
-    # Instruction lengths
-    header.minInstructionLength = data[offset]
-    inc offset
-
-    if header.version >= 4:
-      header.maxOpsPerInsn = data[offset]
-      inc offset
-    else:
-      header.maxOpsPerInsn = 1
-
-    header.defaultIsStmt = data[offset]
-    inc offset
-
-    header.lineBase = cast[int8](data[offset])
-    inc offset
-
-    header.lineRange = data[offset]
-    inc offset
-
-    header.opcodeBase = data[offset]
-    inc offset
-
-    # Standard opcode lengths
-    header.standardOpcodeLengths = newSeq[uint8](header.opcodeBase)
-    header.standardOpcodeLengths[0] = 1
-    for i in 1 ..< int(header.opcodeBase):
-      header.standardOpcodeLengths[i] = data[offset]
-      inc offset
+    # Parse header
+    let (header, directories, files, programStart, programEnd) =
+      try:
+        parseLineHeader(data, offset, addressSize, lineStrData)
+      except ValueError:
+        # Skip invalid compilation unit
+        break
 
     # Store the first header we encounter
     if result.header.version == 0:
       result.header = header
 
-    # Read directory table (DWARF 2-4 and 5+)
-    var localDirectories: seq[string] = @[]
-    var localFiles: seq[tuple[name: string, dirIndex: uint32]] = @[]
+    # Track global file/dir indices
     let fileIndexOffset = uint32(result.files.len)
     let dirIndexOffset = uint32(result.directories.len)
 
-    if header.version < 5:
-      # DWARF 2-4 format
-      while offset < headerEnd and data[offset] != 0:
-        let dirName = readString(data, offset)
-        localDirectories.add(dirName)
-        offset += dirName.len + 1
-      if offset < headerEnd:
-        inc offset  # Skip null terminator
+    # Adjust directory indices in files and merge
+    var adjustedFiles: seq[tuple[name: string, dirIndex: uint32]] = @[]
+    for file in files:
+      if header.version < 5:
+        # DWARF 2-4: directory index 0 means current directory
+        let globalDirIdx = if file.dirIndex > 0: file.dirIndex + dirIndexOffset else: 0
+        adjustedFiles.add((name: file.name, dirIndex: globalDirIdx))
+      else:
+        # DWARF 5: directory indices are 0-based
+        let globalDirIdx = file.dirIndex + dirIndexOffset + 1
+        adjustedFiles.add((name: file.name, dirIndex: globalDirIdx))
 
-      # Read file table
-      while offset < headerEnd and data[offset] != 0:
-        let fileName = readString(data, offset)
-        offset += fileName.len + 1
-        let dirIdx = uint32(readULeb128(data, offset))
-        discard readULeb128(data, offset)  # mod time
-        discard readULeb128(data, offset)  # file size
-        # Adjust directory index to be global
-        let globalDirIdx = if dirIdx > 0: dirIdx + dirIndexOffset else: 0
-        localFiles.add((name: fileName, dirIndex: globalDirIdx))
-    else:
-      # DWARF 5 format
-      # Read directory entry format description
-      let dirFormatCount = data[offset]
-      inc offset
+    result.directories.add(directories)
+    result.files.add(adjustedFiles)
 
-      var dirFormats: seq[tuple[contentType: uint8, form: uint8]] = @[]
-      for i in 0..<int(dirFormatCount):
-        let contentType = uint8(readULeb128(data, offset))
-        let form = uint8(readULeb128(data, offset))
-        dirFormats.add((contentType: contentType, form: form))
+    # Extract program data
+    if programStart < data.len and programEnd <= data.len and programStart < programEnd:
+      let programData = data[programStart..<programEnd]
 
-      # Read directories
-      let dirCount = readULeb128(data, offset)
-      for i in 0..<int(dirCount):
-        var dirPath = ""
-        for fmt in dirFormats:
-          if fmt.contentType == DW_LNCT_path:
-            dirPath = readDwarfForm(data, offset, fmt.form, lineStrData)
-          else:
-            discard readDwarfForm(data, offset, fmt.form, lineStrData)
-        if dirPath.len > 0:
-          localDirectories.add(dirPath)
+      # Use the new state machine to execute the line program
+      var state = newLineProgramState(header, programData, addressSize)
 
-      # Read file entry format description
-      let fileFormatCount = data[offset]
-      inc offset
+      var rowOpt = state.nextRow()
+      while isSome(rowOpt):
+        let row = get(rowOpt)
 
-      var fileFormats: seq[tuple[contentType: uint8, form: uint8]] = @[]
-      for i in 0..<int(fileFormatCount):
-        let contentType = uint8(readULeb128(data, offset))
-        let form = uint8(readULeb128(data, offset))
-        fileFormats.add((contentType: contentType, form: form))
+        # Convert LineRow to DwarfLineEntry with adjusted file indices
+        result.entries.add(DwarfLineEntry(
+          address: row.address,
+          file: uint32(row.file) + fileIndexOffset,
+          line: uint32(row.line),
+          column: uint32(row.column),
+          discriminator: uint32(row.discriminator)
+        ))
 
-      # Read files
-      let fileCount = readULeb128(data, offset)
-      for i in 0..<int(fileCount):
-        var filePath = ""
-        var dirIdx: uint32 = 0
-        for fmt in fileFormats:
-          if fmt.contentType == DW_LNCT_path:
-            filePath = readDwarfForm(data, offset, fmt.form, lineStrData)
-          elif fmt.contentType == DW_LNCT_directory_index:
-            let val = readULeb128(data, offset)
-            dirIdx = uint32(val)
-          else:
-            discard readDwarfForm(data, offset, fmt.form, lineStrData)
-        if filePath.len > 0:
-          # For DWARF 5, directory indices are 0-based (0 is valid)
-          # We always adjust by the offset
-          let globalDirIdx = dirIdx + dirIndexOffset + 1  # +1 because DWARF uses 1-based in file table lookup
-          localFiles.add((name: filePath, dirIndex: globalDirIdx))
-
-    # Merge directories and files into result
-    result.directories.add(localDirectories)
-    result.files.add(localFiles)
-
-    offset = headerEnd
-
-    # Decode line number program for this compilation unit
-    while offset < endOffset and offset < data.len:
-      # State machine registers
-      var address: uint64 = 0
-      var fileNum: uint32 = 1
-      var line: uint32 = 1
-      var column: uint32 = 0
-      var discriminator: uint32 = 0
-      var isStmt = header.defaultIsStmt != 0
-      var endSequence = false
-
-      while not endSequence and offset < endOffset:
-        let opcode = data[offset]
-        inc offset
-
-        if opcode >= header.opcodeBase:
-          # Special opcode
-          let adjustedOpcode = opcode - header.opcodeBase
-          if header.lineRange > 0:
-            let addrIncr = uint64(adjustedOpcode div header.lineRange) *
-                           uint64(header.minInstructionLength)
-            address += addrIncr
-            line = uint32(int32(line) + int32(header.lineBase) +
-                         int32(adjustedOpcode mod header.lineRange))
-
-            # Add entry
-            result.entries.add(DwarfLineEntry(
-              address: address,
-              file: fileNum + fileIndexOffset,
-              line: line,
-              column: column,
-              discriminator: discriminator
-            ))
-            discriminator = 0
-
-        elif opcode == DW_LNS_extended_op:
-          let extLen = readULeb128(data, offset)
-          let extOp = data[offset]
-          inc offset
-
-          case extOp
-          of DW_LNE_end_sequence:
-            endSequence = true
-            result.entries.add(DwarfLineEntry(
-              address: address,
-              file: fileNum + fileIndexOffset,
-              line: line,
-              column: column,
-              discriminator: discriminator
-            ))
-          of DW_LNE_set_address:
-            if elf.header.e_ident[EI_CLASS] == ELFCLASS64:
-              address = getU64LE(data, offset)
-              offset += 8
-            else:
-              address = uint64(getU32LE(data, offset))
-              offset += 4
-          of DW_LNE_set_discriminator:
-            discriminator = uint32(readULeb128(data, offset))
-          of DW_LNE_HP_source_file_correlation:
-            offset += int(extLen) - 1
-          else:
-            offset += int(extLen) - 1
-
-        elif opcode == DW_LNS_copy:
-          result.entries.add(DwarfLineEntry(
-            address: address,
-            file: fileNum + fileIndexOffset,
-            line: line,
-            column: column,
-            discriminator: discriminator
-          ))
-          discriminator = 0
-
-        elif opcode == DW_LNS_advance_pc:
-          let addrIncr = readULeb128(data, offset) * uint64(header.minInstructionLength)
-          address += addrIncr
-
-        elif opcode == DW_LNS_advance_line:
-          line = uint32(int32(line) + int32(readSLeb128(data, offset)))
-
-        elif opcode == DW_LNS_set_file:
-          fileNum = uint32(readULeb128(data, offset))
-
-        elif opcode == DW_LNS_set_column:
-          column = uint32(readULeb128(data, offset))
-
-        elif opcode == DW_LNS_negate_stmt:
-          isStmt = not isStmt
-
-        elif opcode == DW_LNS_set_basic_block:
-          discard  # We don't track basic blocks
-
-        elif opcode == DW_LNS_const_add_pc:
-          if header.lineRange > 0:
-            let adjustedOpcode = 255 - header.opcodeBase
-            let addrIncr = uint64(adjustedOpcode div header.lineRange) *
-                           uint64(header.minInstructionLength)
-            address += addrIncr
-
-        elif opcode == DW_LNS_fixed_advance_pc:
-          address += uint64(getU16LE(data, offset))
-          offset += 2
-
-        else:
-          # Unknown opcode - skip operands
-          if opcode < header.opcodeBase:
-            for i in 0 ..< int(header.standardOpcodeLengths[opcode]):
-              discard readULeb128(data, offset)
-
-      if endSequence:
-        break
+        # Get next row
+        rowOpt = state.nextRow()
 
     # Move to next compilation unit
-    sectionOffset = endOffset
+    sectionOffset = programEnd
 
-  # Sort table
+  # Sort table by address
   result.entries.sort(proc(a, b: DwarfLineEntry): int = cmp(a.address, b.address))
 
 proc findLineInfo*(lineTable: DwarfLineTable; address: uint64): tuple[file: string, line: uint32] =
