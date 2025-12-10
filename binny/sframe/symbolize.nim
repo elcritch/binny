@@ -1,6 +1,7 @@
 import std/[strutils, os, strformat]
 
 import ../elfparser
+import ../dwarf
 import ./types
 import ./decoder
 

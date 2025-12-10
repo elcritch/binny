@@ -1,5 +1,6 @@
 import std/[strformat, strutils, os, osproc, unittest]
 import binny/elfparser
+import binny/dwarf
 
 suite "elf line info":
 

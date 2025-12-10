@@ -2,6 +2,7 @@ import std/[unittest, strformat, strutils]
 import binny/sframe
 import binny/elfparser
 import binny/sframe/stackwalk
+import binny/dwarf
 
 when defined(amd64):
   suite "AMD64 walker helpers":
