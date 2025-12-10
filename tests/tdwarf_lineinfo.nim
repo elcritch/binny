@@ -168,6 +168,9 @@ when isMainModule:
     echo fmt"Command line argument: {exePath}"
     echo ""
 
+  if exePath == "tests/simple_test_program" and not fileExists(exePath):
+    discard execCmd("nim c --debugger:native -f tests/simple_test_program.nim")
+
   testDwarfLineInfo(exePath)
   compareWithAddr2line(exePath)
 
