@@ -60,16 +60,23 @@ proc symbolizeStackTraceImpl*(
   for i, pc in frames:
     var found = false
     # Find the closest function symbol
+    var symbol: uint64
     for sym in funcSymbols:
       if pc >= sym.value and pc < (sym.value + sym.size):
         let offset = pc - sym.value
         symbols[i] = fmt"{sym.name} + 0x{offset.toHex}"
+        symbol = sym.value
         found = true
         break
 
     if not found:
       symbols[i] = fmt"0x{pc.toHex} (no symbol)"
+    else:
+      let (file, line) = lineInfo.findLineInfo(symbol)
+      echo "SYMBOL: ", symbol.toHex(8), " ", file, ":", line
+      #symbols[i] = fmt"{file}:{line}"
 
+  echo "\n"
   return symbols
 
 proc symbolizeStackTrace*(frames: openArray[uint64]): seq[string] =

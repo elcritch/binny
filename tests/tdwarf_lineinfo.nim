@@ -1,6 +1,8 @@
 import std/[os, strformat, unittest, strutils, osproc]
 import binny/elfparser
 
+var hasError = false
+
 proc testDwarfLineInfo*(exePath: string = "") =
   echo "Testing DWARF Line Info Parser"
   echo "==============================="
@@ -39,20 +41,12 @@ proc testDwarfLineInfo*(exePath: string = "") =
 
     echo fmt"Directories ({lineTable.directories.len}):"
     for i, dir in lineTable.directories:
-      if i < 5:
-        echo fmt"  [{i}] {dir}"
-      elif i == 5:
-        echo "  ... (showing first 5)"
-        break
+      echo fmt"  [{i}] {dir}"
     echo ""
 
     echo fmt"Files ({lineTable.files.len}):"
     for i, file in lineTable.files:
-      if i < 10:
-        echo fmt"  [{i}] {file.name} (dir: {file.dirIndex})"
-      elif i == 10:
-        echo "  ... (showing first 10)"
-        break
+      echo fmt"  [{i}] {file.name} (dir: {file.dirIndex})"
     echo ""
 
     echo fmt"Line entries ({lineTable.entries.len}):"
@@ -61,7 +55,9 @@ proc testDwarfLineInfo*(exePath: string = "") =
         echo fmt"  0x{entry.address.toHex:>16} -> file {entry.file:>3}, line {entry.line:>5}"
       elif i == 10:
         echo "  ... (showing first 10)"
-        break
+        #break
+      if "0041FB60" in fmt"{entry.address.toHex:>16}":
+        echo fmt"  0x{entry.address.toHex:>16} -> file {entry.file:>3}, line {entry.line:>5}"
     echo ""
 
     # Test addr2line-like functionality
@@ -148,6 +144,7 @@ proc compareWithAddr2line*(exePath: string = "") =
         echo "  ✓ Match!"
       else:
         echo "  ✗ Mismatch"
+        hasError = true
       echo ""
 
   except CatchableError as e:
@@ -165,3 +162,7 @@ when isMainModule:
 
   testDwarfLineInfo(exePath)
   compareWithAddr2line(exePath)
+
+  if hasError:
+    quit(1)
+
