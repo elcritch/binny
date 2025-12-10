@@ -1,26 +1,31 @@
-import std/[strformat, strutils, os, unittest]
+import std/[strformat, strutils, os, osproc, unittest]
 import binny/elfparser
 
 suite "elf line info":
 
   test "parse simple test program":
     # Handle both running from project root and tests directory
-    let exe = if fileExists("./simple_test_program"):
-      "./simple_test_program"
-    elif fileExists("./tests/simple_test_program"):
-      "./tests/simple_test_program"
-    else:
-      "simple_test_program"  # Will fail with clear error
+    let exe = "./tests/simple_test_program"
+    if not fileExists(exe):
+      discard execCmd("nim c -r --debugger:native -f ./tests/simple_test_program")
 
     let elf = parseElf(exe)
     let dwarfLineInfo = elf.parseDwarfLineTable()
 
     # Test with specific addresses we know are from our Nim code
-    let testAddresses = [
-      (0x000000000040c940'u64, "fibonacci"),
-      (0x000000000040cbc0'u64, "factorial"),
+    var testAddresses = [
       (0x000000000040ccd0'u64, "main"),
+      (0x000000000040cbc0'u64, "factorial"),
+      (0x000000000040c940'u64, "fibonacci"),
     ]
+
+    let (res, code) = execCmdEx("nm ./tests/simple_test_program | grep simple")
+    let lines = res.splitLines()
+    for i, line in lines:
+      if line.strip() == "": continue
+      let address = parseHexInt("0x" & line.split()[0])
+      echo "i: ", i, " address: ", address, " line: ", line
+      testAddresses[i][0] = cast[uint64](address)
 
     echo "Testing DWARF line info with Nim functions:"
     echo "=" .repeat(50)
