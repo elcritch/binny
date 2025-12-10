@@ -573,19 +573,19 @@ proc parseDwarfLineTable*(elf: ElfFile): DwarfLineTable =
     # Move to next compilation unit
     sectionOffset = endOffset
 
-proc findLineInfo*(elf: ElfFile; address: uint64): tuple[file: string, line: uint32] =
+  # Sort table
+  result.entries.sort(proc(a, b: DwarfLineEntry): int = cmp(a.address, b.address))
+
+proc findLineInfo*(lineTable: DwarfLineTable; address: uint64): tuple[file: string, line: uint32] =
   ## Find source file and line number for a given address (like addr2line)
-  let lineTable = elf.parseDwarfLineTable()
 
   # Sort entries by address
-  var sortedEntries = lineTable.entries
-  sortedEntries.sort(proc(a, b: DwarfLineEntry): int = cmp(a.address, b.address))
 
   # Binary search for the address
   var bestMatch: DwarfLineEntry
   var found = false
 
-  for entry in sortedEntries:
+  for entry in lineTable.entries:
     if entry.address <= address:
       bestMatch = entry
       found = true

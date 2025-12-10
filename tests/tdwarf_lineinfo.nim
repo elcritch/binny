@@ -69,11 +69,12 @@ proc testDwarfLineInfo*(exePath: string = "") =
 
     # Get some function symbols to test
     let funcSyms = elf.getFunctionSymbols()
+    let dwarfLineInfo = elf.parseDwarfLineTable()
     if funcSyms.len > 0:
       for i in 0 ..< min(5, funcSyms.len):
         let sym = funcSyms[i]
         try:
-          let (file, line) = elf.findLineInfo(sym.value)
+          let (file, line) =  dwarfLineInfo.findLineInfo(sym.value)
           echo fmt"  {sym.name:<30} @ 0x{sym.value.toHex:>16} -> {file}:{line}"
         except CatchableError as e:
           echo fmt"  {sym.name:<30} @ 0x{sym.value.toHex:>16} -> Error: {e.msg}"
@@ -106,6 +107,7 @@ proc compareWithAddr2line*(exePath: string = "") =
 
   try:
     let elf = parseElf(exe)
+    let dwarfLineInfo = elf.parseDwarfLineTable()
 
     # Check if .debug_line exists
     let debugLineIdx = elf.findSection(".debug_line")
@@ -129,7 +131,7 @@ proc compareWithAddr2line*(exePath: string = "") =
       # Get our result
       var ourResult = "??"
       try:
-        let (file, line) = elf.findLineInfo(sym.value)
+        let (file, line) = dwarfLineInfo.findLineInfo(sym.value)
         ourResult = fmt"{file}:{line}"
       except:
         ourResult = "Error"

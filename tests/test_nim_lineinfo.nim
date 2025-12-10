@@ -13,6 +13,7 @@ suite "elf line info":
       "simple_test_program"  # Will fail with clear error
 
     let elf = parseElf(exe)
+    let dwarfLineInfo = elf.parseDwarfLineTable()
 
     # Test with specific addresses we know are from our Nim code
     let testAddresses = [
@@ -26,7 +27,7 @@ suite "elf line info":
     echo ""
 
     for (address, name) in testAddresses:
-      let (file, line) = elf.findLineInfo(address)
+      let (file, line) = dwarfLineInfo.findLineInfo(address)
       echo fmt"{name:<15} @ 0x{address.toHex:>16}"
       echo fmt"  -> {file}:{line}"
       echo ""
