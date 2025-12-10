@@ -56,3 +56,16 @@ proc getI32LE*(data: openArray[byte]; idx: var int): int32 {.inline.} =
 proc getI32BE*(data: openArray[byte]; idx: var int): int32 {.inline.} =
   cast[int32](getU32BE(data, idx))
 
+proc getU16LE*(data: openArray[byte]; offset: int): uint16 =
+  uint16(data[offset]) or (uint16(data[offset + 1]) shl 8)
+
+proc getU32LE*(data: openArray[byte]; offset: int): uint32 =
+  uint32(data[offset]) or (uint32(data[offset + 1]) shl 8) or
+  (uint32(data[offset + 2]) shl 16) or (uint32(data[offset + 3]) shl 24)
+
+proc getU64LE*(data: openArray[byte]; offset: int): uint64 =
+  uint64(data[offset]) or (uint64(data[offset + 1]) shl 8) or
+  (uint64(data[offset + 2]) shl 16) or (uint64(data[offset + 3]) shl 24) or
+  (uint64(data[offset + 4]) shl 32) or (uint64(data[offset + 5]) shl 40) or
+  (uint64(data[offset + 6]) shl 48) or (uint64(data[offset + 7]) shl 56)
+
