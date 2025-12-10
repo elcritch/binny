@@ -131,12 +131,55 @@ const
   DW_LNE_set_discriminator = 4'u8
   DW_LNE_HP_source_file_correlation = 0x80'u8
 
+  # DWARF 5 Line number content types
+  DW_LNCT_path = 0x1'u8
+  DW_LNCT_directory_index = 0x2'u8
+  DW_LNCT_timestamp = 0x3'u8
+  DW_LNCT_size = 0x4'u8
+  DW_LNCT_MD5 = 0x5'u8
+
+  # DWARF forms
+  DW_FORM_string = 0x08'u8
+  DW_FORM_data1 = 0x0b'u8
+  DW_FORM_strp = 0x0e'u8
+  DW_FORM_udata = 0x0f'u8
+  DW_FORM_line_strp = 0x1f'u8
+
 proc readString(data: openArray[byte]; offset: int): string =
   var i = offset
   result = ""
   while i < data.len and data[i] != 0:
     result.add char(data[i])
     inc i
+
+proc readDwarfForm(data: openArray[byte]; offset: var int; form: uint8; lineStrSection: openArray[byte] = []): string =
+  ## Read a value from DWARF data according to the form
+  ## For string forms, returns the string; for numeric forms, returns empty string
+  case form
+  of DW_FORM_string:
+    result = readString(data, offset)
+    offset += result.len + 1
+  of DW_FORM_strp:
+    # String pointer into .debug_str - skip for now
+    offset += 4
+    result = ""
+  of DW_FORM_line_strp:
+    # String pointer into .debug_line_str
+    let strOffset = int(getU32LE(data, offset))
+    offset += 4
+    if lineStrSection.len > 0 and strOffset < lineStrSection.len:
+      result = readString(lineStrSection, strOffset)
+    else:
+      result = ""
+  of DW_FORM_data1:
+    result = ""
+    offset += 1
+  of DW_FORM_udata:
+    discard readULeb128(data, offset)
+    result = ""
+  else:
+    # Unknown form, try to skip
+    result = ""
 
 proc parseElfHeader*(data: openArray[byte]): ElfHeader64 =
   if data.len < sizeof(ElfHeader64):
@@ -335,6 +378,12 @@ proc parseDwarfLineTable*(elf: ElfFile): DwarfLineTable =
   let section = elf.sections[debugLineIdx]
   let data = section.data
 
+  # Try to get .debug_line_str section for DWARF 5
+  var lineStrData: seq[byte] = @[]
+  let lineStrIdx = elf.findSection(".debug_line_str")
+  if lineStrIdx >= 0:
+    lineStrData = elf.sections[lineStrIdx].data
+
   result.directories = @[]
   result.files = @[]
   result.entries = @[]
@@ -429,12 +478,14 @@ proc parseDwarfLineTable*(elf: ElfFile): DwarfLineTable =
     if result.header.version == 0:
       result.header = header
 
-    # Read directory table (DWARF 2-4)
+    # Read directory table (DWARF 2-4 and 5+)
     var localDirectories: seq[string] = @[]
     var localFiles: seq[tuple[name: string, dirIndex: uint32]] = @[]
     let fileIndexOffset = uint32(result.files.len)
+    let dirIndexOffset = uint32(result.directories.len)
 
     if header.version < 5:
+      # DWARF 2-4 format
       while offset < headerEnd and data[offset] != 0:
         let dirName = readString(data, offset)
         localDirectories.add(dirName)
@@ -449,7 +500,61 @@ proc parseDwarfLineTable*(elf: ElfFile): DwarfLineTable =
         let dirIdx = uint32(readULeb128(data, offset))
         discard readULeb128(data, offset)  # mod time
         discard readULeb128(data, offset)  # file size
-        localFiles.add((name: fileName, dirIndex: dirIdx))
+        # Adjust directory index to be global
+        let globalDirIdx = if dirIdx > 0: dirIdx + dirIndexOffset else: 0
+        localFiles.add((name: fileName, dirIndex: globalDirIdx))
+    else:
+      # DWARF 5 format
+      # Read directory entry format description
+      let dirFormatCount = data[offset]
+      inc offset
+
+      var dirFormats: seq[tuple[contentType: uint8, form: uint8]] = @[]
+      for i in 0..<int(dirFormatCount):
+        let contentType = uint8(readULeb128(data, offset))
+        let form = uint8(readULeb128(data, offset))
+        dirFormats.add((contentType: contentType, form: form))
+
+      # Read directories
+      let dirCount = readULeb128(data, offset)
+      for i in 0..<int(dirCount):
+        var dirPath = ""
+        for fmt in dirFormats:
+          if fmt.contentType == DW_LNCT_path:
+            dirPath = readDwarfForm(data, offset, fmt.form, lineStrData)
+          else:
+            discard readDwarfForm(data, offset, fmt.form, lineStrData)
+        if dirPath.len > 0:
+          localDirectories.add(dirPath)
+
+      # Read file entry format description
+      let fileFormatCount = data[offset]
+      inc offset
+
+      var fileFormats: seq[tuple[contentType: uint8, form: uint8]] = @[]
+      for i in 0..<int(fileFormatCount):
+        let contentType = uint8(readULeb128(data, offset))
+        let form = uint8(readULeb128(data, offset))
+        fileFormats.add((contentType: contentType, form: form))
+
+      # Read files
+      let fileCount = readULeb128(data, offset)
+      for i in 0..<int(fileCount):
+        var filePath = ""
+        var dirIdx: uint32 = 0
+        for fmt in fileFormats:
+          if fmt.contentType == DW_LNCT_path:
+            filePath = readDwarfForm(data, offset, fmt.form, lineStrData)
+          elif fmt.contentType == DW_LNCT_directory_index:
+            let val = readULeb128(data, offset)
+            dirIdx = uint32(val)
+          else:
+            discard readDwarfForm(data, offset, fmt.form, lineStrData)
+        if filePath.len > 0:
+          # For DWARF 5, directory indices are 0-based (0 is valid)
+          # We always adjust by the offset
+          let globalDirIdx = dirIdx + dirIndexOffset + 1  # +1 because DWARF uses 1-based in file table lookup
+          localFiles.add((name: filePath, dirIndex: globalDirIdx))
 
     # Merge directories and files into result
     result.directories.add(localDirectories)
