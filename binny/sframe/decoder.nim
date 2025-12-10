@@ -10,9 +10,9 @@ proc decodePreamble*(bytes: openArray[byte]): SFramePreamble =
   var i = 0
   var m: uint16
   when system.cpuEndian == littleEndian:
-    m = getU16LE(bytes, i)
+    m = takeU16LE(bytes, i)
   else:
-    m = getU16BE(bytes, i)
+    m = takeU16BE(bytes, i)
   let ver = uint8(bytes[i]); inc i
   let flg = uint8(bytes[i]); inc i
   SFramePreamble(magic: m, version: ver, flags: flg)
@@ -30,17 +30,17 @@ proc decodeHeader*(bytes: openArray[byte]): SFrameHeader =
   h.cfaFixedRaOffset = cast[int8](bytes[i]); inc i
   h.auxHdrLen = uint8(bytes[i]); inc i
   when system.cpuEndian == littleEndian:
-    h.numFdes = getU32LE(bytes, i)
-    h.numFres = getU32LE(bytes, i)
-    h.freLen = getU32LE(bytes, i)
-    h.fdeOff = getU32LE(bytes, i)
-    h.freOff = getU32LE(bytes, i)
+    h.numFdes = takeU32LE(bytes, i)
+    h.numFres = takeU32LE(bytes, i)
+    h.freLen = takeU32LE(bytes, i)
+    h.fdeOff = takeU32LE(bytes, i)
+    h.freOff = takeU32LE(bytes, i)
   else:
-    h.numFdes = getU32BE(bytes, i)
-    h.numFres = getU32BE(bytes, i)
-    h.freLen = getU32BE(bytes, i)
-    h.fdeOff = getU32BE(bytes, i)
-    h.freOff = getU32BE(bytes, i)
+    h.numFdes = takeU32BE(bytes, i)
+    h.numFres = takeU32BE(bytes, i)
+    h.freLen = takeU32BE(bytes, i)
+    h.fdeOff = takeU32BE(bytes, i)
+    h.freOff = takeU32BE(bytes, i)
   let auxLen = int(h.auxHdrLen)
   if bytes.len < sizeofSFrameHeaderFixed() + auxLen:
     raise newException(ValueError, "Insufficient bytes for aux header")
@@ -55,21 +55,21 @@ proc decodeFDE*(bytes: openArray[byte]): SFrameFDE =
   var i = 0
   var f: SFrameFDE
   when system.cpuEndian == littleEndian:
-    f.funcStartAddress = getI32LE(bytes, i)
-    f.funcSize = getU32LE(bytes, i)
-    f.funcStartFreOff = getU32LE(bytes, i)
-    f.funcNumFres = getU32LE(bytes, i)
+    f.funcStartAddress = takeI32LE(bytes, i)
+    f.funcSize = takeU32LE(bytes, i)
+    f.funcStartFreOff = takeU32LE(bytes, i)
+    f.funcNumFres = takeU32LE(bytes, i)
   else:
-    f.funcStartAddress = getI32BE(bytes, i)
-    f.funcSize = getU32BE(bytes, i)
-    f.funcStartFreOff = getU32BE(bytes, i)
-    f.funcNumFres = getU32BE(bytes, i)
+    f.funcStartAddress = takeI32BE(bytes, i)
+    f.funcSize = takeU32BE(bytes, i)
+    f.funcStartFreOff = takeU32BE(bytes, i)
+    f.funcNumFres = takeU32BE(bytes, i)
   f.funcInfo = SFrameFdeInfo(bytes[i]); inc i
   f.funcRepSize = bytes[i]; inc i
   when system.cpuEndian == littleEndian:
-    f.funcPadding2 = getU16LE(bytes, i)
+    f.funcPadding2 = takeU16LE(bytes, i)
   else:
-    f.funcPadding2 = getU16BE(bytes, i)
+    f.funcPadding2 = takeU16BE(bytes, i)
   result = f
 
 proc decodeFRE*(bytes: openArray[byte]; freType: SFrameFreType): tuple[f: SFrameFRE, consumed: int] =
@@ -82,15 +82,15 @@ proc decodeFRE*(bytes: openArray[byte]; freType: SFrameFreType): tuple[f: SFrame
   of sframeFreAddr2:
     if bytes.len < 2 + 1: raise newException(ValueError, "Insufficient bytes for FRE addr2")
     when system.cpuEndian == littleEndian:
-      start = uint32(getU16LE(bytes, i))
+      start = uint32(takeU16LE(bytes, i))
     else:
-      start = uint32(getU16BE(bytes, i))
+      start = uint32(takeU16BE(bytes, i))
   of sframeFreAddr4:
     if bytes.len < 4 + 1: raise newException(ValueError, "Insufficient bytes for FRE addr4")
     when system.cpuEndian == littleEndian:
-      start = getU32LE(bytes, i)
+      start = takeU32LE(bytes, i)
     else:
-      start = getU32BE(bytes, i)
+      start = takeU32BE(bytes, i)
   # info
   let info = SFrameFreInfo(bytes[i]); inc i
   let n = info.freInfoGetOffsetCount()
@@ -107,16 +107,16 @@ proc decodeFRE*(bytes: openArray[byte]; freType: SFrameFreType): tuple[f: SFrame
     of 2:
       var u: uint16
       when system.cpuEndian == littleEndian:
-        u = getU16LE(bytes, i)
+        u = takeU16LE(bytes, i)
       else:
-        u = getU16BE(bytes, i)
+        u = takeU16BE(bytes, i)
       offs[k] = int32(cast[int16](u))
     of 4:
       var v: int32
       when system.cpuEndian == littleEndian:
-        v = getI32LE(bytes, i)
+        v = takeI32LE(bytes, i)
       else:
-        v = getI32BE(bytes, i)
+        v = takeI32BE(bytes, i)
       offs[k] = int32(v)
     else:
       discard
