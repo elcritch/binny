@@ -8,7 +8,6 @@ suite "elf line info":
     let exe = "./tests/simple_test_program"
     if not fileExists(exe):
       discard execCmd("nim c --debugger:native -f tests/simple_test_program.nim")
-    echo "CWD: ", getCurrentDir()
     echo "EXE: ", exe
 
     let elf = parseElf(exe.absolutePath())
