@@ -67,8 +67,9 @@ proc testDwarfLineInfo*(exePath: string = "") =
     let funcSyms = elf.getFunctionSymbols()
     let dwarfLineInfo = elf.parseDwarfLineTable()
     if funcSyms.len > 0:
-      for i in 0 ..< min(5, funcSyms.len):
+      for i in 0 ..< funcSyms.len:
         let sym = funcSyms[i]
+        if "_ZN19" notin sym.name: continue
         try:
           let (file, line) =  dwarfLineInfo.findLineInfo(sym.value)
           echo fmt"  {sym.name:<30} @ 0x{sym.value.toHex:>16} -> {file}:{line}"
@@ -120,9 +121,11 @@ proc compareWithAddr2line*(exePath: string = "") =
     echo fmt"Comparing first {min(5, funcSyms.len)} function addresses:"
     echo ""
 
-    for i in 0 ..< min(5, funcSyms.len):
+    for i in 0 ..< funcSyms.len:
       let sym = funcSyms[i]
       let addrHex = fmt"0x{sym.value.toHex}"
+
+      if "_ZN19" notin sym.name: continue
 
       # Get our result
       var ourResult = "??"
