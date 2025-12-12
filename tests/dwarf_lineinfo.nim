@@ -1,5 +1,6 @@
 import std/[os, strformat, unittest, strutils, osproc]
 import binny/elfparser
+import binny/dwarf
 
 var hasError = false
 
@@ -46,7 +47,7 @@ proc testDwarfLineInfo*(exePath: string = "") =
 
     echo fmt"Files ({lineTable.files.len}):"
     for i, file in lineTable.files:
-      echo fmt"  [{i}] {file.name} (dir: {file.dirIndex})"
+      echo fmt"  [{i}] {file.pathName} (dir: {file.directoryIndex})"
     echo ""
 
     echo fmt"Line entries ({lineTable.entries.len}):"
@@ -176,4 +177,3 @@ when isMainModule:
 
   if hasError:
     quit(1)
-

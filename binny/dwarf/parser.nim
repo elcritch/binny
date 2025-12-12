@@ -45,12 +45,77 @@ proc readDwarfForm(data: openArray[byte]; offset: var int; form: uint8; lineStrS
     # Unknown form, try to skip
     result = ""
 
+proc readFormUnsigned(data: openArray[byte]; offset: var int; form: uint8): Option[uint64] =
+  ## Read an unsigned integer encoded per the given form
+  case form
+  of DW_FORM_udata:
+    some(readULeb128(data, offset))
+  of DW_FORM_data1:
+    if offset < data.len:
+      let value = uint64(data[offset])
+      inc offset
+      some(value)
+    else:
+      none(uint64)
+  of DW_FORM_data2:
+    if offset + 2 <= data.len:
+      let value = uint64(getU16LE(data, offset))
+      offset += 2
+      some(value)
+    else:
+      none(uint64)
+  of DW_FORM_data4:
+    if offset + 4 <= data.len:
+      let value = uint64(getU32LE(data, offset))
+      offset += 4
+      some(value)
+    else:
+      none(uint64)
+  of DW_FORM_data8:
+    if offset + 8 <= data.len:
+      let value = getU64LE(data, offset)
+      offset += 8
+      some(value)
+    else:
+      none(uint64)
+  else:
+    none(uint64)
+
+proc readFormMd5(data: openArray[byte]; offset: var int; form: uint8): Option[array[16, byte]] =
+  ## Read a 16-byte MD5 digest if the form matches
+  if form == DW_FORM_data16 and offset + 16 <= data.len:
+    var digest: array[16, byte]
+    for i in 0..<16:
+      digest[i] = data[offset + i]
+    offset += 16
+    some(digest)
+  else:
+    none(array[16, byte])
+
+proc skipFormValue(data: openArray[byte];
+                   offset: var int;
+                   form: uint8;
+                   lineStrSection: openArray[byte] = []) =
+  ## Skip over a value encoded with the given form
+  case form
+  of DW_FORM_string, DW_FORM_line_strp, DW_FORM_strp:
+    discard readDwarfForm(data, offset, form, lineStrSection)
+  of DW_FORM_udata, DW_FORM_data1, DW_FORM_data2, DW_FORM_data4, DW_FORM_data8:
+    discard readFormUnsigned(data, offset, form)
+  of DW_FORM_data16:
+    if offset + 16 <= data.len:
+      offset += 16
+    else:
+      offset = data.len
+  else:
+    discard readDwarfForm(data, offset, form, lineStrSection)
+
 proc parseLineHeader(data: openArray[byte];
                      offset: var int;
                      addressSize: uint8;
                      lineStrData: seq[byte]): tuple[header: DwarfLineHeader,
                                                      directories: seq[string],
-                                                     files: seq[tuple[name: string, dirIndex: uint32]],
+                                                     files: seq[DwarfLineEntry],
                                                      programStart: int,
                                                      programEnd: int] =
   ## Parse a DWARF line number program header
@@ -133,7 +198,7 @@ proc parseLineHeader(data: openArray[byte];
 
   # Read directory and file tables
   var directories: seq[string] = @[]
-  var files: seq[tuple[name: string, dirIndex: uint32]] = @[]
+  var files: seq[DwarfLineEntry] = @[]
 
   if header.version < 5:
     # DWARF 2-4 format
@@ -148,10 +213,18 @@ proc parseLineHeader(data: openArray[byte];
     while offset < headerEnd and data[offset] != 0:
       let fileName = readString(data, offset)
       offset += fileName.len + 1
-      let dirIdx = uint32(readULeb128(data, offset))
-      discard readULeb128(data, offset)  # mod time
-      discard readULeb128(data, offset)  # file size
-      files.add((name: fileName, dirIndex: dirIdx))
+      let dirIdx = readULeb128(data, offset)
+      let modTime = readULeb128(data, offset)
+      let fileSize = readULeb128(data, offset)
+      var md5: array[16, byte]
+      files.add(DwarfLineEntry(
+        pathName: fileName,
+        directoryIndex: dirIdx,
+        timestamp: modTime,
+        size: fileSize,
+        md5: md5,
+        source: none(string)
+      ))
   else:
     # DWARF 5 format
     # Read directory entry format description
@@ -189,18 +262,39 @@ proc parseLineHeader(data: openArray[byte];
     # Read files
     let fileCount = readULeb128(data, offset)
     for i in 0..<int(fileCount):
-      var filePath = ""
-      var dirIdx: uint32 = 0
+      var md5: array[16, byte]
+      var entry = DwarfLineEntry(
+        pathName: "",
+        directoryIndex: 0,
+        timestamp: 0,
+        size: 0,
+        md5: md5,
+        source: none(string)
+      )
       for fmt in fileFormats:
-        if fmt.contentType == DW_LNCT_path:
-          filePath = readDwarfForm(data, offset, fmt.form, lineStrData)
-        elif fmt.contentType == DW_LNCT_directory_index:
-          let val = readULeb128(data, offset)
-          dirIdx = uint32(val)
+        case fmt.contentType
+        of DW_LNCT_path:
+          entry.pathName = readDwarfForm(data, offset, fmt.form, lineStrData)
+        of DW_LNCT_directory_index:
+          let idx = readFormUnsigned(data, offset, fmt.form)
+          if idx.isSome:
+            entry.directoryIndex = get(idx)
+        of DW_LNCT_timestamp:
+          let ts = readFormUnsigned(data, offset, fmt.form)
+          if ts.isSome:
+            entry.timestamp = get(ts)
+        of DW_LNCT_size:
+          let sz = readFormUnsigned(data, offset, fmt.form)
+          if sz.isSome:
+            entry.size = get(sz)
+        of DW_LNCT_MD5:
+          let digest = readFormMd5(data, offset, fmt.form)
+          if digest.isSome:
+            entry.md5 = get(digest)
         else:
-          discard readDwarfForm(data, offset, fmt.form, lineStrData)
-      if filePath.len > 0:
-        files.add((name: filePath, dirIndex: dirIdx))
+          skipFormValue(data, offset, fmt.form, lineStrData)
+      if entry.pathName.len > 0:
+        files.add(entry)
 
   let programStart = headerEnd
   let programEnd = endOffset
@@ -254,19 +348,22 @@ proc parseDwarfLineTable*(elf: ElfFile): DwarfLineTable =
     let dirIndexOffset = uint32(result.directories.len)
 
     # Adjust directory indices in files and merge
-    var adjustedFiles: seq[tuple[name: string, dirIndex: uint32]] = @[]
+    var adjustedFiles: seq[DwarfLineEntry] = @[]
     for file in files:
+      var adjusted = file
       if header.version < 5:
         # DWARF 2-4: directory index 0 means current directory
-        let globalDirIdx = if file.dirIndex > 0: file.dirIndex + dirIndexOffset else: 0
-        adjustedFiles.add((name: file.name, dirIndex: globalDirIdx))
+        if adjusted.directoryIndex > 0:
+          adjusted.directoryIndex += uint64(dirIndexOffset)
       else:
         # DWARF 5: directory indices are 0-based
-        let globalDirIdx = file.dirIndex + dirIndexOffset + 1
-        adjustedFiles.add((name: file.name, dirIndex: globalDirIdx))
+        adjusted.directoryIndex = adjusted.directoryIndex + uint64(dirIndexOffset) + 1
+      adjustedFiles.add(adjusted)
 
-    result.directories.add(directories)
-    result.files.add(adjustedFiles)
+    for dir in directories:
+      result.directories.add(dir)
+    for file in adjustedFiles:
+      result.files.add(file)
 
     # Extract program data
     if programStart < data.len and programEnd <= data.len and programStart < programEnd:
@@ -280,7 +377,7 @@ proc parseDwarfLineTable*(elf: ElfFile): DwarfLineTable =
         let row = get(rowOpt)
 
         # Convert LineRow to DwarfLineEntry with adjusted file indices
-        result.entries.add(DwarfLineEntry(
+        result.entries.add(DwarfLineProgramRow(
           address: row.address,
           file: uint32(row.file) + fileIndexOffset,
           line: uint32(row.line),
@@ -295,13 +392,13 @@ proc parseDwarfLineTable*(elf: ElfFile): DwarfLineTable =
     sectionOffset = programEnd
 
   # Sort table by address
-  result.entries.sort(proc(a, b: DwarfLineEntry): int = cmp(a.address, b.address))
+  result.entries.sort(proc(a, b: DwarfLineProgramRow): int = cmp(a.address, b.address))
 
 proc findLineInfo*(lineTable: DwarfLineTable; address: uint64): tuple[file: string, line: uint32] =
   ## Find source file and line number for a given address (like addr2line)
 
   # Binary search for the address
-  var bestMatch: DwarfLineEntry
+  var bestMatch: DwarfLineProgramRow
   var found = false
 
   for entry in lineTable.entries:
@@ -318,12 +415,13 @@ proc findLineInfo*(lineTable: DwarfLineTable; address: uint64): tuple[file: stri
   var fileName = "??"
   if bestMatch.file > 0 and bestMatch.file <= uint32(lineTable.files.len):
     let fileEntry = lineTable.files[bestMatch.file - 1]
-    fileName = fileEntry.name
+    fileName = fileEntry.pathName
 
     # Prepend directory if available and filename is not already absolute
+    let dirIdx = int(fileEntry.directoryIndex)
     if fileName.len > 0 and fileName[0] != '/' and
-       fileEntry.dirIndex > 0 and fileEntry.dirIndex <= uint32(lineTable.directories.len):
-      let dirName = lineTable.directories[fileEntry.dirIndex - 1]
+       dirIdx > 0 and dirIdx <= lineTable.directories.len:
+      let dirName = lineTable.directories[dirIdx - 1]
       if dirName.len > 0:
         fileName = dirName & "/" & fileName
 

@@ -1,3 +1,5 @@
+import std/options
+
 # DWARF Line Number Info structures and constants
 
 # DWARF Line Number Program opcodes
@@ -30,10 +32,15 @@ const
   DW_LNCT_MD5* = 0x5'u8
 
   # DWARF forms
+  DW_FORM_data2* = 0x05'u8
+  DW_FORM_data4* = 0x06'u8
+  DW_FORM_data8* = 0x07'u8
   DW_FORM_string* = 0x08'u8
   DW_FORM_data1* = 0x0b'u8
+  DW_FORM_sdata* = 0x0d'u8
   DW_FORM_strp* = 0x0e'u8
   DW_FORM_udata* = 0x0f'u8
+  DW_FORM_data16* = 0x1e'u8
   DW_FORM_line_strp* = 0x1f'u8
 
 type
@@ -50,6 +57,14 @@ type
     standardOpcodeLengths*: seq[uint8]
 
   DwarfLineEntry* = object
+    pathName*: string
+    directoryIndex*: uint64
+    timestamp*: uint64
+    size*: uint64
+    md5*: array[16, byte]
+    source*: Option[string]
+
+  DwarfLineProgramRow* = object
     address*: uint64
     file*: uint32
     line*: uint32
@@ -59,5 +74,5 @@ type
   DwarfLineTable* = object
     header*: DwarfLineHeader
     directories*: seq[string]
-    files*: seq[tuple[name: string, dirIndex: uint32]]
-    entries*: seq[DwarfLineEntry]
+    files*: seq[DwarfLineEntry]
+    entries*: seq[DwarfLineProgramRow]

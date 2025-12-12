@@ -71,12 +71,6 @@ type
     of true:   # Column number (1-based)
       column*: uint64
 
-  LineFileEntry* = object
-    fileName*: string
-    directoryIndex*: uint64
-    timestamp*: uint64
-    size*: uint64
-
 # Line instruction variants
 type
   LineInstructionKind* = enum
@@ -129,7 +123,7 @@ type
     of liSetAddress:
       address*: uint64
     of liDefineFile:
-      fileEntry*: LineFileEntry
+      fileEntry*: DwarfLineEntry
     of liSetDiscriminator:
       discriminator*: uint64
     of liUnknownStandard0:
@@ -437,11 +431,14 @@ proc parseLineInstruction*(data: openArray[byte];
       if sizeOpt.isNone:
         return none(LineInstruction)
 
-      let entry = LineFileEntry(
-        fileName: get(nameOpt),
+      var zeroMd5: array[16, byte]
+      let entry = DwarfLineEntry(
+        pathName: get(nameOpt),
         directoryIndex: get(dirOpt),
         timestamp: get(timeOpt),
-        size: get(sizeOpt)
+        size: get(sizeOpt),
+        md5: zeroMd5,
+        source: none(string)
       )
       offset = chunkEnd
       return some(LineInstruction(kind: liDefineFile, fileEntry: entry))
@@ -756,7 +753,7 @@ when isMainModule:
       let instr = parseLineInstruction(data, offset, header, 8)
       check instr.isSome
       check instr.get().kind == liDefineFile
-      check instr.get().fileEntry.fileName == "foo"
+      check instr.get().fileEntry.pathName == "foo"
       check instr.get().fileEntry.directoryIndex == 1'u64
       check instr.get().fileEntry.timestamp == 2'u64
       check instr.get().fileEntry.size == 3'u64
