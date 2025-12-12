@@ -122,10 +122,7 @@ proc skipFormValue(
     discard readDwarfForm(data, offset, form, lineStrSection)
 
 proc parseLineHeader(
-    data: openArray[byte],
-    offset: var int,
-    addressSize: uint8,
-    lineStrData: seq[byte]
+    data: openArray[byte], offset: var int, addressSize: uint8, lineStrData: seq[byte]
 ): tuple[
   header: DwarfLineHeader,
   directories: seq[string],
@@ -336,8 +333,7 @@ proc parseDwarfLineTable*(elf: ElfFile): DwarfLineTable =
   let data = section.data
 
   # Determine address size from ELF header
-  let addressSize = if elf.header.e_ident[EI_CLASS] == ELFCLASS64: 8'u8
-                    else: 4'u8
+  let addressSize = if elf.header.e_ident[EI_CLASS] == ELFCLASS64: 8'u8 else: 4'u8
 
   # Try to get .debug_line_str section for DWARF 5
   var lineStrData: seq[byte] = @[]
@@ -390,9 +386,7 @@ proc parseDwarfLineTable*(elf: ElfFile): DwarfLineTable =
       result.files.add(file)
 
     # Extract program data
-    if programStart < data.len and
-        programEnd <= data.len and
-        programStart < programEnd:
+    if programStart < data.len and programEnd <= data.len and programStart < programEnd:
       let programData = data[programStart ..< programEnd]
 
       # Use the new state machine to execute the line program
