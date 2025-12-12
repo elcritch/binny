@@ -10,6 +10,58 @@ import std/options
 import ./dwarftypes
 import ../utils
 
+proc readNullTerminated(data: openArray[byte]; offset: var int; limit: int): Option[string] =
+  ## Read a null-terminated string bounded by limit.
+  if offset >= limit:
+    return none(string)
+
+  var endIdx = offset
+  while endIdx < limit and data[endIdx] != 0'u8:
+    inc endIdx
+
+  if endIdx >= limit:
+    return none(string)
+
+  var s = newString(endIdx - offset)
+  for i in 0 ..< (endIdx - offset):
+    s[i] = char(data[offset + i])
+
+  offset = endIdx + 1
+  some(s)
+
+proc readULeb128Limited(data: openArray[byte]; offset: var int; limit: int): Option[uint64] =
+  ## Read a ULEB128 value ensuring we do not read past limit.
+  var value: uint64 = 0
+  var shift = 0
+  var idx = offset
+
+  while idx < limit:
+    let byteVal = data[idx]
+    inc idx
+    value = value or (uint64(byteVal and 0x7f) shl shift)
+    if (byteVal and 0x80) == 0:
+      offset = idx
+      return some(value)
+    shift += 7
+
+  none(uint64)
+
+proc readAddressLimited(data: openArray[byte];
+                        offset: var int;
+                        limit: int;
+                        addressSize: int): Option[uint64] =
+  ## Read a target address honoring the program's address size.
+  if addressSize <= 0 or addressSize > 8:
+    return none(uint64)
+  if offset + addressSize > limit:
+    return none(uint64)
+
+  var value: uint64 = 0
+  for i in 0..<addressSize:
+    value = value or (uint64(data[offset + i]) shl (i * 8))
+  offset += addressSize
+  some(value)
+
 # Column type for line number information
 type
   ColumnType* = object
@@ -18,6 +70,12 @@ type
       discard
     of true:   # Column number (1-based)
       column*: uint64
+
+  LineFileEntry* = object
+    fileName*: string
+    directoryIndex*: uint64
+    timestamp*: uint64
+    size*: uint64
 
 # Line instruction variants
 type
@@ -39,10 +97,13 @@ type
     liSetAddress           # Set address register
     liDefineFile           # Define a new file (DWARF 4 and earlier)
     liSetDiscriminator     # Set discriminator register
-    liUnknownStandard      # Unknown standard opcode
+    liUnknownStandard0     # Unknown standard opcode with no operands
+    liUnknownStandard1     # Unknown standard opcode with one operand
+    liUnknownStandardN     # Unknown standard opcode with many operands
     liUnknownExtended      # Unknown extended opcode
 
   LineInstruction* = object
+    stdOpcode*: uint8
     case kind*: LineInstructionKind
     of liSpecial:
       opcode*: uint8
@@ -68,12 +129,14 @@ type
     of liSetAddress:
       address*: uint64
     of liDefineFile:
-      fileName*: string
-      dirIndex*: uint32
+      fileEntry*: LineFileEntry
     of liSetDiscriminator:
       discriminator*: uint64
-    of liUnknownStandard:
-      stdOpcode*: uint8
+    of liUnknownStandard0:
+      discard
+    of liUnknownStandard1:
+      stdArg*: uint64
+    of liUnknownStandardN:
       stdArgs*: seq[uint64]
     of liUnknownExtended:
       extOpcode*: uint8
@@ -144,11 +207,11 @@ proc applyLineAdvance*(row: var LineRow; lineIncrement: int64) =
 # Operation advance helper
 proc applyOperationAdvance*(row: var LineRow;
                            operationAdvance: uint64;
-                           header: DwarfLineHeader): bool =
+                           header: DwarfLineHeader) =
   ## Apply operation advance (step 2 of section 6.2.5.1)
-  ## Returns false on overflow error
+  ## Raises ValueError on overflow
   if row.tombstone:
-    return true
+    return
 
   let minInsnLen = uint64(header.minInstructionLength)
   let maxOpsPerInsn = uint64(header.maxOpsPerInsn)
@@ -165,10 +228,9 @@ proc applyOperationAdvance*(row: var LineRow;
 
   # Check for overflow
   if addressAdvance > (high(uint64) - row.address):
-    return false
+    raise newException(ValueError, "DWARF line address overflow")
 
   row.address += addressAdvance
-  return true
 
 proc adjustOpcode*(opcode: uint8; header: DwarfLineHeader): uint8 {.inline.} =
   ## Adjust opcode by subtracting opcode_base
@@ -176,13 +238,12 @@ proc adjustOpcode*(opcode: uint8; header: DwarfLineHeader): uint8 {.inline.} =
 
 proc execSpecialOpcode*(row: var LineRow;
                         opcode: uint8;
-                        header: DwarfLineHeader): bool =
+                        header: DwarfLineHeader) =
   ## Execute a special opcode (section 6.2.5.1)
-  ## Returns false on error
   let adjustedOpcode = adjustOpcode(opcode, header)
 
   if header.lineRange == 0:
-    return false
+    raise newException(ValueError, "Invalid line range in DWARF header")
 
   let lineAdvance = adjustedOpcode mod header.lineRange
   let operationAdvance = adjustedOpcode div header.lineRange
@@ -192,7 +253,7 @@ proc execSpecialOpcode*(row: var LineRow;
   row.applyLineAdvance(lineBase + int64(lineAdvance))
 
   # Step 2: Apply operation advance
-  result = row.applyOperationAdvance(uint64(operationAdvance), header)
+  row.applyOperationAdvance(uint64(operationAdvance), header)
 
 proc reset*(row: var LineRow; header: DwarfLineHeader) =
   ## Reset row state after emitting
@@ -225,15 +286,14 @@ proc executeInstruction*(row: var LineRow;
   ## Returns false on error or if no row should be emitted
   case instruction.kind
   of liSpecial:
-    if not row.execSpecialOpcode(instruction.opcode, header):
-      return false
+    row.execSpecialOpcode(instruction.opcode, header)
     return true
 
   of liCopy:
     return true
 
   of liAdvancePc:
-    discard row.applyOperationAdvance(instruction.pcAdvance, header)
+    row.applyOperationAdvance(instruction.pcAdvance, header)
     return false
 
   of liAdvanceLine:
@@ -260,12 +320,15 @@ proc executeInstruction*(row: var LineRow;
     # Special opcode 255
     let adjusted = adjustOpcode(255, header)
     let operationAdvance = adjusted div header.lineRange
-    discard row.applyOperationAdvance(uint64(operationAdvance), header)
+    row.applyOperationAdvance(uint64(operationAdvance), header)
     return false
 
   of liFixedAddPc:
     if not row.tombstone:
-      row.address += uint64(instruction.fixedAdvance)
+      let advance = uint64(instruction.fixedAdvance)
+      if advance > (high(uint64) - row.address):
+        raise newException(ValueError, "DWARF line fixed advance overflow")
+      row.address += advance
       row.opIndex = 0
     return false
 
@@ -300,7 +363,8 @@ proc executeInstruction*(row: var LineRow;
     row.discriminator = instruction.discriminator
     return false
 
-  of liDefineFile, liUnknownStandard, liUnknownExtended:
+  of liDefineFile, liUnknownStandard0, liUnknownStandard1,
+     liUnknownStandardN, liUnknownExtended:
     # No-op for unknown instructions
     return false
 
@@ -318,40 +382,88 @@ proc parseLineInstruction*(data: openArray[byte];
   inc offset
 
   if opcode == 0:
-    # Extended opcode
     let extLen = readULeb128(data, offset)
-    if offset >= data.len or offset + int(extLen) > data.len:
+    if extLen == 0:
+      return none(LineInstruction)
+    if extLen > uint64(high(int)):
+      return none(LineInstruction)
+    let extLenInt = int(extLen)
+    if offset + extLenInt > data.len:
       return none(LineInstruction)
 
+    let chunkEnd = offset + extLenInt
     let extOpcode = data[offset]
     inc offset
 
+    let payloadStart = offset
     case extOpcode
     of DW_LNE_end_sequence:
+      offset = chunkEnd
       return some(LineInstruction(kind: liEndSequence))
 
     of DW_LNE_set_address:
-      if addressSize == 8 and offset + 8 <= data.len:
-        let addrValue = getU64LE(data, offset)
-        offset += 8
-        return some(LineInstruction(kind: liSetAddress, address: addrValue))
-      elif addressSize == 4 and offset + 4 <= data.len:
-        let addrValue = uint64(getU32LE(data, offset))
-        offset += 4
-        return some(LineInstruction(kind: liSetAddress, address: addrValue))
-      else:
+      var payloadOffset = payloadStart
+      let addrOpt = readAddressLimited(data, payloadOffset, chunkEnd, int(addressSize))
+      if addrOpt.isNone:
+        return none(LineInstruction)
+      offset = chunkEnd
+      return some(LineInstruction(kind: liSetAddress, address: get(addrOpt)))
+
+    of DW_LNE_define_file:
+      if header.version > 4:
+        let extData = if payloadStart < chunkEnd:
+                        @data[payloadStart..<chunkEnd]
+                      else:
+                        @[]
+        offset = chunkEnd
+        return some(LineInstruction(kind: liUnknownExtended,
+                                   extOpcode: extOpcode,
+                                   extData: extData))
+
+      var payloadOffset = payloadStart
+      let nameOpt = readNullTerminated(data, payloadOffset, chunkEnd)
+      if nameOpt.isNone:
         return none(LineInstruction)
 
+      let dirOpt = readULeb128Limited(data, payloadOffset, chunkEnd)
+      if dirOpt.isNone:
+        return none(LineInstruction)
+
+      let timeOpt = readULeb128Limited(data, payloadOffset, chunkEnd)
+      if timeOpt.isNone:
+        return none(LineInstruction)
+
+      let sizeOpt = readULeb128Limited(data, payloadOffset, chunkEnd)
+      if sizeOpt.isNone:
+        return none(LineInstruction)
+
+      let entry = LineFileEntry(
+        fileName: get(nameOpt),
+        directoryIndex: get(dirOpt),
+        timestamp: get(timeOpt),
+        size: get(sizeOpt)
+      )
+      offset = chunkEnd
+      return some(LineInstruction(kind: liDefineFile, fileEntry: entry))
+
     of DW_LNE_set_discriminator:
-      let disc = readULeb128(data, offset)
-      return some(LineInstruction(kind: liSetDiscriminator, discriminator: disc))
+      var payloadOffset = payloadStart
+      let discOpt = readULeb128Limited(data, payloadOffset, chunkEnd)
+      if discOpt.isNone:
+        return none(LineInstruction)
+      offset = chunkEnd
+      return some(LineInstruction(kind: liSetDiscriminator,
+                                 discriminator: get(discOpt)))
 
     else:
-      # Unknown extended opcode - skip it
-      offset += int(extLen) - 1
+      let extData = if payloadStart < chunkEnd:
+                      @data[payloadStart..<chunkEnd]
+                    else:
+                      @[]
+      offset = chunkEnd
       return some(LineInstruction(kind: liUnknownExtended,
                                  extOpcode: extOpcode,
-                                 extData: @[]))
+                                 extData: extData))
 
   elif opcode >= header.opcodeBase:
     # Special opcode
@@ -396,17 +508,37 @@ proc parseLineInstruction*(data: openArray[byte];
       else:
         return none(LineInstruction)
 
+    of DW_LNS_set_prologue_end:
+      return some(LineInstruction(kind: liSetPrologueEnd))
+
+    of DW_LNS_set_epilogue_begin:
+      return some(LineInstruction(kind: liSetEpilogueBegin))
+
+    of DW_LNS_set_isa:
+      let isa = readULeb128(data, offset)
+      return some(LineInstruction(kind: liSetIsa, isa: isa))
+
     else:
       # Unknown standard opcode
       if opcode < header.opcodeBase and
          opcode - 1 < uint8(header.standardOpcodeLengths.len):
         let numArgs = int(header.standardOpcodeLengths[opcode - 1])
-        var args: seq[uint64] = @[]
-        for i in 0..<numArgs:
-          args.add(readULeb128(data, offset))
-        return some(LineInstruction(kind: liUnknownStandard,
-                                   stdOpcode: opcode,
-                                   stdArgs: args))
+        case numArgs
+        of 0:
+          return some(LineInstruction(kind: liUnknownStandard0,
+                                     stdOpcode: opcode))
+        of 1:
+          let arg = readULeb128(data, offset)
+          return some(LineInstruction(kind: liUnknownStandard1,
+                                     stdOpcode: opcode,
+                                     stdArg: arg))
+        else:
+          var args: seq[uint64] = @[]
+          for i in 0..<numArgs:
+            args.add(readULeb128(data, offset))
+          return some(LineInstruction(kind: liUnknownStandardN,
+                                     stdOpcode: opcode,
+                                     stdArgs: args))
       else:
         return none(LineInstruction)
 
@@ -515,8 +647,7 @@ when isMainModule:
       )
       var row = LineRow(address: 0x1000)
 
-      let ok = row.applyOperationAdvance(3, header)
-      check ok == true
+      row.applyOperationAdvance(3, header)
       check row.address == 0x1000'u64 + (3'u64 * 4'u64)
       check row.opIndex == 0'u64
 
@@ -533,8 +664,7 @@ when isMainModule:
       # Special opcode 20: adjusted = 20 - 13 = 7
       # line_advance = 7 % 14 = 7, operation_advance = 7 / 14 = 0
       # line = 10 + (-5 + 7) = 10 + 2 = 12
-      let ok = row.execSpecialOpcode(20, header)
-      check ok == true
+      row.execSpecialOpcode(20, header)
       check row.line == 12'u64
 
     test "Column type":
@@ -582,6 +712,102 @@ when isMainModule:
       check instr.isSome
       check instr.get().kind == liSetAddress
       check instr.get().address == 0x1000'u64
+
+    test "Instruction parsing - SetPrologue/Epilogue/Isa":
+      var header = DwarfLineHeader(opcodeBase: 13)
+      var data = @[DW_LNS_set_prologue_end]
+      var offset = 0
+      var instr = parseLineInstruction(data, offset, header, 8)
+      check instr.isSome and instr.get().kind == liSetPrologueEnd
+
+      data = @[DW_LNS_set_epilogue_begin]
+      offset = 0
+      instr = parseLineInstruction(data, offset, header, 8)
+      check instr.isSome and instr.get().kind == liSetEpilogueBegin
+
+      data = @[DW_LNS_set_isa, 0x81'u8, 0x01'u8]  # ULEB128 value 129
+      offset = 0
+      instr = parseLineInstruction(data, offset, header, 8)
+      check instr.isSome
+      check instr.get().kind == liSetIsa
+      check instr.get().isa == 129'u64
+
+    test "Instruction parsing - SetDiscriminator":
+      var header = DwarfLineHeader(opcodeBase: 13)
+      var data: seq[byte] = @[0'u8, 0x02'u8, DW_LNE_set_discriminator, 0x2a'u8]
+      var offset = 0
+      let instr = parseLineInstruction(data, offset, header, 8)
+      check instr.isSome
+      check instr.get().kind == liSetDiscriminator
+      check instr.get().discriminator == 42'u64
+
+    test "Instruction parsing - DefineFile DWARF4":
+      var header = DwarfLineHeader(opcodeBase: 13, version: 4)
+      var data: seq[byte] = @[
+        0'u8,
+        8'u8,
+        DW_LNE_define_file,
+        byte('f'), byte('o'), byte('o'), 0'u8,
+        1'u8,  # dir index
+        2'u8,  # timestamp
+        3'u8   # size
+      ]
+      var offset = 0
+      let instr = parseLineInstruction(data, offset, header, 8)
+      check instr.isSome
+      check instr.get().kind == liDefineFile
+      check instr.get().fileEntry.fileName == "foo"
+      check instr.get().fileEntry.directoryIndex == 1'u64
+      check instr.get().fileEntry.timestamp == 2'u64
+      check instr.get().fileEntry.size == 3'u64
+
+    test "Instruction parsing - DefineFile DWARF5 treated as unknown":
+      var header = DwarfLineHeader(opcodeBase: 13, version: 5)
+      var data: seq[byte] = @[
+        0'u8,
+        8'u8,
+        DW_LNE_define_file,
+        byte('b'), byte('a'), byte('r'), 0'u8,
+        1'u8, 2'u8, 3'u8
+      ]
+      var offset = 0
+      let instr = parseLineInstruction(data, offset, header, 8)
+      check instr.isSome
+      check instr.get().kind == liUnknownExtended
+      check instr.get().extOpcode == DW_LNE_define_file
+      check instr.get().extData.len == 7
+
+    test "Instruction parsing - Unknown standard opcodes":
+      var header = DwarfLineHeader(opcodeBase: 20)
+      header.standardOpcodeLengths = newSeq[uint8](int(header.opcodeBase))
+      header.standardOpcodeLengths[12] = 0  # opcode 13 no args
+      header.standardOpcodeLengths[13] = 1  # opcode 14 single arg
+      header.standardOpcodeLengths[14] = 2  # opcode 15 multiple args
+
+      var data = @[13'u8]
+      var offset = 0
+      var instr = parseLineInstruction(data, offset, header, 8)
+      check instr.isSome
+      check instr.get().kind == liUnknownStandard0
+      check instr.get().stdOpcode == 13'u8
+
+      data = @[14'u8, 0x2a'u8]
+      offset = 0
+      instr = parseLineInstruction(data, offset, header, 8)
+      check instr.isSome
+      check instr.get().kind == liUnknownStandard1
+      check instr.get().stdOpcode == 14'u8
+      check instr.get().stdArg == 42'u64
+
+      data = @[15'u8, 0x01'u8, 0x02'u8]
+      offset = 0
+      instr = parseLineInstruction(data, offset, header, 8)
+      check instr.isSome
+      check instr.get().kind == liUnknownStandardN
+      check instr.get().stdOpcode == 15'u8
+      check instr.get().stdArgs.len == 2
+      check instr.get().stdArgs[0] == 1'u64
+      check instr.get().stdArgs[1] == 2'u64
 
     test "Row reset after Copy":
       var header = DwarfLineHeader(

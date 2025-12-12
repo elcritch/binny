@@ -12,6 +12,9 @@ const
   DW_LNS_set_basic_block* = 7'u8
   DW_LNS_const_add_pc* = 8'u8
   DW_LNS_fixed_advance_pc* = 9'u8
+  DW_LNS_set_prologue_end* = 10'u8
+  DW_LNS_set_epilogue_begin* = 11'u8
+  DW_LNS_set_isa* = 12'u8
 
   DW_LNE_end_sequence* = 1'u8
   DW_LNE_set_address* = 2'u8
