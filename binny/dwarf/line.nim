@@ -386,7 +386,9 @@ proc parseLineInstruction*(
       return some(LineInstruction(kind: liEndSequence))
     of DW_LNE_set_address:
       var payloadOffset = payloadStart
-      let addrOpt = readAddressLimited(data, payloadOffset, chunkEnd, int(addressSize))
+      let addrOpt = readAddressLimited(data,
+                                       payloadOffset,
+                                       chunkEnd, int(addressSize))
       if addrOpt.isNone:
         return none(LineInstruction)
       offset = chunkEnd
@@ -440,7 +442,8 @@ proc parseLineInstruction*(
         return none(LineInstruction)
       offset = chunkEnd
       return
-        some(LineInstruction(kind: liSetDiscriminator, discriminator: get(discOpt)))
+        some(LineInstruction(kind: liSetDiscriminator,
+                             discriminator: get(discOpt)))
     else:
       let extData =
         if payloadStart < chunkEnd:
@@ -449,7 +452,9 @@ proc parseLineInstruction*(
           @[]
       offset = chunkEnd
       return some(
-        LineInstruction(kind: liUnknownExtended, extOpcode: extOpcode, extData: extData)
+        LineInstruction(kind: liUnknownExtended,
+                        extOpcode: extOpcode,
+                        extData: extData)
       )
   elif opcode >= header.opcodeBase:
     # Special opcode
@@ -461,10 +466,12 @@ proc parseLineInstruction*(
       return some(LineInstruction(kind: liCopy))
     of DW_LNS_advance_pc:
       let advance = readULeb128(data, offset)
-      return some(LineInstruction(kind: liAdvancePc, pcAdvance: advance))
+      return some(LineInstruction(kind: liAdvancePc,
+                                  pcAdvance: advance))
     of DW_LNS_advance_line:
       let increment = readSLeb128(data, offset)
-      return some(LineInstruction(kind: liAdvanceLine, lineIncrement: increment))
+      return some(LineInstruction(kind: liAdvanceLine,
+                                  lineIncrement: increment))
     of DW_LNS_set_file:
       let file = readULeb128(data, offset)
       return some(LineInstruction(kind: liSetFile, fileIndex: file))
@@ -481,7 +488,8 @@ proc parseLineInstruction*(
       if offset + 2 <= data.len:
         let advance = getU16LE(data, offset)
         offset += 2
-        return some(LineInstruction(kind: liFixedAddPc, fixedAdvance: advance))
+        return some(LineInstruction(kind: liFixedAddPc,
+                                    fixedAdvance: advance))
       else:
         return none(LineInstruction)
     of DW_LNS_set_prologue_end:
