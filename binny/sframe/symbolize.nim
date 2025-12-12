@@ -18,7 +18,8 @@ var
 
 proc initStackframes*() =
   ## Initializes global SFrame and symbol data from the current executable.
-  if gInitialized: return
+  if gInitialized:
+    return
 
   let exePath = getAppFilename()
   try:
@@ -47,7 +48,7 @@ proc initStackframes*() =
 initStackframes()
 
 proc symbolizeStackTraceImpl*(
-  frames: openArray[uint64]; funcSymbols: openArray[ElfSymbol]
+    frames: openArray[uint64], funcSymbols: openArray[ElfSymbol]
 ): seq[string] {.raises: [], gcsafe.} =
   ## Symbolize a stack trace using ELF parser for function symbols and addr2line for source locations.
   ## Uses ELF parser as primary method with addr2line fallback for enhanced source information.
@@ -81,7 +82,7 @@ proc symbolizeStackTraceImpl*(
 proc symbolizeStackTrace*(frames: openArray[uint64]): seq[string] =
   symbolizeStackTraceImpl(frames, gFuncSymbols)
 
-proc printStackTrace*(frames: openArray[uint64]; symbols: openArray[string] = @[]) =
+proc printStackTrace*(frames: openArray[uint64], symbols: openArray[string] = @[]) =
   ## Print a formatted stack trace with optional symbols
   echo "Stack trace (top->bottom):"
   for i, pc in frames:

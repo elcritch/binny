@@ -86,7 +86,7 @@ type
     symbols*: seq[ElfSymbol]
     stringTable*: seq[byte]
 
-proc readString(data: openArray[byte]; offset: int): string =
+proc readString(data: openArray[byte], offset: int): string =
   var i = offset
   result = ""
   while i < data.len and data[i] != 0:
@@ -98,8 +98,8 @@ proc parseElfHeader*(data: openArray[byte]): ElfHeader64 =
     raise newException(ValueError, "File too small for ELF header")
 
   # Check ELF magic
-  if data[0] != ELFMAG0 or data[1] != ELFMAG1.uint8 or
-     data[2] != ELFMAG2.uint8 or data[3] != ELFMAG3.uint8:
+  if data[0] != ELFMAG0 or data[1] != ELFMAG1.uint8 or data[2] != ELFMAG2.uint8 or
+      data[3] != ELFMAG3.uint8:
     raise newException(ValueError, "Not a valid ELF file")
 
   # Check for 64-bit little endian
@@ -110,7 +110,7 @@ proc parseElfHeader*(data: openArray[byte]): ElfHeader64 =
     raise newException(ValueError, "Only little endian ELF files supported")
 
   # Copy ident array
-  for i in 0..15:
+  for i in 0 .. 15:
     result.e_ident[i] = data[i]
 
   # Parse rest of header (assuming little endian)
@@ -128,7 +128,7 @@ proc parseElfHeader*(data: openArray[byte]): ElfHeader64 =
   result.e_shnum = getU16LE(data, 60)
   result.e_shstrndx = getU16LE(data, 62)
 
-proc parseSectionHeader*(data: openArray[byte]; offset: int): SectionHeader64 =
+proc parseSectionHeader*(data: openArray[byte], offset: int): SectionHeader64 =
   if offset + sizeof(SectionHeader64) > data.len:
     raise newException(ValueError, "Invalid section header offset")
 
@@ -143,7 +143,7 @@ proc parseSectionHeader*(data: openArray[byte]; offset: int): SectionHeader64 =
   result.sh_addralign = getU64LE(data, offset + 48)
   result.sh_entsize = getU64LE(data, offset + 56)
 
-proc parseSymbol*(data: openArray[byte]; offset: int): Symbol64 =
+proc parseSymbol*(data: openArray[byte], offset: int): Symbol64 =
   if offset + sizeof(Symbol64) > data.len:
     raise newException(ValueError, "Invalid symbol offset")
 
@@ -168,7 +168,7 @@ proc parseElf*(filePath: string): ElfFile =
 
   # First pass: read all section headers
   var sectionHeaders = newSeq[SectionHeader64](numSections)
-  for i in 0..<numSections:
+  for i in 0 ..< numSections:
     let offset = sectionOffset + i * sectionSize
     sectionHeaders[i] = parseSectionHeader(data, offset)
 
@@ -179,14 +179,14 @@ proc parseElf*(filePath: string): ElfFile =
     let start = int(shstrtabHdr.sh_offset)
     let size = int(shstrtabHdr.sh_size)
     if start + size <= data.len:
-      shstrtab = data[start..<start + size]
+      shstrtab = data[start ..< start + size]
 
   # Second pass: create sections with names and data
   result.sections = newSeq[ElfSection](numSections)
   var symtabSection = -1
   var strtabSection = -1
 
-  for i in 0..<numSections:
+  for i in 0 ..< numSections:
     let hdr = sectionHeaders[i]
     var section = ElfSection()
 
@@ -206,7 +206,7 @@ proc parseElf*(filePath: string): ElfFile =
       let start = int(hdr.sh_offset)
       let size = int(hdr.sh_size)
       if start + size <= data.len:
-        section.data = data[start..<start + size]
+        section.data = data[start ..< start + size]
 
     result.sections[i] = section
 
@@ -225,7 +225,7 @@ proc parseElf*(filePath: string): ElfFile =
     let numSymbols = int(symtab.size) div sizeof(Symbol64)
     result.symbols = newSeq[ElfSymbol](numSymbols)
 
-    for i in 0..<numSymbols:
+    for i in 0 ..< numSymbols:
       let offset = i * sizeof(Symbol64)
       let sym = parseSymbol(symtab.data, offset)
 
@@ -240,7 +240,7 @@ proc parseElf*(filePath: string): ElfFile =
 
       result.symbols[i] = elfSym
 
-proc findSection*(elf: ElfFile; name: string): int =
+proc findSection*(elf: ElfFile, name: string): int =
   for i, section in elf.sections:
     if section.name == name:
       return i

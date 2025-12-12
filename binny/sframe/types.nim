@@ -20,32 +20,32 @@ const
   SFRAME_F_FRAME_POINTER* = SFrameFlags(0x02'u8)
   SFRAME_F_FDE_FUNC_START_PCREL* = SFrameFlags(0x04'u8) # v2 errata 1
 
-proc hasFlag*(flags: SFrameFlags; flag: SFrameFlags): bool {.inline.} =
+proc hasFlag*(flags: SFrameFlags, flag: SFrameFlags): bool {.inline.} =
   (uint8(flags) and uint8(flag)) != 0
 
 # 2.1 SFrame Preamble
-type
-  SFramePreamble* {.packed.} = object
-    magic*: uint16      # 0xDEE2
-    version*: uint8     # 1 or 2
-    flags*: uint8       # section flags
+type SFramePreamble* {.packed.} = object
+  magic*: uint16 # 0xDEE2
+  version*: uint8 # 1 or 2
+  flags*: uint8 # section flags
 
 proc isValid*(pre: SFramePreamble): bool =
   ## Basic validation of the preamble fields
-  (pre.magic == SFRAME_MAGIC) and (pre.version == SFRAME_VERSION_1 or pre.version == SFRAME_VERSION_2)
+  (pre.magic == SFRAME_MAGIC) and
+    (pre.version == SFRAME_VERSION_1 or pre.version == SFRAME_VERSION_2)
 
 # 2.2 SFrame Header
 type
   SFrameAbiArch* = enum
-    sframeAbiInvalid = 0,
-    sframeAbiAarch64Big = 1,
-    sframeAbiAarch64Little = 2,
-    sframeAbiAmd64Little = 3,
+    sframeAbiInvalid = 0
+    sframeAbiAarch64Big = 1
+    sframeAbiAarch64Little = 2
+    sframeAbiAmd64Little = 3
     sframeAbiS390xBig = 4
 
   SFrameHeader* {.packed.} = object
     preamble*: SFramePreamble
-    abiArch*: uint8             # SFrameAbiArch encoded
+    abiArch*: uint8 # SFrameAbiArch encoded
     cfaFixedFpOffset*: int8
     cfaFixedRaOffset*: int8
     auxHdrLen*: uint8
@@ -56,73 +56,95 @@ type
     freOff*: uint32
     auxData*: seq[byte]
 
-proc sizeofSFrameHeaderFixed*(): int {.inline.} = 28 # bytes, without aux bytes
+proc sizeofSFrameHeaderFixed*(): int {.inline.} =
+  28 # bytes, without aux bytes
 
 # 2.3 SFrame FDE info word helpers
 type
   SFrameFdeType* = enum
-    sframeFdePcInc = 0,
+    sframeFdePcInc = 0
     sframeFdePcMask = 1
+
   SFrameFreType* = enum
-    sframeFreAddr1 = 0,
-    sframeFreAddr2 = 1,
+    sframeFreAddr1 = 0
+    sframeFreAddr2 = 1
     sframeFreAddr4 = 2
+
   SFrameFdeInfo* = distinct uint8
 
-proc `==`*(a, b: SFrameFdeInfo): bool {.inline.} = uint8(a) == uint8(b)
+proc `==`*(a, b: SFrameFdeInfo): bool {.inline.} =
+  uint8(a) == uint8(b)
 
-proc fdeInfo*(freType: SFrameFreType; fdeType: SFrameFdeType; aarch64PauthKeyB=false): SFrameFdeInfo =
+proc fdeInfo*(
+    freType: SFrameFreType, fdeType: SFrameFdeType, aarch64PauthKeyB = false
+): SFrameFdeInfo =
   var v: uint8 = uint8(freType) and 0x0F
   v = v or (uint8(fdeType) shl 4)
-  if aarch64PauthKeyB: v = v or (1'u8 shl 5)
+  if aarch64PauthKeyB:
+    v = v or (1'u8 shl 5)
   SFrameFdeInfo(v)
 
 proc fdeInfoGetFreType*(info: SFrameFdeInfo): SFrameFreType {.inline.} =
   SFrameFreType(uint8(info) and 0x0F)
+
 proc fdeInfoGetFdeType*(info: SFrameFdeInfo): SFrameFdeType {.inline.} =
   SFrameFdeType((uint8(info) shr 4) and 0x01)
+
 proc fdeInfoGetAarch64PauthKeyB*(info: SFrameFdeInfo): bool {.inline.} =
   ((uint8(info) shr 5) and 0x01) == 1
 
-type
-  SFrameFDE* {.packed.} = object
-    funcStartAddress*: int32
-    funcSize*: uint32
-    funcStartFreOff*: uint32
-    funcNumFres*: uint32
-    funcInfo*: SFrameFdeInfo
-    funcRepSize*: uint8
-    funcPadding2*: uint16
+type SFrameFDE* {.packed.} = object
+  funcStartAddress*: int32
+  funcSize*: uint32
+  funcStartFreOff*: uint32
+  funcNumFres*: uint32
+  funcInfo*: SFrameFdeInfo
+  funcRepSize*: uint8
+  funcPadding2*: uint16
 
-proc sizeofSFrameFDE*(): int {.inline.} = 20
+proc sizeofSFrameFDE*(): int {.inline.} =
+  20
 
 # 2.4 SFrame FRE info and entries
 type
   SFrameOffsetSize* = enum
-    sframeFreOff1B = 0,
-    sframeFreOff2B = 1,
+    sframeFreOff1B = 0
+    sframeFreOff2B = 1
     sframeFreOff4B = 2
+
   SFrameCfaBase* = enum
-    sframeCfaBaseFp = 0,
+    sframeCfaBaseFp = 0
     sframeCfaBaseSp = 1
+
   SFrameFreInfo* = distinct uint8
 
-proc `==`*(a, b: SFrameFreInfo): bool {.inline.} = uint8(a) == uint8(b)
+proc `==`*(a, b: SFrameFreInfo): bool {.inline.} =
+  uint8(a) == uint8(b)
 
-proc freInfo*(cfaBase: SFrameCfaBase; offsetCount: range[0..15]; offsetSize: SFrameOffsetSize; mangledRa=false): SFrameFreInfo =
+proc freInfo*(
+    cfaBase: SFrameCfaBase,
+    offsetCount: range[0 .. 15],
+    offsetSize: SFrameOffsetSize,
+    mangledRa = false,
+): SFrameFreInfo =
   var v: uint8 = 0
-  if cfaBase == sframeCfaBaseSp: v = v or 0x01
+  if cfaBase == sframeCfaBaseSp:
+    v = v or 0x01
   v = v or (uint8(offsetCount and 0x0F) shl 1)
   v = v or (uint8(offsetSize) shl 5)
-  if mangledRa: v = v or 0x80'u8
+  if mangledRa:
+    v = v or 0x80'u8
   SFrameFreInfo(v)
 
 proc freInfoGetCfaBase*(info: SFrameFreInfo): SFrameCfaBase {.inline.} =
   if (uint8(info) and 0x01) == 0: sframeCfaBaseFp else: sframeCfaBaseSp
+
 proc freInfoGetOffsetCount*(info: SFrameFreInfo): int {.inline.} =
   int((uint8(info) shr 1) and 0x0F)
+
 proc freInfoGetOffsetSize*(info: SFrameFreInfo): SFrameOffsetSize {.inline.} =
   SFrameOffsetSize((uint8(info) shr 5) and 0x03)
+
 proc freInfoGetMangledRa*(info: SFrameFreInfo): bool {.inline.} =
   ((uint8(info) and 0x80) != 0)
 
@@ -132,18 +154,16 @@ proc freInfoOffsetByteSize*(info: SFrameFreInfo): int {.inline.} =
   of sframeFreOff2B: 2
   of sframeFreOff4B: 4
 
-type
-  SFrameFRE* = object
-    startAddr*: uint32 # stored width depends on freType
-    info*: SFrameFreInfo
-    offsets*: seq[int32] # sign-extended values
+type SFrameFRE* = object
+  startAddr*: uint32 # stored width depends on freType
+  info*: SFrameFreInfo
+  offsets*: seq[int32] # sign-extended values
 
 # Full section container and encode/decode
-type
-  SFrameSection* = object
-    header*: SFrameHeader
-    fdes*: seq[SFrameFDE]
-    fres*: seq[SFrameFRE] # concatenated in function order
+type SFrameSection* = object
+  header*: SFrameHeader
+  fdes*: seq[SFrameFDE]
+  fres*: seq[SFrameFRE] # concatenated in function order
 
 # ---- ABI-specific interpretation helpers ----
 
@@ -153,7 +173,9 @@ type FreOffsets* = object
   raFromCfa*: Option[int32]
   fpFromCfa*: Option[int32]
 
-proc freOffsetsForAbi*(abi: SFrameAbiArch; hdr: SFrameHeader; fre: SFrameFRE): FreOffsets {.raises: [].} =
+proc freOffsetsForAbi*(
+    abi: SFrameAbiArch, hdr: SFrameHeader, fre: SFrameFRE
+): FreOffsets {.raises: [].} =
   ## Compute CFA/RA/FP offsets per ABI from a FRE and header.
   result.cfaBase = fre.info.freInfoGetCfaBase()
   if fre.offsets.len == 0:
@@ -193,9 +215,10 @@ proc freOffsetsForAbi*(abi: SFrameAbiArch; hdr: SFrameHeader; fre: SFrameFRE): F
 
 # ---- Address computations and lookups ----
 
-proc headerByteLen*(h: SFrameHeader): int {.inline.} = sizeofSFrameHeaderFixed() + int(h.auxHdrLen)
+proc headerByteLen*(h: SFrameHeader): int {.inline.} =
+  sizeofSFrameHeaderFixed() + int(h.auxHdrLen)
 
-proc funcStartAddress*(sec: SFrameSection; fdeIdx: int; sectionBase: uint64): uint64 =
+proc funcStartAddress*(sec: SFrameSection, fdeIdx: int, sectionBase: uint64): uint64 =
   ## Compute function start virtual address for FDE index given section base address.
   let hdr = sec.header
   let fde = sec.fdes[fdeIdx]
@@ -203,22 +226,25 @@ proc funcStartAddress*(sec: SFrameSection; fdeIdx: int; sectionBase: uint64): ui
   let fs = uint64(cast[int64](fde.funcStartAddress))
   if flags.hasFlag(SFRAME_F_FDE_FUNC_START_PCREL):
     # Offset from the field itself
-    let fieldAddr = sectionBase + uint64(hdr.headerByteLen() + int(hdr.fdeOff) + fdeIdx * sizeofSFrameFDE())
+    let fieldAddr =
+      sectionBase +
+      uint64(hdr.headerByteLen() + int(hdr.fdeOff) + fdeIdx * sizeofSFrameFDE())
     result = fieldAddr + fs
   else:
     # Offset from start of SFrame section
     result = sectionBase + fs
 
-proc funcFreStartIndex*(sec: SFrameSection; fdeIdx: int): int =
+proc funcFreStartIndex*(sec: SFrameSection, fdeIdx: int): int =
   ## Compute the global index in sec.fres where fdeIdx's FREs begin.
   var idx = 0
   for i in 0 ..< fdeIdx:
     idx += int(sec.fdes[i].funcNumFres)
   idx
 
-proc findFdeIndexByPc*(sec: SFrameSection; pc: uint64; sectionBase: uint64): int =
+proc findFdeIndexByPc*(sec: SFrameSection, pc: uint64, sectionBase: uint64): int =
   ## Binary search FDE by PC. Returns -1 if not found.
-  if sec.fdes.len == 0: return -1
+  if sec.fdes.len == 0:
+    return -1
   let flags = SFrameFlags(sec.header.preamble.flags)
   # Expect sorted if flag set; we still binary search regardless.
   var lo = 0
@@ -229,7 +255,8 @@ proc findFdeIndexByPc*(sec: SFrameSection; pc: uint64; sectionBase: uint64): int
     let start = sec.funcStartAddress(mid, sectionBase)
     let size = uint64(sec.fdes[mid].funcSize)
     if pc < start:
-      if mid == 0: break
+      if mid == 0:
+        break
       hi = mid - 1
     elif pc >= start + size:
       lo = mid + 1
@@ -238,10 +265,13 @@ proc findFdeIndexByPc*(sec: SFrameSection; pc: uint64; sectionBase: uint64): int
       break
   res
 
-proc pcToFre*(sec: SFrameSection; pc: uint64; sectionBase: uint64): tuple[found: bool, fdeIdx: int, freLocalIdx: int, freGlobalIdx: int] =
+proc pcToFre*(
+    sec: SFrameSection, pc: uint64, sectionBase: uint64
+): tuple[found: bool, fdeIdx: int, freLocalIdx: int, freGlobalIdx: int] =
   ## Map a PC to the containing (FDE, FRE). Returns found=false if not matched.
   let fi = sec.findFdeIndexByPc(pc, sectionBase)
-  if fi < 0: return (false, -1, -1, -1)
+  if fi < 0:
+    return (false, -1, -1, -1)
   let fde = sec.fdes[fi]
   let fstart = sec.funcStartAddress(fi, sectionBase)
   var offWithin: uint64
@@ -251,13 +281,15 @@ proc pcToFre*(sec: SFrameSection; pc: uint64; sectionBase: uint64): tuple[found:
     offWithin = pc - fstart
   of sframeFdePcMask:
     let rep = uint64(fde.funcRepSize)
-    if rep == 0: return (false, -1, -1, -1)
+    if rep == 0:
+      return (false, -1, -1, -1)
     offWithin = (pc - fstart) mod rep
 
   # Binary search in FREs for this function using startAddr
   let freStart = sec.funcFreStartIndex(fi)
   let n = int(fde.funcNumFres)
-  if n == 0: return (false, -1, -1, -1)
+  if n == 0:
+    return (false, -1, -1, -1)
   var lo = 0
   var hi = n - 1
   var best = -1
@@ -268,8 +300,9 @@ proc pcToFre*(sec: SFrameSection; pc: uint64; sectionBase: uint64): tuple[found:
       best = mid
       lo = mid + 1
     else:
-      if mid == 0: break
+      if mid == 0:
+        break
       hi = mid - 1
-  if best < 0: return (false, fi, -1, -1)
+  if best < 0:
+    return (false, fi, -1, -1)
   (true, fi, best, freStart + best)
-

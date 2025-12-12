@@ -6,29 +6,40 @@ import ./types
 proc decodePreamble*(bytes: openArray[byte]): SFramePreamble =
   ## Decode a 4-byte preamble from the given bytes using host CPU endianness
   if bytes.len < 4:
-    raise newException(ValueError, fmt"SFrame preamble requires 4 bytes, got {bytes.len}")
+    raise
+      newException(ValueError, fmt"SFrame preamble requires 4 bytes, got {bytes.len}")
   var i = 0
   var m: uint16
   when system.cpuEndian == littleEndian:
     m = takeU16LE(bytes, i)
   else:
     m = takeU16BE(bytes, i)
-  let ver = uint8(bytes[i]); inc i
-  let flg = uint8(bytes[i]); inc i
+  let ver = uint8(bytes[i])
+  inc i
+  let flg = uint8(bytes[i])
+  inc i
   SFramePreamble(magic: m, version: ver, flags: flg)
 
 proc decodeHeader*(bytes: openArray[byte]): SFrameHeader =
   ## Decode fixed header + aux header.
   if bytes.len < sizeofSFrameHeaderFixed():
-    raise newException(ValueError, fmt"Header requires at least {sizeofSFrameHeaderFixed()} bytes, got {bytes.len}")
+    raise newException(
+      ValueError,
+      fmt"Header requires at least {sizeofSFrameHeaderFixed()} bytes, got {bytes.len}",
+    )
   var i = 0
-  let pre = decodePreamble(bytes[i ..< i+4]); i += 4
+  let pre = decodePreamble(bytes[i ..< i + 4])
+  i += 4
   var h: SFrameHeader
   h.preamble = pre
-  h.abiArch = uint8(bytes[i]); inc i
-  h.cfaFixedFpOffset = cast[int8](bytes[i]); inc i
-  h.cfaFixedRaOffset = cast[int8](bytes[i]); inc i
-  h.auxHdrLen = uint8(bytes[i]); inc i
+  h.abiArch = uint8(bytes[i])
+  inc i
+  h.cfaFixedFpOffset = cast[int8](bytes[i])
+  inc i
+  h.cfaFixedRaOffset = cast[int8](bytes[i])
+  inc i
+  h.auxHdrLen = uint8(bytes[i])
+  inc i
   when system.cpuEndian == littleEndian:
     h.numFdes = takeU32LE(bytes, i)
     h.numFres = takeU32LE(bytes, i)
@@ -45,7 +56,7 @@ proc decodeHeader*(bytes: openArray[byte]): SFrameHeader =
   if bytes.len < sizeofSFrameHeaderFixed() + auxLen:
     raise newException(ValueError, "Insufficient bytes for aux header")
   if auxLen > 0:
-    h.auxData = @bytes[i ..< i+auxLen]
+    h.auxData = @bytes[i ..< i + auxLen]
     i += auxLen
   result = h
 
@@ -64,45 +75,57 @@ proc decodeFDE*(bytes: openArray[byte]): SFrameFDE =
     f.funcSize = takeU32BE(bytes, i)
     f.funcStartFreOff = takeU32BE(bytes, i)
     f.funcNumFres = takeU32BE(bytes, i)
-  f.funcInfo = SFrameFdeInfo(bytes[i]); inc i
-  f.funcRepSize = bytes[i]; inc i
+  f.funcInfo = SFrameFdeInfo(bytes[i])
+  inc i
+  f.funcRepSize = bytes[i]
+  inc i
   when system.cpuEndian == littleEndian:
     f.funcPadding2 = takeU16LE(bytes, i)
   else:
     f.funcPadding2 = takeU16BE(bytes, i)
   result = f
 
-proc decodeFRE*(bytes: openArray[byte]; freType: SFrameFreType): tuple[f: SFrameFRE, consumed: int] =
+proc decodeFRE*(
+    bytes: openArray[byte], freType: SFrameFreType
+): tuple[f: SFrameFRE, consumed: int] =
   var i = 0
   var start: uint32
   case freType
   of sframeFreAddr1:
-    if bytes.len < 1 + 1: raise newException(ValueError, "Insufficient bytes for FRE addr1")
-    start = uint32(bytes[i]); inc i
+    if bytes.len < 1 + 1:
+      raise newException(ValueError, "Insufficient bytes for FRE addr1")
+    start = uint32(bytes[i])
+    inc i
   of sframeFreAddr2:
-    if bytes.len < 2 + 1: raise newException(ValueError, "Insufficient bytes for FRE addr2")
+    if bytes.len < 2 + 1:
+      raise newException(ValueError, "Insufficient bytes for FRE addr2")
     when system.cpuEndian == littleEndian:
       start = uint32(takeU16LE(bytes, i))
     else:
       start = uint32(takeU16BE(bytes, i))
   of sframeFreAddr4:
-    if bytes.len < 4 + 1: raise newException(ValueError, "Insufficient bytes for FRE addr4")
+    if bytes.len < 4 + 1:
+      raise newException(ValueError, "Insufficient bytes for FRE addr4")
     when system.cpuEndian == littleEndian:
       start = takeU32LE(bytes, i)
     else:
       start = takeU32BE(bytes, i)
   # info
-  let info = SFrameFreInfo(bytes[i]); inc i
+  let info = SFrameFreInfo(bytes[i])
+  inc i
   let n = info.freInfoGetOffsetCount()
   let osz = info.freInfoOffsetByteSize()
   let need = i + n * osz
   if bytes.len < need:
-    raise newException(ValueError, fmt"Insufficient bytes for FRE offsets: need {need}, got {bytes.len}")
+    raise newException(
+      ValueError, fmt"Insufficient bytes for FRE offsets: need {need}, got {bytes.len}"
+    )
   var offs = newSeq[int32](n)
   for k in 0 ..< n:
     case osz
     of 1:
-      let v = cast[int8](bytes[i]); inc i
+      let v = cast[int8](bytes[i])
+      inc i
       offs[k] = int32(v)
     of 2:
       var u: uint16
@@ -141,7 +164,7 @@ proc decodeSection*(bytes: openArray[byte]): SFrameSection =
   var fdes: seq[SFrameFDE] = newSeq[SFrameFDE](int(hdr.numFdes))
   var i = fdeStart
   for idx in 0 ..< int(hdr.numFdes):
-    fdes[idx] = decodeFDE(bytes[i ..< i+20])
+    fdes[idx] = decodeFDE(bytes[i ..< i + 20])
     i += 20
 
   # Decode FREs per FDE using start offsets
@@ -150,17 +173,21 @@ proc decodeSection*(bytes: openArray[byte]): SFrameSection =
     let ft = fde.funcInfo.fdeInfoGetFreType()
     var j = freStart + int(fde.funcStartFreOff)
     for _ in 0 ..< int(fde.funcNumFres):
-      let (fr, used) = decodeFRE(bytes[j ..< freStart+freLen], ft)
+      let (fr, used) = decodeFRE(bytes[j ..< freStart + freLen], ft)
       fres.add fr
       j += used
   # Sanity on count
   if fres.len != int(hdr.numFres):
-    raise newException(ValueError, fmt"Decoded fres {fres.len} != header numFres {hdr.numFres}")
+    raise newException(
+      ValueError, fmt"Decoded fres {fres.len} != header numFres {hdr.numFres}"
+    )
   SFrameSection(header: hdr, fdes: fdes, fres: fres)
 
 # ---- Validation ----
 
-proc validateSection*(sec: SFrameSection; sectionBase: uint64 = 0'u64; checkSorted: bool = false): seq[string] =
+proc validateSection*(
+    sec: SFrameSection, sectionBase: uint64 = 0'u64, checkSorted: bool = false
+): seq[string] =
   ## Return a list of validation errors; empty if valid.
   var errs: seq[string] = @[]
   let h = sec.header
@@ -169,7 +196,8 @@ proc validateSection*(sec: SFrameSection; sectionBase: uint64 = 0'u64; checkSort
   if int(h.numFdes) != sec.fdes.len:
     errs.add fmt"Header numFdes={h.numFdes} but fdes.len={sec.fdes.len}"
   var sumFres = 0
-  for f in sec.fdes: sumFres += int(f.funcNumFres)
+  for f in sec.fdes:
+    sumFres += int(f.funcNumFres)
   if int(h.numFres) != sumFres or sec.fres.len != sumFres:
     errs.add fmt"Header numFres={h.numFres}, sumFres={sumFres}, fres.len={sec.fres.len}"
   # Per-function checks

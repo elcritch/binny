@@ -5,11 +5,13 @@ import ./symbolize
 import ./mem_sim
 export types, mem_sim, symbolize
 
-type U64Reader* = proc (address: uint64): uint64 {.gcsafe, raises: [], tags: [].}
+type U64Reader* = proc(address: uint64): uint64 {.gcsafe, raises: [], tags: [].}
 
 # Register access utilities for AMD64
 when defined(gcc) or true:
-  {.emit: """
+  {.
+    emit:
+      """
   static inline void* nframe_get_fp(void) { return __builtin_frame_address(0); }
   static inline void* nframe_get_ra(void) { return __builtin_return_address(0); }
   static inline void* nframe_get_sp(void) {
@@ -26,7 +28,8 @@ when defined(gcc) or true:
   static inline void* nframe_get_pc(void) {
     return __builtin_extract_return_addr(__builtin_return_address(0));
   }
-  """.}
+  """
+  .}
   proc nframe_get_fp(): pointer {.importc.}
   proc nframe_get_sp(): pointer {.importc.}
   proc nframe_get_pc(): pointer {.importc.}
@@ -44,17 +47,17 @@ proc isValidCodePointer*(pc: uint64): bool =
     return false
   # Typical code sections are in lower memory ranges
   # Stack addresses are typically high (like 0x7f... or 0x8...)
-  if pc >= 0x700000000000'u64:  # Likely stack or heap
+  if pc >= 0x700000000000'u64: # Likely stack or heap
     return false
-  if pc < 0x400000'u64:  # Too low
+  if pc < 0x400000'u64: # Too low
     return false
   return true
 
 proc walkStackWithSFrame*(
-    sec: SFrameSection;
-    sectionBase, textVaddr, textSize, startPc, startSp, startFp: uint64;
-    readU64: U64Reader;
-    maxFrames: int = 16
+    sec: SFrameSection,
+    sectionBase, textVaddr, textSize, startPc, startSp, startFp: uint64,
+    readU64: U64Reader,
+    maxFrames: int = 16,
 ): seq[uint64] {.raises: [], tags: [].} =
   ## Stack walker implementing SFrame algorithm matching sframe_stack_example.nim
   ## This follows the algorithm from sframe_stack_example.nim:219-305
@@ -69,7 +72,8 @@ proc walkStackWithSFrame*(
     try:
       echo fmt"walkStackWithSFrame: Starting from PC=0x{pc.toHex}, SP=0x{sp.toHex}"
       echo fmt"  sectionBase=0x{sectionBase.toHex}, textVaddr=0x{textVaddr.toHex}, textSize=0x{textSize.toHex}"
-    except: discard
+    except:
+      discard
 
   # Walk the stack using SFrame information
   while frameCount < maxFrames:
@@ -79,14 +83,16 @@ proc walkStackWithSFrame*(
     when defined(debug):
       try:
         echo fmt"Frame {frameCount}: PC=0x{pc.toHex} SP=0x{sp.toHex}"
-      except: discard
+      except:
+        discard
 
     # Check if PC is in our text section (matching sframe_stack_example.nim:244)
     if pc < textVaddr or pc >= (textVaddr + textSize):
       when defined(debug):
         try:
           echo fmt"  PC outside text section (0x{textVaddr.toHex} - 0x{(textVaddr + textSize).toHex})"
-        except: discard
+        except:
+          discard
       break
 
     # Find the FRE for this PC using our Nim library
@@ -96,7 +102,8 @@ proc walkStackWithSFrame*(
       when defined(debug):
         try:
           echo fmt"  No FRE found for PC"
-        except: discard
+        except:
+          discard
       break
 
     # Extract offsets using our ABI-specific helper
@@ -113,14 +120,16 @@ proc walkStackWithSFrame*(
         echo fmt"  CFA base: {offsets.cfaBase}, offset: {offsets.cfaFromBase}"
         if offsets.raFromCfa.isSome:
           echo fmt"  RA offset: {offsets.raFromCfa.get()}"
-      except: discard
+      except:
+        discard
 
     # Check if we have RA offset
     if offsets.raFromCfa.isNone:
       when defined(debug):
         try:
           echo fmt"  No RA offset available"
-        except: discard
+        except:
+          discard
       break
 
     # Only handle SP-based unwinding (matching sframe_stack_example.nim:268-287)
@@ -129,31 +138,35 @@ proc walkStackWithSFrame*(
       when defined(debug):
         try:
           echo fmt"  FP-based frame - skipping (Nim doesn't maintain proper frame pointers)"
-        except: discard
+        except:
+          discard
       break
 
     # SP-based: CFA = SP + cfa_offset (matching sframe_stack_example.nim:270)
     # Note: cfaFromBase is signed, but typically positive for SP-based unwinding
     let cfaOffset = offsets.cfaFromBase
-    let cfa = if cfaOffset >= 0:
-                sp + uint64(cfaOffset)
-              else:
-                sp - uint64(-cfaOffset)
+    let cfa =
+      if cfaOffset >= 0:
+        sp + uint64(cfaOffset)
+      else:
+        sp - uint64(-cfaOffset)
 
     # Calculate return address location: CFA + ra_offset (sframe_stack_example.nim:271)
     # Note: raOffset is signed and can be negative
     let raOffset = offsets.raFromCfa.get()
-    let raAddr = if raOffset >= 0:
-                   cfa + uint64(raOffset)
-                 else:
-                   cfa - uint64(-raOffset)
+    let raAddr =
+      if raOffset >= 0:
+        cfa + uint64(raOffset)
+      else:
+        cfa - uint64(-raOffset)
 
     when defined(debug):
       try:
         echo fmt"  cfaOffset={cfaOffset}, raOffset={raOffset}"
         echo fmt"  SP=0x{sp.toHex} + {cfaOffset} = CFA=0x{cfa.toHex}"
         echo fmt"  CFA=0x{cfa.toHex} + ({raOffset}) = RA addr=0x{raAddr.toHex}"
-      except: discard
+      except:
+        discard
 
     # Validate RA address is within reasonable stack bounds (sframe_stack_example.nim:275)
     # Note: raAddr can equal sp when the return address is stored at the current stack pointer
@@ -161,7 +174,8 @@ proc walkStackWithSFrame*(
       when defined(debug):
         try:
           echo fmt"  Invalid RA address (not in stack range 0x{sp.toHex} - 0x{(sp + 1024'u64).toHex})"
-        except: discard
+        except:
+          discard
       break
 
     # Read the return address from the stack
@@ -175,39 +189,44 @@ proc walkStackWithSFrame*(
           if raAddr >= sp and raAddr < sp + 256:
             let offset = raAddr - sp
             echo fmt"  (raAddr is at SP+{offset})"
-        except: discard
+        except:
+          discard
 
       # Validate the next PC
       if nextPc == 0 or not isValidCodePointer(nextPc):
         when defined(debug):
           try:
             echo fmt"  Invalid next PC"
-          except: discard
+          except:
+            discard
         break
 
       # Update frame state (matching sframe_stack_example.nim:276-277)
       pc = nextPc
       sp = cfa
       frameCount += 1
-
     except:
       # If we can't read memory, stop unwinding
       when defined(debug):
         try:
           echo fmt"  Failed to read memory at 0x{raAddr.toHex}"
-        except: discard
+        except:
+          discard
       break
 
   when defined(debug):
     try:
       echo fmt"walkStackWithSFrame: Found {frames.len} frames"
-    except: discard
+    except:
+      discard
 
   return frames
 
 # High-level stack tracing interface
 
-proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe, noinline.} =
+proc captureStackTrace*(
+    maxFrames: int = 64
+): seq[uint64] {.raises: [], gcsafe, noinline.} =
   ## High-level function to capture a complete stack trace from the current location.
   ## Returns a sequence of program counter (PC) values representing the call stack.
 
@@ -216,11 +235,14 @@ proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe, 
     # This matches the approach in sframe_stack_example.nim:228-232
     var sp0, fp0, pc0: uint64
     when defined(amd64) or defined(x86_64):
-      {.emit: """
+      {.
+        emit:
+          """
       asm volatile("movq %%rsp, %0" : "=r" (`sp0`));
       asm volatile("movq %%rbp, %0" : "=r" (`fp0`));
       asm volatile("leaq (%%rip), %0" : "=r" (`pc0`));
-      """.}
+      """
+      .}
     else:
       sp0 = cast[uint64](nframe_get_sp())
       fp0 = cast[uint64](nframe_get_fp())
@@ -236,8 +258,11 @@ proc captureStackTrace*(maxFrames: int = 64): seq[uint64] {.raises: [], gcsafe, 
         # Check if our PC is in the deep function range
         if pc0 >= 0x41c400'u64 and pc0 <= 0x41c800'u64:
           echo fmt"PC is in deep function range!"
-      except: discard
+      except:
+        discard
 
     # Start with current PC, SP, and FP, then use SFrame information to unwind
-    result = walkStackWithSFrame(gSframeSection, gSframeSectionBase, gTextSectionBase, gTextSectionSize, pc0, sp0, fp0, readU64Ptr, maxFrames)
-
+    result = walkStackWithSFrame(
+      gSframeSection, gSframeSectionBase, gTextSectionBase, gTextSectionSize, pc0, sp0,
+      fp0, readU64Ptr, maxFrames,
+    )
