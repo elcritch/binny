@@ -1,5 +1,6 @@
-import std/[algorithm, sequtils, strformat]
+import std/[algorithm, options, sequtils, strformat]
 import ../elfparser
+import ../dwarf/cfi
 import ../sframe
 
 # DWARF → SFrame conversion utilities.
@@ -20,14 +21,12 @@ proc detectAbi*(elf: ElfFile): SFrameAbiArch =
     return sframeAbiAmd64Little
   sframeAbiInvalid
 
-proc buildSFrameFromElf*(elf: ElfFile): SFrameSection =
+proc buildSFrameFromElfWithBase*(elf: ElfFile): tuple[sec: SFrameSection, base: uint64] =
   ## Convert basic DWARF/ELF information into an SFrameSection.
   ##
   ## Strategy:
-  ## - Use function symbols as FDE boundaries (start address + size).
-  ## - Emit exactly one FRE per function with startAddr = 0.
-  ## - For amd64, use CFA base = SP with a single 1-byte CFA offset (0).
-  ## - Use fixed RA-from-CFA offset in the header (8) as a reasonable default.
+  ## - Prefer parsing DWARF CFI from .eh_frame when available.
+  ## - Fall back to function symbols if CFI is missing/unsupported.
   ##
   ## This is intentionally conservative and geared towards producing a valid
   ## SFrame encoding that can be inspected and validated; it is not a full
@@ -39,22 +38,12 @@ proc buildSFrameFromElf*(elf: ElfFile): SFrameSection =
       fmt"Unsupported ELF e_machine={elf.header.e_machine} for SFrame conversion",
     )
 
-  var funcs = elf.getFunctionSymbols()
-  # Filter out zero-sized or zero-address entries just in case.
-  funcs = funcs.filterIt(it.size > 0 and it.value != 0)
-  if funcs.len == 0:
-    raise newException(Dwarf2SframeError, "No function symbols to convert")
-
-  # Sort by start address so we can set the FDE_SORTED flag.
-  funcs.sort(proc(a, b: ElfSymbol): int =
-    if a.value < b.value: -1 elif a.value > b.value: 1 else: 0)
-
   # Header
   var hdr = SFrameHeader(
     preamble: SFramePreamble(magic: SFRAME_MAGIC, version: SFRAME_VERSION_2, flags: 0),
     abiArch: uint8(abi),
     cfaFixedFpOffset: 0'i8,
-    cfaFixedRaOffset: 8'i8, # amd64 typical return address distance from CFA at call site
+    cfaFixedRaOffset: -8'i8, # amd64: saved RA is typically at CFA-8
     auxHdrLen: 0'u8,
     numFdes: 0'u32, # filled by encoder
     numFres: 0'u32,
@@ -66,40 +55,162 @@ proc buildSFrameFromElf*(elf: ElfFile): SFrameSection =
   # Mark FDEs as sorted by start address
   hdr.preamble.flags = uint8(SFRAME_F_FDE_SORTED) or hdr.preamble.flags
 
-  # For now we choose 4-byte FRE startAddr fields to keep things simple.
-  let freType = sframeFreAddr4
-  let fdeType = sframeFdePcInc
-
   var fdes: seq[SFrameFDE] = @[]
   var fres: seq[SFrameFRE] = @[]
 
-  for sym in funcs:
-    # Construct one FRE at start offset 0 with a single 1-byte CFA offset of 0.
-    let finfo = freInfo(
-      cfaBase = sframeCfaBaseSp,
-      offsetCount = 1, # only CFA-from-base included
-      offsetSize = sframeFreOff1B,
-      mangledRa = false,
-    )
-    let fre = SFrameFRE(
-      startAddr: 0'u32,
-      info: finfo,
-      offsets: @[0'i32],
-    )
-    fres.add(fre)
+  var base: uint64 = 0
+  var usedFp = false
 
-    # Build FDE; funcStartFreOff is filled by encoder.encodeSection.
-    let infoWord = fdeInfo(freType = freType, fdeType = fdeType)
-    var fde = SFrameFDE(
-      funcStartAddress: int32(sym.value and 0xFFFF_FFFF'u64),
-      funcSize: uint32(sym.size and 0xFFFF_FFFF'u64),
-      funcStartFreOff: 0'u32,
-      funcNumFres: 1'u32,
-      funcInfo: infoWord,
-      funcRepSize: 0'u8,
-      funcPadding2: 0'u16,
-    )
-    fdes.add(fde)
+  when defined(amd64):
+    const
+      dwarfRegFp = 6'u64 # rbp
+      dwarfRegSp = 7'u64 # rsp
 
-  SFrameSection(header: hdr, fdes: fdes, fres: fres)
+    try:
+      let pairs = parseDwarfCfi(elf, cfiEhFrame)
+      if pairs.len == 0:
+        raise newException(Dwarf2SframeError, "No FDEs found in .eh_frame")
 
+      var sortedPairs = pairs
+      sortedPairs.sort(proc(a, b: tuple[fde: DwarfFde, cie: DwarfCie]): int =
+        if a.fde.initialLocation < b.fde.initialLocation: -1
+        elif a.fde.initialLocation > b.fde.initialLocation: 1
+        else: 0)
+
+      base = sortedPairs[0].fde.initialLocation
+
+      for pair in sortedPairs:
+        let fdeIn = pair.fde
+        let cieIn = pair.cie
+        var rows = computeCfiRows(fdeIn, cieIn, fpReg = dwarfRegFp)
+        if rows.len == 0:
+          continue
+
+        var funcFres: seq[SFrameFRE] = @[]
+        var lastCfaReg: uint64 = 0
+        var lastCfaOff: int64 = 0
+        var lastFpOff: Option[int64] = none(int64)
+        var first = true
+
+        for row in rows:
+          let cfaReg = row.cfaReg
+          let cfaOff = row.cfaOffset
+          let fpOff = row.fpOffset
+          if not first and cfaReg == lastCfaReg and cfaOff == lastCfaOff and fpOff == lastFpOff:
+            continue
+          first = false
+          lastCfaReg = cfaReg
+          lastCfaOff = cfaOff
+          lastFpOff = fpOff
+
+          let startOff = row.address - fdeIn.initialLocation
+          if startOff > uint64(high(uint32)):
+            raise newException(Dwarf2SframeError, "CFI row offset exceeds 32-bit range")
+
+          var cfaBase = sframeCfaBaseSp
+          if cfaReg == dwarfRegFp:
+            cfaBase = sframeCfaBaseFp
+            usedFp = true
+          elif cfaReg == dwarfRegSp:
+            cfaBase = sframeCfaBaseSp
+
+          var offsets: seq[int32] = @[]
+          if cfaOff < int64(low(int32)) or cfaOff > int64(high(int32)):
+            raise newException(Dwarf2SframeError, "CFA offset exceeds 32-bit range")
+          offsets.add(int32(cfaOff))
+
+          var offsetCount = 1
+          if fpOff.isSome:
+            let v = fpOff.get()
+            if v < int64(low(int32)) or v > int64(high(int32)):
+              raise newException(Dwarf2SframeError, "FP offset exceeds 32-bit range")
+            offsets.add(int32(v))
+            offsetCount = 2
+
+          let finfo = freInfo(
+            cfaBase = cfaBase,
+            offsetCount = offsetCount,
+            offsetSize = sframeFreOff4B,
+            mangledRa = false,
+          )
+          funcFres.add(
+            SFrameFRE(startAddr: uint32(startOff), info: finfo, offsets: offsets)
+          )
+
+        if funcFres.len == 0:
+          continue
+
+        var maxSa: uint32 = 0
+        for fr in funcFres:
+          if fr.startAddr > maxSa:
+            maxSa = fr.startAddr
+        let freType =
+          if maxSa <= 0xFF'u32: sframeFreAddr1
+          elif maxSa <= 0xFFFF'u32: sframeFreAddr2
+          else: sframeFreAddr4
+
+        if fdeIn.addressRange > uint64(high(uint32)):
+          raise newException(Dwarf2SframeError, "FDE range exceeds 32-bit range")
+        let relStart = fdeIn.initialLocation - base
+        if relStart > uint64(high(int32)):
+          raise newException(Dwarf2SframeError, "FDE start exceeds 32-bit signed range")
+
+        fdes.add(
+          SFrameFDE(
+            funcStartAddress: int32(relStart),
+            funcSize: uint32(fdeIn.addressRange),
+            funcStartFreOff: 0'u32,
+            funcNumFres: uint32(funcFres.len),
+            funcInfo: fdeInfo(freType = freType, fdeType = sframeFdePcInc),
+            funcRepSize: 0'u8,
+            funcPadding2: 0'u16,
+          )
+        )
+        for fr in funcFres:
+          fres.add(fr)
+
+    except CatchableError:
+      # Fall back to symbol-based conversion below.
+      discard
+
+  if fdes.len == 0:
+    var funcs = elf.getFunctionSymbols()
+    funcs = funcs.filterIt(it.size > 0 and it.value != 0)
+    if funcs.len == 0:
+      raise newException(Dwarf2SframeError, "No function symbols to convert")
+
+    funcs.sort(proc(a, b: ElfSymbol): int =
+      if a.value < b.value: -1 elif a.value > b.value: 1 else: 0)
+    base = funcs[0].value
+
+    for sym in funcs:
+      let relStart = sym.value - base
+      if relStart > uint64(high(int32)):
+        raise newException(Dwarf2SframeError, "Symbol start exceeds 32-bit signed range")
+      let finfo = freInfo(
+        cfaBase = sframeCfaBaseSp,
+        offsetCount = 1,
+        offsetSize = sframeFreOff4B,
+        mangledRa = false,
+      )
+      fres.add(SFrameFRE(startAddr: 0'u32, info: finfo, offsets: @[0'i32]))
+      fdes.add(
+        SFrameFDE(
+          funcStartAddress: int32(relStart),
+          funcSize: uint32(sym.size),
+          funcStartFreOff: 0'u32,
+          funcNumFres: 1'u32,
+          funcInfo: fdeInfo(freType = sframeFreAddr1, fdeType = sframeFdePcInc),
+          funcRepSize: 0'u8,
+          funcPadding2: 0'u16,
+        )
+      )
+
+  if usedFp:
+    hdr.preamble.flags = uint8(SFRAME_F_FRAME_POINTER) or hdr.preamble.flags
+
+  result.sec = SFrameSection(header: hdr, fdes: fdes, fres: fres)
+  result.base = base
+
+proc buildSFrameFromElf*(elf: ElfFile): SFrameSection =
+  buildSFrameFromElfWithBase(elf).sec
