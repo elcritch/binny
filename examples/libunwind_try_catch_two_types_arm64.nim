@@ -243,7 +243,9 @@ ASM_SYM(demo_try_frame) ":\n"
 when isMainModule:
   when defined(arm64) or defined(aarch64):
     echo "libunwind try/catch from one outer proc:"
+    echo ""
     runOuter(tkValue)
+    echo ""
     runOuter(tkIo)
     cExit(0)
   else:
