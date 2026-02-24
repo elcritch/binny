@@ -23,8 +23,12 @@ typedef struct {
 } DemoException;
 
 extern void demo_try_body(int kind);
-extern void my_landing_pad(void);
-extern void my_landing_pad_c(void *exc, long long selector);
+extern void value_landing_pad(void);
+extern void io_landing_pad(void);
+extern void default_landing_pad(void);
+extern void catch_value_from_unwind(void *exc);
+extern void catch_io_from_unwind(void *exc);
+extern void catch_default_from_unwind(void *exc);
 
 static const uint64_t DEMO_EXCEPTION_CLASS = 0x42494E4E59543245ULL; /* BINNYT2E */
 
@@ -79,9 +83,16 @@ _Unwind_Reason_Code demo_personality(
 
   if (actions & _UA_CLEANUP_PHASE) {
     DemoException *dexc = (DemoException *)exc;
+    uintptr_t target_ip = (uintptr_t)&default_landing_pad;
+    if (dexc->selector == 1) {
+      target_ip = (uintptr_t)&value_landing_pad;
+    } else if (dexc->selector == 2) {
+      target_ip = (uintptr_t)&io_landing_pad;
+    }
+
     _Unwind_SetGR(ctx, __builtin_eh_return_data_regno(0), (uintptr_t)exc);
     _Unwind_SetGR(ctx, __builtin_eh_return_data_regno(1), (uintptr_t)dexc->selector);
-    _Unwind_SetIP(ctx, (uintptr_t)&my_landing_pad);
+    _Unwind_SetIP(ctx, target_ip);
     return _URC_INSTALL_CONTEXT;
   }
 
@@ -91,10 +102,34 @@ _Unwind_Reason_Code demo_personality(
 __asm__(
 ".text\n"
 ".p2align 2\n"
-".globl " ASM_SYM(my_landing_pad) "\n"
-ASM_SYM(my_landing_pad) ":\n"
+".globl " ASM_SYM(value_landing_pad) "\n"
+ASM_SYM(value_landing_pad) ":\n"
 "  .cfi_startproc\n"
-"  bl " ASM_SYM(my_landing_pad_c) "\n"
+"  bl " ASM_SYM(catch_value_from_unwind) "\n"
+"  ldp x29, x30, [sp], #16\n"
+"  ret\n"
+"  .cfi_endproc\n"
+);
+
+__asm__(
+".text\n"
+".p2align 2\n"
+".globl " ASM_SYM(io_landing_pad) "\n"
+ASM_SYM(io_landing_pad) ":\n"
+"  .cfi_startproc\n"
+"  bl " ASM_SYM(catch_io_from_unwind) "\n"
+"  ldp x29, x30, [sp], #16\n"
+"  ret\n"
+"  .cfi_endproc\n"
+);
+
+__asm__(
+".text\n"
+".p2align 2\n"
+".globl " ASM_SYM(default_landing_pad) "\n"
+ASM_SYM(default_landing_pad) ":\n"
+"  .cfi_startproc\n"
+"  bl " ASM_SYM(catch_default_from_unwind) "\n"
 "  ldp x29, x30, [sp], #16\n"
 "  ret\n"
 "  .cfi_endproc\n"
@@ -137,18 +172,17 @@ ASM_SYM(demo_try_frame) ":\n"
   proc cExit(code: cint)
     {.importc: "_Exit", header: "<stdlib.h>", noreturn.}
 
+  const kindNames: array[ThrowKind, string] = ["value", "io"]
+
   var keep_alive*: seq[ref CatchableError]
-  var pending_exc*: ref CatchableError
-  var pending_selector*: int64
-  var catch_count_value*: int
-  var catch_count_io*: int
+  var catch_counts*: array[ThrowKind, int]
 
   proc catchValueBlock(exc: ref ValueError) =
-    inc catch_count_value
+    inc catch_counts[tkValue]
     echo "catch(ValueError): " & exc.msg
 
   proc catchIoBlock(exc: ref IOError) =
-    inc catch_count_io
+    inc catch_counts[tkIo]
     echo "catch(IOError): " & exc.msg
 
   proc demoTryBody(kind: cint)
@@ -173,41 +207,38 @@ ASM_SYM(demo_try_frame) ":\n"
     throwNimExcWithUnwind(cast[pointer](payload), selector)
     echo "try: no handler found (unexpected)"
 
-  proc myLandingPadC(exc: pointer, selector: int64)
-      {.cdecl, exportc: "my_landing_pad_c", noinline.} =
-    if selector == 0:
-      return
+  proc catchValueFromUnwind(exc: pointer)
+      {.cdecl, exportc: "catch_value_from_unwind", noinline.} =
     let nim_exc = cast[ref CatchableError](getNimExcFromUnwind(exc))
-    pending_exc = nim_exc
-    pending_selector = selector
+    if nim_exc of ValueError:
+      catchValueBlock(cast[ref ValueError](nim_exc))
+    else:
+      echo "catch(value-mismatch): " & nim_exc.msg
+    deleteUnwindExc(exc)
+
+  proc catchIoFromUnwind(exc: pointer)
+      {.cdecl, exportc: "catch_io_from_unwind", noinline.} =
+    let nim_exc = cast[ref CatchableError](getNimExcFromUnwind(exc))
+    if nim_exc of IOError:
+      catchIoBlock(cast[ref IOError](nim_exc))
+    else:
+      echo "catch(io-mismatch): " & nim_exc.msg
+    deleteUnwindExc(exc)
+
+  proc catchDefaultFromUnwind(exc: pointer)
+      {.cdecl, exportc: "catch_default_from_unwind", noinline.} =
+    let nim_exc = cast[ref CatchableError](getNimExcFromUnwind(exc))
+    echo "catch(default): " & nim_exc.msg
     deleteUnwindExc(exc)
 
   proc runOuter(kind: ThrowKind) =
-    pending_exc = nil
-    pending_selector = 0
-    case kind
-    of tkValue:
-      let before = catch_count_value
-      runDemoTryFrame(cint(tkValue))
-      if pending_selector == 1 and (pending_exc of ValueError):
-        catchValueBlock(cast[ref ValueError](pending_exc))
-      elif not pending_exc.isNil:
-        echo "catch(value-mismatch): " & pending_exc.msg
-      if catch_count_value == before + 1:
-        echo "post(value): done"
-      else:
-        echo "post(value): no exception captured"
-    of tkIo:
-      let before = catch_count_io
-      runDemoTryFrame(cint(tkIo))
-      if pending_selector == 2 and (pending_exc of IOError):
-        catchIoBlock(cast[ref IOError](pending_exc))
-      elif not pending_exc.isNil:
-        echo "catch(io-mismatch): " & pending_exc.msg
-      if catch_count_io == before + 1:
-        echo "post(io): done"
-      else:
-        echo "post(io): no exception captured"
+    let before = catch_counts[kind]
+    runDemoTryFrame(cint(kind))
+    let name = kindNames[kind]
+    if catch_counts[kind] == before + 1:
+      echo "post(" & name & "): done"
+    else:
+      echo "post(" & name & "): no exception captured"
 
 when isMainModule:
   when defined(arm64) or defined(aarch64):
