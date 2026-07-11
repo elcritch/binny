@@ -43,8 +43,11 @@ The consumer prints the native library initialization and calls the exported
 prints the updated value. This gives a visible sanity check that the generated
 binding called into the rebuilt dynamic library.
 
-Inheritance, variants, open generics, exceptions, and runtime ABI mismatch
-rejection are not supported yet.
+Case objects and object inheritance are reconstructed from semantic BIF
+definitions and the concrete layouts in `.abi.nif`. The example also resolves
+an exported type and procedures from `support.nim` through the manifest's module
+table. Open generics, exceptions, and runtime ABI mismatch rejection are not
+supported yet.
 
 The generator currently depends on Nimony's BIF reader. Build a compiler from
 the ABI branch, point `NIMONY_DIR` at a Nimony checkout containing the reusable

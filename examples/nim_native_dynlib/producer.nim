@@ -1,3 +1,6 @@
+import support
+export support
+
 type
   Vec2* = object
     x*, y*: float32
@@ -15,6 +18,27 @@ type
 
   MoveOnly* = object
     value*: int
+
+  PayloadKind* = enum
+    pkCode
+    pkText
+
+  Payload* = object
+    case kind*: PayloadKind
+    of pkCode:
+      code*: int
+    of pkText:
+      text*: string
+
+  Base* {.inheritable.} = object
+    baseValue*: int
+
+  Derived* = object of Base
+    detail*: string
+
+  Packed* {.packed.} = object
+    small*: uint8
+    large*: uint32
 
 var
   hookedCopies = 0
@@ -50,6 +74,23 @@ proc describe*(renderer: Renderer): string {.exportabi.} =
 
 proc message*(): string {.exportabi.} =
   "hello from the dynlib"
+
+proc newTextPayload*(text: string): Payload {.exportabi.} =
+  Payload(kind: pkText, text: text)
+
+proc payloadDescription*(payload: Payload): string {.exportabi.} =
+  case payload.kind
+  of pkCode: $payload.code
+  of pkText: payload.text
+
+proc newDerived*(value: int; detail: string): Derived {.exportabi.} =
+  Derived(baseValue: value, detail: detail)
+
+proc derivedDescription*(value: Derived): string {.exportabi.} =
+  $value.baseValue & ":" & value.detail
+
+proc newPacked*(small: uint8; large: uint32): Packed {.exportabi.} =
+  Packed(small: small, large: large)
 
 proc newHooked*(value: int): Hooked {.exportabi.} =
   Hooked(value: value)

@@ -8,5 +8,6 @@ The DWARF library stuff needs more work.
 
 The experimental `binny/native_dynlib` module generates native Nim bindings
 from semantic BIF and `.abi.nif` artifacts emitted by the corresponding Nim
-compiler branch. See `examples/nim_native_dynlib` for a complete producer and
-consumer.
+compiler branch. It reconstructs objects, inheritance, and case branches, then
+emits compile-time size, alignment, and field-offset checks. See
+`examples/nim_native_dynlib` for a complete producer and consumer.

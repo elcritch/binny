@@ -2,6 +2,24 @@ import generated/producer_abi
 
 echo "Producer says: ", message()
 
+let payload = newTextPayload("case object")
+doAssert payload.kind == pkText
+doAssert payload.text == "case object"
+doAssert payloadDescription(payload) == "case object"
+
+let derived = newDerived(12, "inherited")
+doAssert derived.baseValue == 12
+doAssert derived.detail == "inherited"
+doAssert derivedDescription(derived) == "12:inherited"
+
+let packed = newPacked(1, 0xAABBCCDD'u32)
+doAssert packed.small == 1
+doAssert packed.large == 0xAABBCCDD'u32
+
+let imported = newImportedValue("other module")
+doAssert imported.label == "other module"
+doAssert importedLabel(imported) == "other module"
+
 block customHooks:
   let original = newHooked(7)
   var copied: Hooked
