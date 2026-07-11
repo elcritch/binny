@@ -73,7 +73,7 @@ proc describe*(renderer: Renderer): string {.exportabi.} =
   renderer.name & ":" & renderer.child.label
 
 proc message*(): string {.exportabi.} =
-  "hello from the dynlib"
+  "hello from the MY AWESOME dynlib"
 
 proc newTextPayload*(text: string): Payload {.exportabi.} =
   Payload(kind: pkText, text: text)
