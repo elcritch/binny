@@ -16,4 +16,3 @@ task test, "Compile and run all tests in tests/":
 
 task testLibSframe, "test our sframe impl against libsframe":
   exec "nim c -r tests/test_libsframe_comparison.nim"
-

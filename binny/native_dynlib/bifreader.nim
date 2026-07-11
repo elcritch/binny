@@ -1,5 +1,5 @@
 import std/[os, strutils, tables]
-import lib/[bif, nifcoreparse, nifqueries]
+import ./nif/[bif, nifcoreparse, nifqueries]
 import model
 
 type
@@ -420,6 +420,9 @@ proc readAbiManifest(path: string): AbiManifest =
         if values.hasMore:
           fail("native ABI manifest format has extra fields")
       of "compiler":
+        if result.formatVersion != 4:
+          fail("unsupported native ABI manifest format: " &
+            $result.formatVersion)
         var values = cursor.childCursor()
         result.compilerVersion = takeString(values, "compiler version")
         result.compilerApiVersion = takeInt(values, "compiler API version")

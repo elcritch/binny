@@ -1,7 +1,6 @@
 ## Generates native Nim dynamic-library bindings from compiler ABI artifacts.
 ##
-## This module requires Nimony's ``src`` directory on the Nim import path so it
-## can read semantic BIF files.
+## The required NIF/BIF reader support is vendored in ``native_dynlib/nif``.
 
 import native_dynlib/[artifacts, bifreader]
 
