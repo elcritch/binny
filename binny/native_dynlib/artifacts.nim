@@ -35,11 +35,15 @@ func builtinTypeId(symbol: string): string =
   else: ""
 
 func isBuiltinType(typ: NativeType): bool =
-  builtinTypeId(typ.typeId).len > 0
+  builtinTypeId(typ.typeId).len > 0 or
+    (typ.kind == ntRange and typ.name in ["Natural", "Positive"])
 
 proc typeNames(api: NativeApi): Table[string, string] =
   for typ in api.types:
-    if not typ.isBuiltinType:
+    if typ.kind == ntRange and typ.name in ["Natural", "Positive"]:
+      result[typ.nifSymbol] = typ.name
+      result[typ.typeId] = typ.name
+    elif not typ.isBuiltinType:
       result[typ.nifSymbol] = typ.name
       result[typ.typeId] = typ.name
 
@@ -155,6 +159,9 @@ proc generateTypes(api: NativeApi; names: Table[string, string]): string =
       result.add generateTuple(typ.record, names)
       result.add "\n"
       continue
+    of ntRange:
+      raise newException(NativeArtifactError,
+        "unsupported named native ABI range: " & typ.name)
     of ntEnum:
       result.add "enum\n"
       for value in typ.enumValues:

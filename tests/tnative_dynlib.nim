@@ -50,3 +50,26 @@ block generated_module_requires_loader_name:
     procs: @[NativeProc(name: "ping", cSymbol: "ping")])
   doAssertRaises NativeArtifactError:
     discard generateNativeModule(api)
+
+block generated_module_preserves_builtin_range_types:
+  let api = NativeApi(
+    libraryName: "libsample.so",
+    initSymbol: "NimMain",
+    types: @[
+      NativeType(
+        name: "Natural",
+        nifSymbol: "Natural.0.system",
+        typeId: "`t20.1.system",
+        kind: ntRange),
+    ],
+    procs: @[
+      NativeProc(
+        name: "insert",
+        cSymbol: "insert",
+        params: @[
+          NativeParam(name: "position", typeSymbol: "`t20.1.system"),
+        ]),
+    ])
+  let generated = generateNativeModule(api)
+  doAssert "`position`: Natural" in generated
+  doAssert "Natural* =" notin generated

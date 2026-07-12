@@ -491,6 +491,10 @@ proc parseNativeType(declaration: Cursor; nifSymbol: string;
   let enumType = sourceType.findChildTag("enumty")
   let distinctType = sourceType.findChildTag("distinctty")
   let arrayType = sourceType.findChildTag("arrayty")
+  let typeDesc = declaration.findChildTag("td")
+  let rangeType =
+    if typeDesc.cursorIsNil: default(Cursor)
+    else: typeDesc.findChildTag("range")
   typ.name = symbolBase(nifSymbol)
   typ.nifSymbol = nifSymbol
   for typeNode in [refType, objectType, enumType, distinctType, arrayType]:
@@ -499,8 +503,7 @@ proc parseNativeType(declaration: Cursor; nifSymbol: string;
       if not typeId.cursorIsNil:
         typ.typeId = typeId.symName
         break
-  if typ.typeId.len == 0:
-    let typeDesc = declaration.findDescendantTag("td")
+  if typ.typeId.len == 0 or not rangeType.cursorIsNil:
     if not typeDesc.cursorIsNil:
       let typeId = typeDesc.findChildKind(SymbolDef)
       if not typeId.cursorIsNil:
@@ -520,6 +523,8 @@ proc parseNativeType(declaration: Cursor; nifSymbol: string;
     typ.kind = ntDistinct
   elif not arrayType.cursorIsNil:
     typ.kind = ntArray
+  elif not rangeType.cursorIsNil:
+    typ.kind = ntRange
   else:
     return false
   result = true
@@ -591,6 +596,7 @@ proc parseNativeProc(declaration: Cursor; abi: AbiProcEntry;
   collectParams(formals, result.params)
 
   if applyAbiLowering:
+    result.returnTypeSymbol = abi.returnTypeSymbol
     if result.params.len != abi.params.len:
       fail("semantic parameter count does not match ABI lowering for " &
         abi.nifSymbol & ": semantic=" & $result.params.len &

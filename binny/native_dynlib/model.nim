@@ -14,6 +14,7 @@ type
     ntSequence
     ntSet
     ntTuple
+    ntRange
 
   NativeEnumValue* = object
     name*: string
