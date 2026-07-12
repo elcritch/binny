@@ -9,6 +9,7 @@ type
     ntObject
     ntRefObject
     ntEnum
+    ntAlias
     ntDistinct
     ntArray
     ntSequence
@@ -54,6 +55,7 @@ type
     typeId*: string
     kind*: NativeTypeKind
     baseTypeSymbol*: string
+    indexTypeSymbol*: string
     elementTypeSymbol*: string
     size*: int64
     alignment*: int64

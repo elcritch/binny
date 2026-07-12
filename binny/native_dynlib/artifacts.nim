@@ -43,7 +43,7 @@ func builtinTypeId(symbol: string): string =
   else: ""
 
 func isBuiltinType(typ: NativeType): bool =
-  builtinTypeId(typ.typeId).len > 0 or
+  (typ.kind != ntAlias and builtinTypeId(typ.typeId).len > 0) or
     (typ.kind == ntRange and typ.name in ["Natural", "Positive"])
 
 proc typeNames(api: NativeApi): Table[string, string] =
@@ -150,6 +150,12 @@ proc renderMangledType(typ: MangledType;
       raise newException(NativeArtifactError,
         name & " expects one type argument in the native ABI symbol")
     result = name & "[" & renderMangledType(typ.arguments[0], names) & "]"
+  of "tuple":
+    if typ.arguments.len < 2:
+      raise newException(NativeArtifactError,
+        "tuple expects at least two type arguments in the native ABI symbol")
+    result = "(" & typ.arguments.mapIt(renderMangledType(it, names)).join(
+        ", ") & ")"
   of "ref":
     if typ.arguments.len != 1:
       raise newException(NativeArtifactError,
@@ -162,6 +168,20 @@ proc renderMangledType(typ: MangledType;
     result = name & " " & renderMangledType(typ.arguments[0], names)
   else:
     if typ.arguments.len > 0:
+      let publicName =
+        case name
+        of "GVec2": "Vec2"
+        of "GVec3": "Vec3"
+        of "GVec4": "Vec4"
+        of "GMat2": "Mat2"
+        of "GMat3": "Mat3"
+        of "GMat4": "Mat4"
+        else: ""
+      if publicName.len > 0 and typ.arguments.len == 1 and
+          normalizedMangledName(typ.arguments[0].name) == "float32":
+        for generatedName in names.values:
+          if generatedName == publicName:
+            return generatedName
       raise newException(NativeArtifactError,
         "unsupported generic type in native ABI symbol: " & typ.name)
     case name
@@ -231,10 +251,17 @@ proc generateTypes(api: NativeApi; names: Table[string, string]): string =
     case typ.kind
     of ntObject: result.add "object"
     of ntRefObject: result.add "ref object"
+    of ntAlias:
+      result.add nimType(typ.elementTypeSymbol, names) & "\n\n"
+      continue
     of ntDistinct:
       result.add "distinct " & nimType(typ.elementTypeSymbol, names) & "\n\n"
       continue
     of ntArray:
+      if typ.indexTypeSymbol.len > 0:
+        result.add "array[" & nimIdentifier(typ.indexTypeSymbol) & ", " &
+          nimType(typ.elementTypeSymbol, names) & "]\n\n"
+        continue
       var elementSize = 0'i64
       for candidate in api.types:
         if candidate.nifSymbol == typ.elementTypeSymbol or

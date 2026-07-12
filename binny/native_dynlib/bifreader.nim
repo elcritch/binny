@@ -502,6 +502,8 @@ proc parseNativeType(declaration: Cursor; nifSymbol: string;
   let enumType = sourceType.findChildTag("enumty")
   let distinctType = sourceType.findChildTag("distinctty")
   let arrayType = sourceType.findChildTag("arrayty")
+  let aliasType = sourceType.findChildTag("ht")
+  let instanceType = sourceType.findChildTag("at")
   let typeDesc = declaration.findChildTag("td")
   let rangeType =
     if typeDesc.cursorIsNil: default(Cursor)
@@ -536,6 +538,20 @@ proc parseNativeType(declaration: Cursor; nifSymbol: string;
     typ.kind = ntArray
   elif not rangeType.cursorIsNil:
     typ.kind = ntRange
+  elif not aliasType.cursorIsNil:
+    let elementType = aliasType.findLastChildKind(Symbol)
+    if elementType.cursorIsNil:
+      return false
+    typ.kind = ntAlias
+    typ.elementTypeSymbol = elementType.symName
+  elif not instanceType.cursorIsNil:
+    typ.kind = ntAlias
+    typ.elementTypeSymbol = typ.typeId
+    let indexTypeNode = instanceType.findChildTag("ident")
+    if not indexTypeNode.cursorIsNil:
+      let indexType = indexTypeNode.findChildKind(Ident)
+      if not indexType.cursorIsNil:
+        typ.indexTypeSymbol = indexType.strVal
   else:
     return false
   result = true
@@ -636,6 +652,16 @@ proc applyLayout(typ: var NativeType;
   if typ.typeId notin layouts:
     return false
   let declared = layouts[typ.typeId]
+  if typ.kind == ntAlias and typ.elementTypeSymbol == typ.typeId:
+    case declared.kind
+    of "object": typ.kind = ntObject
+    of "enum": typ.kind = ntEnum
+    of "distinct": typ.kind = ntDistinct
+    of "array": typ.kind = ntArray
+    of "sequence": typ.kind = ntSequence
+    of "set": typ.kind = ntSet
+    of "tuple": typ.kind = ntTuple
+    else: return false
   typ.size = declared.size
   typ.alignment = declared.alignment
   typ.layoutFingerprint = declared.layoutFingerprint
@@ -649,7 +675,8 @@ proc applyLayout(typ: var NativeType;
       recordLayout.elementTypeSymbol in layouts:
     recordLayout = layouts[recordLayout.elementTypeSymbol]
   typ.baseTypeSymbol = recordLayout.baseTypeSymbol
-  typ.elementTypeSymbol = declared.elementTypeSymbol
+  if typ.kind != ntAlias:
+    typ.elementTypeSymbol = declared.elementTypeSymbol
   typ.record = recordLayout.record
   result = true
 
@@ -749,8 +776,11 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
     let hasUnresolvedElement =
       layout.elementTypeSymbol in layouts and
       layouts[layout.elementTypeSymbol].kind in ["genericbody", "genericinvocation"]
+    let hasMissingTupleFields =
+      layout.kind == "tuple" and layout.size > 0 and layout.record.len == 0
     if layout.typeSymbol notin represented and layout.size >= 0 and
-        layout.kind.isMaterializedKind and not hasUnresolvedElement:
+        layout.kind.isMaterializedKind and not hasUnresolvedElement and
+        not hasMissingTupleFields:
       result.types.add typeFromLayout(layout)
       represented[layout.typeSymbol] = true
 

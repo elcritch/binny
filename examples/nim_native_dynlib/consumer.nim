@@ -7,6 +7,10 @@ doAssert sumNumbers(values) == 16
 
 let spans = [NumberSpan(value: 13), NumberSpan(value: 21)]
 doAssert sumSpans(spans) == 34
+doAssert sumLabeledSpans([(NumberSpan(value: 5), "abc")]) == 8
+
+let number: Number = 12
+doAssert doubleNumber(number) == 24
 
 let payload = newTextPayload("case object")
 doAssert payload.kind == pkText

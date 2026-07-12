@@ -68,11 +68,64 @@ block generated_module_preserves_builtin_range_types:
         cSymbol: "insert",
         params: @[
           NativeParam(name: "position", typeSymbol: "`t20.1.system"),
-        ]),
+      ]),
     ])
   let generated = generateNativeModule(api)
   doAssert "`position`: Natural" in generated
   doAssert "Natural* =" notin generated
+
+block generated_module_preserves_exported_aliases:
+  let api = NativeApi(
+    libraryName: "libsample.so",
+    initSymbol: "NimMain",
+    types: @[
+      NativeType(
+        name: "ZLevel",
+        nifSymbol: "ZLevel.0.sample",
+        typeId: "`t32.1.sample",
+        kind: ntAlias,
+        elementTypeSymbol: "int8.0.system",
+        size: 1,
+        alignment: 1),
+    ],
+    procs: @[
+      NativeProc(
+        name: "layer",
+        cSymbol: "layer",
+        returnTypeSymbol: "ZLevel.0.sample",
+        params: @[
+          NativeParam(name: "level", typeSymbol: "`t32.1.sample"),
+      ]),
+    ])
+  let generated = generateNativeModule(api)
+  doAssert "`ZLevel`* = int8" in generated
+  doAssert "proc `layer`*(`level`: ZLevel): ZLevel" in generated
+
+block generated_module_preserves_array_index_types:
+  let api = NativeApi(
+    libraryName: "libsample.so",
+    initSymbol: "NimMain",
+    types: @[
+      NativeType(
+        name: "DirectionCorners",
+        nifSymbol: "DirectionCorners.0.sample",
+        typeId: "`t10.1.sample",
+        kind: ntEnum,
+        size: 1,
+        alignment: 1),
+      NativeType(
+        name: "CornerRadii",
+        nifSymbol: "CornerRadii.0.sample",
+        typeId: "`t16.1.sample",
+        kind: ntArray,
+        indexTypeSymbol: "DirectionCorners",
+        elementTypeSymbol: "uint16.0.system",
+        size: 8,
+        alignment: 2),
+    ],
+    procs: @[NativeProc(name: "consume", cSymbol: "consume")])
+  let generated = generateNativeModule(api)
+  doAssert "`CornerRadii`* = array[`DirectionCorners`, uint16]" in generated
 
 block generated_module_preserves_discardable_procs:
   let api = NativeApi(
@@ -103,8 +156,8 @@ block generated_module_reconstructs_open_arrays:
             typeSymbol: "openArray.0.system",
             lowering: nlPointer,
             hiddenLengthCount: 1),
-        ]),
-    ])
+    ]),
+  ])
   let generated = generateNativeModule(api)
   doAssert "proc nativeRaw0(`numbers`: openArray[int]): int" in generated
   doAssert "proc `sumNumbers`*(`numbers`: openArray[int]): int" in generated
@@ -127,7 +180,7 @@ block generated_module_reconstructs_named_open_array_elements:
       NativeProc(
         name: "sumSpans",
         cSymbol:
-          "_ZN8producer8sumSpansE3int9openArrayIN8producer10NumberSpanEE4bool",
+      "_ZN8producer8sumSpansE3int9openArrayIN8producer10NumberSpanEE4bool",
         returnTypeSymbol: "int.0.system",
         params: @[
           NativeParam(name: "start", typeSymbol: "int.0.system"),
@@ -137,8 +190,74 @@ block generated_module_reconstructs_named_open_array_elements:
             lowering: nlPointer,
             hiddenLengthCount: 1),
           NativeParam(name: "enabled", typeSymbol: "bool.0.system"),
-        ]),
+      ]),
     ])
   let generated = generateNativeModule(api)
   doAssert "`spans`: openArray[NumberSpan]" in generated
   doAssert "nativeRaw0(`start`, `spans`, `enabled`)" in generated
+
+block generated_module_reconstructs_open_arrays_of_tuples:
+  let api = NativeApi(
+    libraryName: "libsample.so",
+    initSymbol: "NimMain",
+    types: @[
+      NativeType(
+        name: "NumberSpan",
+        nifSymbol: "NumberSpan.0.producer",
+        typeId: "`t17.1.producer",
+        kind: ntObject,
+        size: 8,
+        alignment: 8),
+    ],
+    procs: @[
+      NativeProc(
+        name: "sumLabeledSpans",
+        cSymbol:
+      "_ZN8producer15sumLabeledSpansE9openArrayI5tupleIN8producer10NumberSpanE6stringEE",
+        returnTypeSymbol: "int.0.system",
+        params: @[
+          NativeParam(
+            name: "spans",
+            typeSymbol: "openArray.0.system",
+            lowering: nlPointer,
+            hiddenLengthCount: 1),
+      ]),
+    ])
+  let generated = generateNativeModule(api)
+  doAssert "`spans`: openArray[(NumberSpan, string)]" in generated
+
+block generated_module_resolves_vmath_instantiations_to_public_aliases:
+  let api = NativeApi(
+    libraryName: "libsample.so",
+    initSymbol: "NimMain",
+    types: @[
+      NativeType(
+        name: "Rune",
+        nifSymbol: "Rune.0.unicode",
+        typeId: "`t12.1.unicode",
+        kind: ntDistinct,
+        elementTypeSymbol: "int32.0.system",
+        size: 4,
+        alignment: 4),
+      NativeType(
+        name: "Vec2",
+        nifSymbol: "Vec2.0.vmath",
+        typeId: "`t17.1.vmath",
+        kind: ntObject,
+        size: 8,
+        alignment: 4),
+    ],
+    procs: @[
+      NativeProc(
+        name: "place",
+        cSymbol: "_ZN8producer5placeE9openArrayI5tupleI4Rune5GVec2I7float32EEE",
+        params: @[
+          NativeParam(
+            name: "glyphs",
+            typeSymbol: "openArray.0.system",
+            lowering: nlPointer,
+            hiddenLengthCount: 1),
+      ]),
+    ])
+  let generated = generateNativeModule(api)
+  doAssert "`glyphs`: openArray[(Rune, Vec2)]" in generated

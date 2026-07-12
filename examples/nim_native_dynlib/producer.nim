@@ -43,6 +43,8 @@ type
   NumberSpan* = object
     value*: int
 
+  Number* = int16
+
 var
   hookedCopies = 0
   hookedDestroys = 0
@@ -85,6 +87,14 @@ proc sumNumbers*(numbers: openArray[int]): int {.exportabi.} =
 proc sumSpans*(spans: openArray[NumberSpan]): int {.exportabi.} =
   for span in spans:
     result += span.value
+
+proc sumLabeledSpans*(spans: openArray[(NumberSpan,
+    string)]): int {.exportabi.} =
+  for (span, label) in spans:
+    result += span.value + label.len
+
+proc doubleNumber*(number: Number): Number {.exportabi.} =
+  number * 2
 
 proc newTextPayload*(text: string): Payload {.exportabi.} =
   Payload(kind: pkText, text: text)
