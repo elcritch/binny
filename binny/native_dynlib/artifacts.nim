@@ -83,6 +83,8 @@ proc typeNames(api: NativeApi): Table[string, string] =
     elif not typ.isBuiltinType:
       result[typ.nifSymbol] = typ.name
       result[typ.typeId] = typ.name
+      for symbol in typ.equivalentTypeSymbols:
+        result[symbol] = typ.name
   for typ in api.types:
     if typ.kind == ntImportedGeneric:
       var arguments: seq[string]

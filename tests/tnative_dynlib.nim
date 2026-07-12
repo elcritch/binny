@@ -29,6 +29,11 @@ const NativeSetDependencyFixtureSource =
 const NativeSetDependencyFixtureCacheDir = "tests/.nimcache_set_dependency"
 const NativeSetDependencyLibrary = "libnative_dynlib_set_dependency"
 
+const NativePreferredAliasFixtureSource =
+  "tests/fixtures/native_dynlib_preferred_alias.nim"
+const NativePreferredAliasFixtureCacheDir = "tests/.nimcache_preferred_alias"
+const NativePreferredAliasLibrary = "libnative_dynlib_preferred_alias"
+
 func nativeDependencyLibraryExt(): string =
   when defined(windows):
     "dll"
@@ -83,6 +88,14 @@ proc nativeSetDependencyFixturePaths():
     NativeSetDependencyFixtureSource,
     NativeSetDependencyFixtureCacheDir,
     NativeSetDependencyLibrary,
+  )
+
+proc nativePreferredAliasFixturePaths():
+    tuple[cacheDir: string, sourcePath: string, manifestPath: string] =
+  nativeDependencyFixturePaths(
+    NativePreferredAliasFixtureSource,
+    NativePreferredAliasFixtureCacheDir,
+    NativePreferredAliasLibrary,
   )
 
 proc ensureNativeDependencyFixtureArtifacts(paths: tuple[
@@ -567,3 +580,17 @@ block read_native_bindings_collects_anonymous_set_dependency_type:
     doAssert "Permission* = enum" in generated
     doAssert "permissions*: NativeAbit19_" in generated
     doAssert "= set[Permission]" in generated
+
+block read_native_bindings_prefers_exported_container_aliases:
+  let paths = nativePreferredAliasFixturePaths()
+  if hasNativeDependencyFixtureArtifacts(paths):
+    let generated = generateNativeBindings(paths.cacheDir, paths.sourcePath, paths.manifestPath)
+    doAssert "PermissionSet* = set[Permission]" in generated
+    doAssert "permissions*: PermissionSet" in generated
+    doAssert "EntrySeq* = seq[Entry]" in generated
+    doAssert generated.count("entries*: EntrySeq") == 2
+    doAssert "DependentOptions* = object" in generated
+    doAssert generated.count("EntrySeq* = seq[Entry]") == 1
+    doAssert "EntryList* =" notin generated
+    doAssert "StringSeq* = seq[string]" in generated
+    doAssert "labels*: StringSeq" in generated

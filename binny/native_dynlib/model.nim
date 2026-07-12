@@ -66,6 +66,7 @@ type
     union*: bool
     importModule*: string
     genericArguments*: seq[string]
+    equivalentTypeSymbols*: seq[string]
     enumValues*: seq[NativeEnumValue]
     record*: seq[NativeRecordPart]
 
