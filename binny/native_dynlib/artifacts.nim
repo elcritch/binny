@@ -4,6 +4,14 @@ import model
 type
   NativeArtifactError* = object of ValueError
 
+  MangledType = object
+    name: string
+    arguments: seq[MangledType]
+
+  MangledCursor = object
+    value: string
+    position: int
+
 func nimIdentifier(value: string): string =
   "`" & value.replace("`", "") & "`"
 
@@ -69,6 +77,105 @@ proc nimType(symbol: string; names: Table[string, string]): string =
   else:
     raise newException(NativeArtifactError,
       "unsupported native ABI type symbol: " & symbol)
+
+proc takeMangledName(cursor: var MangledCursor): string =
+  let start = cursor.position
+  while cursor.position < cursor.value.len and
+      cursor.value[cursor.position] in {'0' .. '9'}:
+    inc cursor.position
+  if cursor.position == start:
+    raise newException(NativeArtifactError,
+      "native ABI symbol has an invalid length-prefixed name: " & cursor.value)
+  let length = parseInt(cursor.value[start ..< cursor.position])
+  if length <= 0 or cursor.position + length > cursor.value.len:
+    raise newException(NativeArtifactError,
+      "native ABI symbol has an invalid name length: " & cursor.value)
+  result = cursor.value[cursor.position ..< cursor.position + length]
+  cursor.position += length
+
+proc parseMangledType(cursor: var MangledCursor): MangledType =
+  if cursor.position >= cursor.value.len:
+    raise newException(NativeArtifactError,
+      "native ABI symbol ends before its parameter type: " & cursor.value)
+  if cursor.value[cursor.position] == 'N':
+    inc cursor.position
+    while cursor.position < cursor.value.len and
+        cursor.value[cursor.position] != 'E':
+      result.name = takeMangledName(cursor)
+    if cursor.position >= cursor.value.len:
+      raise newException(NativeArtifactError,
+        "native ABI symbol has an unterminated nested name: " & cursor.value)
+    inc cursor.position
+  else:
+    result.name = takeMangledName(cursor)
+
+  if cursor.position < cursor.value.len and cursor.value[cursor.position] == 'I':
+    inc cursor.position
+    while cursor.position < cursor.value.len and
+        cursor.value[cursor.position] != 'E':
+      result.arguments.add parseMangledType(cursor)
+    if cursor.position >= cursor.value.len:
+      raise newException(NativeArtifactError,
+        "native ABI symbol has unterminated type arguments: " & cursor.value)
+    inc cursor.position
+
+proc mangledParameterTypes(symbol: string): seq[MangledType] =
+  if not symbol.startsWith("_Z"):
+    raise newException(NativeArtifactError,
+      "native ABI symbol is not a Nim mangled name: " & symbol)
+  var cursor = MangledCursor(value: symbol, position: 2)
+  discard parseMangledType(cursor)
+  while cursor.position < cursor.value.len:
+    result.add parseMangledType(cursor)
+
+func normalizedMangledName(name: string): string =
+  const objectSuffix = "colonObjectType_"
+  result = name
+  if result.endsWith(objectSuffix):
+    result.setLen(result.len - objectSuffix.len)
+  case result
+  of "uInt": result = "uint"
+  of "uInt8": result = "uint8"
+  of "uInt16": result = "uint16"
+  of "uInt32": result = "uint32"
+  of "uInt64": result = "uint64"
+  else: discard
+
+proc renderMangledType(typ: MangledType;
+                       names: Table[string, string]): string =
+  let name = normalizedMangledName(typ.name)
+  case name
+  of "openArray", "seq", "varargs":
+    if typ.arguments.len != 1:
+      raise newException(NativeArtifactError,
+        name & " expects one type argument in the native ABI symbol")
+    result = name & "[" & renderMangledType(typ.arguments[0], names) & "]"
+  of "ref":
+    if typ.arguments.len != 1:
+      raise newException(NativeArtifactError,
+        "ref expects one type argument in the native ABI symbol")
+    result = renderMangledType(typ.arguments[0], names)
+  of "ptr", "var", "lent":
+    if typ.arguments.len != 1:
+      raise newException(NativeArtifactError,
+        name & " expects one type argument in the native ABI symbol")
+    result = name & " " & renderMangledType(typ.arguments[0], names)
+  else:
+    if typ.arguments.len > 0:
+      raise newException(NativeArtifactError,
+        "unsupported generic type in native ABI symbol: " & typ.name)
+    case name
+    of "bool", "char", "string", "cstring", "pointer",
+        "int", "int8", "int16", "int32", "int64",
+        "uint", "uint8", "uint16", "uint32", "uint64",
+        "float", "float32", "float64":
+      result = name
+    else:
+      for generatedName in names.values:
+        if generatedName == name:
+          return generatedName
+      raise newException(NativeArtifactError,
+        "native ABI symbol references an unknown type: " & typ.name)
 
 proc generateField(field: NativeField; names: Table[string, string];
                    indent: string): string =
@@ -207,12 +314,33 @@ proc generateLayoutChecks(api: NativeApi): string =
       result.add generateFieldChecks(typeName, typ.record, "  ")
   result.add "\n"
 
-func params(procInfo: NativeProc; names: Table[string, string]): string =
+proc params(procInfo: NativeProc; names: Table[string, string]): string =
   var parts: seq[string] = @[]
-  for param in procInfo.params:
-    let modifier = if param.byVar: "var " else: ""
-    parts.add nimIdentifier(param.name) & ": " & modifier &
-      nimType(param.typeSymbol, names)
+  let hasHiddenLengths = procInfo.params.anyIt(it.hiddenLengthCount > 0)
+  let mangledTypes =
+    if hasHiddenLengths: mangledParameterTypes(procInfo.cSymbol)
+    else: @[]
+  if hasHiddenLengths and mangledTypes.len != procInfo.params.len:
+    raise newException(NativeArtifactError,
+      "native ABI symbol parameter count does not match its manifest: " &
+      procInfo.cSymbol)
+  for index, param in procInfo.params:
+    if param.hiddenLengthCount > 0:
+      if param.hiddenLengthCount != 1:
+        raise newException(NativeArtifactError,
+          "native ABI parameter has an unsupported hidden length count: " &
+          param.name)
+      let logicalType = renderMangledType(mangledTypes[index], names)
+      if not logicalType.startsWith("openArray[") and
+          not logicalType.startsWith("varargs["):
+        raise newException(NativeArtifactError,
+          "native ABI hidden length is not attached to an open array: " &
+          param.name)
+      parts.add nimIdentifier(param.name) & ": " & logicalType
+    else:
+      let modifier = if param.byVar: "var " else: ""
+      parts.add nimIdentifier(param.name) & ": " & modifier &
+        nimType(param.typeSymbol, names)
   result = parts.join("; ")
 
 func args(procInfo: NativeProc): string =

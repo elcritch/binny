@@ -87,3 +87,58 @@ block generated_module_preserves_discardable_procs:
     ])
   let generated = generateNativeModule(api)
   doAssert "proc `add`*(): int {.discardable.}" in generated
+
+block generated_module_reconstructs_open_arrays:
+  let api = NativeApi(
+    libraryName: "libsample.so",
+    initSymbol: "NimMain",
+    procs: @[
+      NativeProc(
+        name: "sumNumbers",
+        cSymbol: "_ZN8producer10sumNumbersE9openArrayI3intE",
+        returnTypeSymbol: "int.0.system",
+        params: @[
+          NativeParam(
+            name: "numbers",
+            typeSymbol: "openArray.0.system",
+            lowering: nlPointer,
+            hiddenLengthCount: 1),
+        ]),
+    ])
+  let generated = generateNativeModule(api)
+  doAssert "proc nativeRaw0(`numbers`: openArray[int]): int" in generated
+  doAssert "proc `sumNumbers`*(`numbers`: openArray[int]): int" in generated
+  doAssert "result = nativeRaw0(`numbers`)" in generated
+
+block generated_module_reconstructs_named_open_array_elements:
+  let api = NativeApi(
+    libraryName: "libsample.so",
+    initSymbol: "NimMain",
+    types: @[
+      NativeType(
+        name: "NumberSpan",
+        nifSymbol: "NumberSpan.0.producer",
+        typeId: "`t17.1.producer",
+        kind: ntObject,
+        size: 8,
+        alignment: 8),
+    ],
+    procs: @[
+      NativeProc(
+        name: "sumSpans",
+        cSymbol:
+          "_ZN8producer8sumSpansE3int9openArrayIN8producer10NumberSpanEE4bool",
+        returnTypeSymbol: "int.0.system",
+        params: @[
+          NativeParam(name: "start", typeSymbol: "int.0.system"),
+          NativeParam(
+            name: "spans",
+            typeSymbol: "openArray.0.system",
+            lowering: nlPointer,
+            hiddenLengthCount: 1),
+          NativeParam(name: "enabled", typeSymbol: "bool.0.system"),
+        ]),
+    ])
+  let generated = generateNativeModule(api)
+  doAssert "`spans`: openArray[NumberSpan]" in generated
+  doAssert "nativeRaw0(`start`, `spans`, `enabled`)" in generated

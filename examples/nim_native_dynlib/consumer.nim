@@ -2,6 +2,12 @@ import generated/producer_abi
 
 echo "Producer says: ", message()
 
+let values = [3, 5, 8]
+doAssert sumNumbers(values) == 16
+
+let spans = [NumberSpan(value: 13), NumberSpan(value: 21)]
+doAssert sumSpans(spans) == 34
+
 let payload = newTextPayload("case object")
 doAssert payload.kind == pkText
 doAssert payload.text == "case object"

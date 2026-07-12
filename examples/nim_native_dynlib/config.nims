@@ -65,7 +65,7 @@ proc generateBindings() =
   runNim([
     "r", "-d:release", "--path:" & projectDir,
     "--nimcache:" & generatorCache, "--out:" & generatorBinary,
-    generatorSource, nimcacheDir, producerSource, manifest, bindings
+    generatorSource, nimcacheDir, producerSource, manifest, bindings, library
   ])
 
 proc buildConsumer() =

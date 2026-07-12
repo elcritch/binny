@@ -40,6 +40,9 @@ type
     small*: uint8
     large*: uint32
 
+  NumberSpan* = object
+    value*: int
+
 var
   hookedCopies = 0
   hookedDestroys = 0
@@ -74,6 +77,14 @@ proc describe*(renderer: Renderer): string {.exportabi.} =
 
 proc message*(): string {.exportabi.} =
   "hello from the MY AWESOME dynlib"
+
+proc sumNumbers*(numbers: openArray[int]): int {.exportabi.} =
+  for number in numbers:
+    result += number
+
+proc sumSpans*(spans: openArray[NumberSpan]): int {.exportabi.} =
+  for span in spans:
+    result += span.value
 
 proc newTextPayload*(text: string): Payload {.exportabi.} =
   Payload(kind: pkText, text: text)
