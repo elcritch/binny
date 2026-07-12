@@ -1,6 +1,7 @@
 import std/[assertions, os, osproc, strformat, strutils]
 import binny/native_dynlib
 import binny/native_dynlib/[artifacts, model]
+import binny/native_dynlib/bifreader
 
 const NativeDependencyFixtureSource = "tests/fixtures/native_dynlib_hidden_dependency.nim"
 const NativeDependencyFixtureCacheDir = "tests/.nimcache_hidden_dependency"
@@ -10,6 +11,23 @@ const NativeAliasDependencyFixtureSource =
   "tests/fixtures/native_dynlib_alias_dependency.nim"
 const NativeAliasDependencyFixtureCacheDir = "tests/.nimcache_alias_dependency"
 const NativeAliasDependencyLibrary = "libnative_dynlib_alias_dependency"
+
+const NativeAliasTargetDependencyFixtureSource =
+  "tests/fixtures/native_dynlib_alias_target_dependency.nim"
+const NativeAliasTargetDependencyFixtureCacheDir =
+  "tests/.nimcache_alias_target_dependency"
+const NativeAliasTargetDependencyLibrary = "libnative_dynlib_alias_target_dependency"
+
+const NativeBacktickInternalDependencyFixtureSource =
+  "tests/fixtures/native_dynlib_backtick_internal_dependency.nim"
+const NativeBacktickInternalDependencyFixtureCacheDir =
+  "tests/.nimcache_backtick_internal_dependency"
+const NativeBacktickInternalDependencyLibrary = "libnative_dynlib_backtick_internal_dependency"
+
+const NativeSetDependencyFixtureSource =
+  "tests/fixtures/native_dynlib_set_dependency.nim"
+const NativeSetDependencyFixtureCacheDir = "tests/.nimcache_set_dependency"
+const NativeSetDependencyLibrary = "libnative_dynlib_set_dependency"
 
 func nativeDependencyLibraryExt(): string =
   when defined(windows):
@@ -43,6 +61,30 @@ proc nativeAliasDependencyFixturePaths():
     NativeAliasDependencyLibrary,
   )
 
+proc nativeAliasTargetDependencyFixturePaths():
+    tuple[cacheDir: string, sourcePath: string, manifestPath: string] =
+  nativeDependencyFixturePaths(
+    NativeAliasTargetDependencyFixtureSource,
+    NativeAliasTargetDependencyFixtureCacheDir,
+    NativeAliasTargetDependencyLibrary,
+  )
+
+proc nativeBacktickInternalDependencyFixturePaths():
+    tuple[cacheDir: string, sourcePath: string, manifestPath: string] =
+  nativeDependencyFixturePaths(
+    NativeBacktickInternalDependencyFixtureSource,
+    NativeBacktickInternalDependencyFixtureCacheDir,
+    NativeBacktickInternalDependencyLibrary,
+  )
+
+proc nativeSetDependencyFixturePaths():
+    tuple[cacheDir: string, sourcePath: string, manifestPath: string] =
+  nativeDependencyFixturePaths(
+    NativeSetDependencyFixtureSource,
+    NativeSetDependencyFixtureCacheDir,
+    NativeSetDependencyLibrary,
+  )
+
 proc ensureNativeDependencyFixtureArtifacts(paths: tuple[
     cacheDir: string, sourcePath: string, manifestPath: string
   ]): bool =
@@ -67,6 +109,24 @@ proc hasNativeDependencyFixtureArtifacts(paths: tuple[
     cacheDir: string, sourcePath: string, manifestPath: string
   ]): bool =
   ensureNativeDependencyFixtureArtifacts(paths)
+
+proc removeManifestType(abiText, typeSymbol: string): string =
+  let marker = "(type \"" & typeSymbol & "\""
+  var skipping = false
+  var depth = 0
+  var output: seq[string]
+  for line in abiText.splitLines():
+    if not skipping:
+      if line.contains(marker):
+        skipping = true
+        depth = line.count('(') - line.count(')')
+      if not skipping:
+        output.add line
+    else:
+      depth += line.count('(') - line.count(')')
+      if depth <= 0:
+        skipping = false
+  result = output.join("\n")
 
 block config_defaults_to_manifest_directory:
   let config = initNativeBindingsConfig("src/producer.nim", "build/libproducer.abi.nif")
@@ -469,3 +529,41 @@ block read_native_bindings_collects_exported_alias_type:
     let generated = generateNativeBindings(paths.cacheDir, paths.sourcePath, paths.manifestPath)
     doAssert "ZLevel* = int8" in generated
     doAssert "proc layer*(lvl: ZLevel): ZLevel" in generated
+
+block read_native_bindings_collects_alias_target_dependency_type:
+  let paths = nativeAliasTargetDependencyFixturePaths()
+  if hasNativeDependencyFixtureArtifacts(paths):
+    let api = readNativeApi(findSemanticBif(paths.cacheDir, paths.sourcePath), paths.manifestPath)
+    var targetTypeSymbol = ""
+    for typ in api.types:
+      if typ.kind == ntObject and typ.name == "ColorLUV":
+        targetTypeSymbol = typ.typeId
+        break
+    doAssert targetTypeSymbol.len > 0
+    let missingManifestPath = paths.cacheDir / "libnative_dynlib_alias_target_missing.abi.nif"
+    writeFile(
+      missingManifestPath,
+      removeManifestType(readFile(paths.manifestPath), targetTypeSymbol),
+    )
+    let generated = generateNativeBindings(
+      paths.cacheDir, paths.sourcePath, missingManifestPath
+    )
+    doAssert "ColorLUV* = object" in generated
+    doAssert "ColorHCL* = ColorLUV" in generated
+    doAssert "proc transform*(value: ColorHCL): ColorHCL" in generated
+
+block read_native_bindings_collects_backtick_internal_dependency_type:
+  let paths = nativeBacktickInternalDependencyFixturePaths()
+  if hasNativeDependencyFixtureArtifacts(paths):
+    let generated = generateNativeBindings(paths.cacheDir, paths.sourcePath, paths.manifestPath)
+    doAssert "internalNode* = object" in generated
+    doAssert "children*: NativeAbit24_5" in generated
+    doAssert "proc passThrough*(value: internalNode): internalNode" in generated
+
+block read_native_bindings_collects_anonymous_set_dependency_type:
+  let paths = nativeSetDependencyFixturePaths()
+  if hasNativeDependencyFixtureArtifacts(paths):
+    let generated = generateNativeBindings(paths.cacheDir, paths.sourcePath, paths.manifestPath)
+    doAssert "Permission* = enum" in generated
+    doAssert "permissions*: NativeAbit19_" in generated
+    doAssert "= set[Permission]" in generated

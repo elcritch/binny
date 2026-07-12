@@ -810,16 +810,19 @@ proc collectStdOrderedTables(
     stdTablesModules: Table[string, bool],
     layouts: Table[string, AbiTypeEntry],
     instances: var Table[string, NativeType],
+    skipTypes: var Table[string, bool],
 ) =
   if node.kind != TagLit:
     return
   var typ: NativeType
   if parseStdOrderedTable(node, stdTablesModules, layouts, typ):
     instances[typ.typeId] = typ
+    skipTypes[typ.nifSymbol] = true
+    skipTypes[typ.typeId] = true
   var children = node.childCursor()
   while children.hasMore:
     if children.kind == TagLit:
-      collectStdOrderedTables(children, stdTablesModules, layouts, instances)
+      collectStdOrderedTables(children, stdTablesModules, layouts, instances, skipTypes)
     children.skip
 
 func isMaterializedKind(kind: string): bool =
@@ -885,9 +888,6 @@ proc addLayoutDependency(
     return
   collectLayoutDependencies(layouts[layoutSymbol], layouts, dependencies)
 
-proc isBacktickTypeSymbol(symbol: string): bool =
-  symbol.startsWith("`t")
-
 proc collectReferencedBranchDependencies(
     branches: seq[NativeBranch],
     layouts: Table[string, AbiTypeEntry],
@@ -909,6 +909,14 @@ proc collectReferencedLayoutDependencies(
     skipInternal: Table[string, bool],
 )
 
+proc shouldSkipReferencedType(
+    symbol: string, layouts: Table[string, AbiTypeEntry]
+): bool =
+  if symbol.len == 0 or symbol notin layouts:
+    return false
+  let layout = layouts[symbol]
+  layout.size < 0 or layout.kind in ["genericbody", "genericinvocation"]
+
 proc collectReferencedType(
     symbol: string,
     layouts: Table[string, AbiTypeEntry],
@@ -921,6 +929,8 @@ proc collectReferencedType(
     return
   if symbol notin layouts:
     requiredTypes[symbol] = true
+    return
+  if shouldSkipReferencedType(symbol, layouts):
     return
   requiredTypes[symbol] = true
   collectReferencedLayoutDependencies(layouts[symbol], layouts, requiredTypes, skipInternal)
@@ -1029,26 +1039,41 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
         stdTablesModules[module.identity] = true
 
   var importedGenericTypes: Table[string, NativeType]
+  var skipStdTableObjectTypes: Table[string, bool]
+  var unmaterializedTypes: seq[NativeType]
   for module in modules.mitems:
     for nifSymbol, visibility, declaration in module.declarations:
       let moduleId = symbolModule(nifSymbol)
       if visibility == ivExported or moduleId.len > 0 and not (moduleId in skipSystemModuleTypeSymbols):
         if not declaration.findChildTag("type").cursorIsNil and
             not declaration.findChildTag("type0").cursorIsNil:
+          collectStdOrderedTables(
+            declaration,
+            stdTablesModules,
+            layouts,
+            importedGenericTypes,
+            skipStdTableObjectTypes,
+          )
           var typ: NativeType
-          if parseNativeType(declaration, nifSymbol, typ) and typ.size >= 0:
+          if parseNativeType(declaration, nifSymbol, typ):
             if visibility != ivExported and typ.kind != ntAlias and
                 typ.typeId notin manifestTypeSymbols and typ.nifSymbol notin manifestTypeSymbols:
               continue
-            if typ.kind != ntAlias:
-              if not applyLayout(typ, layouts):
-                continue
-            else:
-              discard applyLayout(typ, layouts)
+            let hasLayout = applyLayout(typ, layouts)
+            if typ.kind != ntAlias and not hasLayout:
+              typ.size = -1
+              typ.alignment = -1
+              unmaterializedTypes.add typ
+              continue
+            if not hasLayout:
+              typ.size = -1
+              typ.alignment = -1
+            if symbolModule(typ.nifSymbol) in stdTablesModules and
+                symbolBase(typ.nifSymbol) == "OrderedTable":
+              continue
+            if typ.nifSymbol in skipStdTableObjectTypes or typ.typeId in skipStdTableObjectTypes:
+              continue
             result.types.add typ
-            collectStdOrderedTables(
-              declaration, stdTablesModules, layouts, importedGenericTypes
-            )
 
   for typ in importedGenericTypes.values:
     result.types.add typ
@@ -1060,18 +1085,6 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
   var internalLayoutTypes: Table[string, bool]
   for typ in importedGenericTypes.values:
     addLayoutDependency(typ.typeId, layouts, internalLayoutTypes)
-
-  for layout in manifest.types:
-    let hasUnresolvedElement =
-      layout.elementTypeSymbol in layouts and
-      layouts[layout.elementTypeSymbol].kind in ["genericbody", "genericinvocation"]
-    let hasMissingTupleFields =
-      layout.kind == "tuple" and layout.size > 0 and layout.record.len == 0
-    if layout.typeSymbol notin represented and layout.size >= 0 and
-        layout.kind.isMaterializedKind and layout.typeSymbol notin internalLayoutTypes and
-        not hasUnresolvedElement and not hasMissingTupleFields:
-      result.types.add typeFromLayout(layout)
-      represented[layout.typeSymbol] = true
 
   for item in manifest.procs:
     if item.genericInstance:
@@ -1112,11 +1125,21 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
 
   var requiredTypes: Table[string, bool]
   for typ in result.types:
-    if typ.kind == ntImportedGeneric or not isBacktickTypeSymbol(typ.nifSymbol):
+    let isManifestType =
+      typ.nifSymbol in manifestTypeSymbols or typ.typeId in manifestTypeSymbols
+    let isMaterializedSemanticType = typ.kind != ntAlias
+    if typ.kind == ntImportedGeneric or isManifestType or isMaterializedSemanticType:
       let moduleIdentity = symbolModule(typ.nifSymbol)
       if moduleIdentity.len > 0 and moduleIdentity in skipSystemModuleTypeSymbols:
         continue
-      collectReferencedType(typ.typeId, layouts, requiredTypes, skipInternalTypes)
+      let symbolSkip =
+        if typ.kind == ntImportedGeneric:
+          skipInternalTypes
+        else:
+          initTable[string, bool]()
+      collectReferencedType(typ.typeId, layouts, requiredTypes, symbolSkip)
+      if typ.kind == ntAlias:
+        collectReferencedType(typ.elementTypeSymbol, layouts, requiredTypes, symbolSkip)
 
   for procInfo in result.procs:
     collectReferencedType(procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternalTypes)
@@ -1128,6 +1151,24 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
       collectReferencedType(param.typeSymbol, layouts, requiredTypes, skipInternalTypes)
   for symbol in manifestTypeSymbols.keys:
     requiredTypes[symbol] = true
+
+  for typ in unmaterializedTypes:
+    if typ.typeId in requiredTypes or typ.nifSymbol in requiredTypes:
+      result.types.add typ
+      represented[typ.typeId] = true
+
+  for layout in manifest.types:
+    let hasUnresolvedElement =
+      layout.elementTypeSymbol in layouts and
+      layouts[layout.elementTypeSymbol].kind in ["genericbody", "genericinvocation"]
+    let hasMissingTupleFields =
+      layout.kind == "tuple" and layout.size > 0 and layout.record.len == 0
+    if layout.typeSymbol notin represented and layout.size >= 0 and
+        layout.kind.isMaterializedKind and
+        layout.typeSymbol in requiredTypes and
+        not hasUnresolvedElement and not hasMissingTupleFields:
+      result.types.add typeFromLayout(layout)
+      represented[layout.typeSymbol] = true
 
   var publicTypes: seq[NativeType]
   for typ in result.types:
