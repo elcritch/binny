@@ -65,7 +65,7 @@ proc generateBindings() =
   runNim([
     "r", "-d:release", "--path:" & projectDir,
     "--nimcache:" & generatorCache, "--out:" & generatorBinary,
-    generatorSource, nimcacheDir, producerSource, manifest, library, bindings
+    generatorSource, nimcacheDir, producerSource, manifest, bindings
   ])
 
 proc buildConsumer() =
@@ -78,7 +78,26 @@ proc buildConsumer() =
   ])
 
 proc runConsumer() =
-  exec quoteShellCommand([consumerBinary])
+  let loaderPath = case hostOS
+    of "macosx": "DYLD_LIBRARY_PATH"
+    of "linux": "LD_LIBRARY_PATH"
+    else: raise newException(ValueError,
+      "native dynlib example supports only macOS and Linux")
+  let
+    hadLoaderPath = existsEnv(loaderPath)
+    previousLoaderPath = getEnv(loaderPath)
+    nextLoaderPath = if previousLoaderPath.len > 0:
+      nimcacheDir & ":" & previousLoaderPath
+    else:
+      nimcacheDir
+  putEnv(loaderPath, nextLoaderPath)
+  try:
+    exec quoteShellCommand([consumerBinary])
+  finally:
+    if hadLoaderPath:
+      putEnv(loaderPath, previousLoaderPath)
+    else:
+      delEnv(loaderPath)
 
 proc checkMoveOnlyBinding() =
   let command = quoteShellCommand([

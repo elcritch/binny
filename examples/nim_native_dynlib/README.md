@@ -24,6 +24,9 @@ Binny's `binny/native_dynlib` module reads that manifest together with the root
 module's stable semantic BIF and emits `producer_abi.nim`. That generated module
 contains real Nim `object` and `ref object` declarations, native `nimcall`
 dynlib imports, and public wrappers that initialize the library before use.
+The binding records only `libproducer.dylib` or `libproducer.so`; the example
+task adds `nimcache` to the platform loader search path when it runs the
+consumer.
 
 The first slice supports non-generic procedures and auto-managed object graphs.
 The example crosses `string`, a by-value object, and nested `ref object` values,
@@ -64,7 +67,9 @@ nim e2e
 ```
 
 The tasks use the compiler that launched them for the producer, generator, and
-consumer, so all stages share one ABI.
+consumer, so all stages share one ABI. The generator uses
+`NativeBindingsConfig` and `writeNativeBindings`, the same dependency-facing API
+available to other projects.
 
 For incremental work, `nim producer` rebuilds the dynamic library and ABI
 artifacts. `nim bindings` regenerates the module, and `nim consumer` regenerates
