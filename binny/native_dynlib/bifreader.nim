@@ -656,8 +656,12 @@ proc typeFromLayout(layout: AbiTypeEntry): NativeType =
   of "array": result.kind = ntArray
   of "sequence": result.kind = ntSequence
   of "set": result.kind = ntSet
+  of "tuple": result.kind = ntTuple
   else:
     fail("unsupported native ABI layout kind: " & layout.kind)
+
+func isMaterializedKind(kind: string): bool =
+  kind in ["object", "enum", "distinct", "array", "sequence", "set", "tuple"]
 
 proc addAbiModule(modules: var seq[bif.BifModule];
                   seenPaths: var Table[string, bool]; path: string) =
@@ -722,8 +726,11 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
   for typ in result.types:
     represented[typ.typeId] = true
   for layout in manifest.types:
+    let hasUnresolvedElement =
+      layout.elementTypeSymbol in layouts and
+      layouts[layout.elementTypeSymbol].kind in ["genericbody", "genericinvocation"]
     if layout.typeSymbol notin represented and layout.size >= 0 and
-        layout.kind in ["object", "enum", "distinct", "array", "sequence", "set"]:
+        layout.kind.isMaterializedKind and not hasUnresolvedElement:
       result.types.add typeFromLayout(layout)
       represented[layout.typeSymbol] = true
 

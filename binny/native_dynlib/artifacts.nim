@@ -94,6 +94,15 @@ proc generateRecord(record: seq[NativeRecordPart];
         else:
           result.add generateRecord(branch.record, names, indent & "  ")
 
+proc generateTuple(record: seq[NativeRecordPart];
+                   names: Table[string, string]): string =
+  for part in record:
+    if part.kind != nrField:
+      raise newException(NativeArtifactError,
+        "native ABI tuple cannot contain a case section")
+    result.add "    " & nimIdentifier(part.field.name) & ": " &
+      nimType(part.field.typeSymbol, names) & "\n"
+
 proc generateTypes(api: NativeApi; names: Table[string, string]): string =
   let types = api.types.filterIt(not it.isBuiltinType)
   if types.len == 0:
@@ -140,6 +149,11 @@ proc generateTypes(api: NativeApi; names: Table[string, string]): string =
       continue
     of ntSet:
       result.add "set[" & nimType(typ.elementTypeSymbol, names) & "]\n\n"
+      continue
+    of ntTuple:
+      result.add "tuple\n"
+      result.add generateTuple(typ.record, names)
+      result.add "\n"
       continue
     of ntEnum:
       result.add "enum\n"

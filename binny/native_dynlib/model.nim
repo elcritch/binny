@@ -13,6 +13,7 @@ type
     ntArray
     ntSequence
     ntSet
+    ntTuple
 
   NativeEnumValue* = object
     name*: string
