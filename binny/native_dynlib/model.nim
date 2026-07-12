@@ -9,6 +9,8 @@ type
     ntObject
     ntRefObject
     ntEnum
+    ntDistinct
+    ntArray
 
   NativeEnumValue* = object
     name*: string
@@ -48,6 +50,7 @@ type
     typeId*: string
     kind*: NativeTypeKind
     baseTypeSymbol*: string
+    elementTypeSymbol*: string
     size*: int64
     alignment*: int64
     layoutFingerprint*: string

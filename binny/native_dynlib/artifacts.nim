@@ -1,4 +1,4 @@
-import std/[strutils, tables]
+import std/[sequtils, strutils, tables]
 import model
 
 type
@@ -6,11 +6,6 @@ type
 
 func nimIdentifier(value: string): string =
   "`" & value.replace("`", "") & "`"
-
-proc typeNames(api: NativeApi): Table[string, string] =
-  for typ in api.types:
-    result[typ.nifSymbol] = typ.name
-    result[typ.typeId] = typ.name
 
 func builtinTypeId(symbol: string): string =
   if not symbol.startsWith("`t"):
@@ -38,6 +33,15 @@ func builtinTypeId(symbol: string): string =
   of 43: "uint32"
   of 44: "uint64"
   else: ""
+
+func isBuiltinType(typ: NativeType): bool =
+  builtinTypeId(typ.typeId).len > 0
+
+proc typeNames(api: NativeApi): Table[string, string] =
+  for typ in api.types:
+    if not typ.isBuiltinType:
+      result[typ.nifSymbol] = typ.name
+      result[typ.typeId] = typ.name
 
 proc nimType(symbol: string; names: Table[string, string]): string =
   if symbol.len == 0:
@@ -91,10 +95,11 @@ proc generateRecord(record: seq[NativeRecordPart];
           result.add generateRecord(branch.record, names, indent & "  ")
 
 proc generateTypes(api: NativeApi; names: Table[string, string]): string =
-  if api.types.len == 0:
+  let types = api.types.filterIt(not it.isBuiltinType)
+  if types.len == 0:
     return
   result.add "type\n"
-  for typ in api.types:
+  for typ in types:
     result.add "  " & nimIdentifier(typ.name) & "*"
     var pragmas: seq[string] = @[]
     if typ.inheritable: pragmas.add "inheritable"
@@ -106,6 +111,30 @@ proc generateTypes(api: NativeApi; names: Table[string, string]): string =
     case typ.kind
     of ntObject: result.add "object"
     of ntRefObject: result.add "ref object"
+    of ntDistinct:
+      result.add "distinct " & nimType(typ.elementTypeSymbol, names) & "\n\n"
+      continue
+    of ntArray:
+      var elementSize = 0'i64
+      for candidate in api.types:
+        if candidate.nifSymbol == typ.elementTypeSymbol or
+            candidate.typeId == typ.elementTypeSymbol:
+          elementSize = candidate.size
+          break
+      if elementSize <= 0:
+        case builtinTypeId(typ.elementTypeSymbol)
+        of "bool", "char", "int8", "uint8": elementSize = 1
+        of "int16", "uint16": elementSize = 2
+        of "int32", "uint32", "float32": elementSize = 4
+        of "int", "uint", "int64", "uint64", "float", "float64", "pointer":
+          elementSize = 8
+        else: discard
+      if elementSize <= 0 or typ.size < 0:
+        raise newException(NativeArtifactError,
+          "unsupported native ABI array layout: " & typ.nifSymbol)
+      result.add "array[" & $(typ.size div elementSize) & ", " &
+        nimType(typ.elementTypeSymbol, names) & "]\n\n"
+      continue
     of ntEnum:
       result.add "enum\n"
       for value in typ.enumValues:
@@ -136,10 +165,11 @@ proc generateFieldChecks(typeName: string; record: seq[NativeRecordPart];
         result.add generateFieldChecks(typeName, branch.record, indent)
 
 proc generateLayoutChecks(api: NativeApi): string =
-  if api.types.len == 0:
+  let types = api.types.filterIt(not it.isBuiltinType)
+  if types.len == 0:
     return
   result.add "static:\n"
-  for typ in api.types:
+  for typ in types:
     let typeName = nimIdentifier(typ.name)
     if typ.size >= 0:
       result.add "  doAssert sizeof(" & typeName & ") == " & $typ.size & "\n"

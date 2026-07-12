@@ -489,6 +489,8 @@ proc parseNativeType(declaration: Cursor; nifSymbol: string;
   let refType = sourceType.findChildTag("refty")
   let objectType = sourceType.findChildTag("objectty")
   let enumType = sourceType.findChildTag("enumty")
+  let distinctType = sourceType.findChildTag("distinctty")
+  let arrayType = sourceType.findChildTag("arrayty")
   typ.name = symbolBase(nifSymbol)
   typ.nifSymbol = nifSymbol
   let typeDesc = declaration.findDescendantTag("td")
@@ -508,6 +510,10 @@ proc parseNativeType(declaration: Cursor; nifSymbol: string;
     typ.kind = ntObject
   elif not enumType.cursorIsNil:
     typ.kind = ntEnum
+  elif not distinctType.cursorIsNil:
+    typ.kind = ntDistinct
+  elif not arrayType.cursorIsNil:
+    typ.kind = ntArray
   else:
     return false
   result = true
@@ -557,17 +563,32 @@ proc parseNativeProc(declaration: Cursor; abi: AbiProcEntry;
     if children.kind == Symbol:
       result.returnTypeSymbol = children.symName
     children.skip
-  while children.hasMore:
-    if children.kind == TagLit and children.tagName == "sd":
-      let metadata = children.findChildTag("param")
-      if not metadata.cursorIsNil:
-        result.params.add parseParam(children)
-    children.skip
+  proc collectParams(node: Cursor; params: var seq[NativeParam]) =
+    var nested = node.childCursor()
+    while nested.hasMore:
+      if nested.kind == TagLit:
+        if nested.tagName == "sd" and
+            not nested.findChildTag("param").cursorIsNil:
+          var belongsToProc = false
+          var fields = nested.childCursor()
+          while fields.hasMore:
+            if fields.kind == Symbol and fields.symName == abi.nifSymbol:
+              belongsToProc = true
+              break
+            fields.skip
+          if belongsToProc:
+            params.add parseParam(nested)
+        else:
+          collectParams(nested, params)
+      nested.skip
+
+  collectParams(formals, result.params)
 
   if applyAbiLowering:
     if result.params.len != abi.params.len:
       fail("semantic parameter count does not match ABI lowering for " &
-        abi.nifSymbol)
+        abi.nifSymbol & ": semantic=" & $result.params.len &
+        " ABI=" & $abi.params.len)
     for i in 0 ..< result.params.len:
       result.params[i].lowering = abi.params[i].lowering
       result.params[i].hiddenLengthCount = abi.params[i].hiddenLengthCount
@@ -590,6 +611,7 @@ proc applyLayout(typ: var NativeType;
       recordLayout.elementTypeSymbol in layouts:
     recordLayout = layouts[recordLayout.elementTypeSymbol]
   typ.baseTypeSymbol = recordLayout.baseTypeSymbol
+  typ.elementTypeSymbol = declared.elementTypeSymbol
   typ.record = recordLayout.record
   result = true
 
