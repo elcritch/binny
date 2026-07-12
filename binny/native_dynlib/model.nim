@@ -16,6 +16,7 @@ type
     ntSet
     ntTuple
     ntRange
+    ntImportedGeneric
 
   NativeEnumValue* = object
     name*: string
@@ -63,6 +64,8 @@ type
     inheritable*: bool
     packed*: bool
     union*: bool
+    importModule*: string
+    genericArguments*: seq[string]
     enumValues*: seq[NativeEnumValue]
     record*: seq[NativeRecordPart]
 

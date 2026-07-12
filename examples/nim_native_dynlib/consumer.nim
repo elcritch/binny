@@ -13,7 +13,7 @@ doAssert sumLabeledSpans([(NumberSpan(value: 5), "abc")]) == 8
 let number: Number = 12
 doAssert doubleNumber(number) == 24
 
-let renders = newRenders()
+let renders = Renders(layers: initOrderedTable[Number, RenderList]())
 renders.layers[1.Number] = @["first"]
 renders.layers[2.Number] = @["second", "third"]
 doAssert 1.Number in renders.layers
@@ -21,10 +21,8 @@ doAssert renders.layers[2.Number] == @["second", "third"]
 var visited: seq[(Number, RenderList)]
 for key, value in renders.layers:
   visited.add (key, value)
-doAssert visited == @[
-  (1.Number, @["first"]),
-  (2.Number, @["second", "third"])
-]
+doAssert visited == @[(1.Number, @["first"]), (2.Number, @["second", "third"])]
+doAssert newRenders().layers.len == 0
 
 let payload = newTextPayload("case object")
 doAssert payload.kind == pkText

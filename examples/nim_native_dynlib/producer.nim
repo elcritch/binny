@@ -60,7 +60,7 @@ proc `=destroy`(hooked: Hooked) =
   if hooked.value != 0:
     inc hookedDestroys
 
-proc `=copy`(dest: var Hooked; source: Hooked) =
+proc `=copy`(dest: var Hooked, source: Hooked) =
   inc hookedCopies
   dest.value = source.value
 
@@ -68,15 +68,12 @@ proc `=destroy`(moveOnly: MoveOnly) =
   if moveOnly.value != 0:
     inc moveOnlyDestroys
 
-proc `=copy`(dest: var MoveOnly; source: MoveOnly) {.error.}
+proc `=copy`(dest: var MoveOnly, source: MoveOnly) {.error.}
 
 proc newRenderer*(name: string): Renderer {.exportabi.} =
-  Renderer(
-    name: name,
-    size: Vec2(x: 1, y: 2),
-    child: Child(label: "child"))
+  Renderer(name: name, size: Vec2(x: 1, y: 2), child: Child(label: "child"))
 
-proc translate*(renderer: Renderer; delta: Vec2) {.exportabi.} =
+proc translate*(renderer: Renderer, delta: Vec2) {.exportabi.} =
   renderer.size.x += delta.x
   renderer.size.y += delta.y
 
@@ -94,8 +91,7 @@ proc sumSpans*(spans: openArray[NumberSpan]): int {.exportabi.} =
   for span in spans:
     result += span.value
 
-proc sumLabeledSpans*(spans: openArray[(NumberSpan,
-    string)]): int {.exportabi.} =
+proc sumLabeledSpans*(spans: openArray[(NumberSpan, string)]): int {.exportabi.} =
   for (span, label) in spans:
     result += span.value + label.len
 
@@ -110,16 +106,18 @@ proc newTextPayload*(text: string): Payload {.exportabi.} =
 
 proc payloadDescription*(payload: Payload): string {.exportabi.} =
   case payload.kind
-  of pkCode: $payload.code
-  of pkText: payload.text
+  of pkCode:
+    $payload.code
+  of pkText:
+    payload.text
 
-proc newDerived*(value: int; detail: string): Derived {.exportabi.} =
+proc newDerived*(value: int, detail: string): Derived {.exportabi.} =
   Derived(baseValue: value, detail: detail)
 
 proc derivedDescription*(value: Derived): string {.exportabi.} =
   $value.baseValue & ":" & value.detail
 
-proc newPacked*(small: uint8; large: uint32): Packed {.exportabi.} =
+proc newPacked*(small: uint8, large: uint32): Packed {.exportabi.} =
   Packed(small: small, large: large)
 
 proc newHooked*(value: int): Hooked {.exportabi.} =

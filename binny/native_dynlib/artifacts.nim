@@ -12,8 +12,35 @@ type
     value: string
     position: int
 
+func isNimKeyword(value: string): bool =
+  let normalized = value.replace("_", "").toLowerAscii
+  case normalized
+  of "addr", "and", "as", "asm", "atomic", "bind", "block", "break",
+      "case", "cast", "concept", "const", "continue", "converter", "defer",
+      "discard", "distinct", "div", "do", "elif", "else", "end", "enum",
+      "except", "export", "finally", "for", "from", "func", "generic", "if",
+      "import", "in", "include", "interface", "is", "isnot", "iterator", "let",
+      "lent", "macro", "method", "mixin", "mod", "nil", "not", "notin", "object",
+      "of", "or", "out", "proc", "ptr", "raise", "ref", "return", "shl", "shr",
+      "static", "template", "try", "tuple", "type", "using", "var", "when", "while",
+      "with", "without", "xor", "yield":
+    true
+  else:
+    false
+
+func isNimIdentifier(value: string): bool =
+  if value.len == 0 or value[0] notin {'a' .. 'z', 'A' .. 'Z', '_'}:
+    return false
+  for ch in value:
+    if ch notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_'}:
+      return false
+  not isNimKeyword(value)
+
 func nimIdentifier(value: string): string =
-  "`" & value.replace("`", "") & "`"
+  if value.isNimIdentifier:
+    value
+  else:
+    "`" & value.replace("`", "") & "`"
 
 func builtinTypeId(symbol: string): string =
   if not symbol.startsWith("`t"):
@@ -46,6 +73,8 @@ func isBuiltinType(typ: NativeType): bool =
   (typ.kind != ntAlias and builtinTypeId(typ.typeId).len > 0) or
     (typ.kind == ntRange and typ.name in ["Natural", "Positive"])
 
+proc nimType(symbol: string, names: Table[string, string]): string
+
 proc typeNames(api: NativeApi): Table[string, string] =
   for typ in api.types:
     if typ.kind == ntRange and typ.name in ["Natural", "Positive"]:
@@ -54,8 +83,16 @@ proc typeNames(api: NativeApi): Table[string, string] =
     elif not typ.isBuiltinType:
       result[typ.nifSymbol] = typ.name
       result[typ.typeId] = typ.name
+  for typ in api.types:
+    if typ.kind == ntImportedGeneric:
+      var arguments: seq[string]
+      for argument in typ.genericArguments:
+        arguments.add nimType(argument, result)
+      let rendered = typ.name & "[" & arguments.join(", ") & "]"
+      result[typ.nifSymbol] = rendered
+      result[typ.typeId] = rendered
 
-proc nimType(symbol: string; names: Table[string, string]): string =
+proc nimType(symbol: string, names: Table[string, string]): string =
   if symbol.len == 0:
     return ""
   if symbol in names:
@@ -64,19 +101,20 @@ proc nimType(symbol: string; names: Table[string, string]): string =
   if builtin.len > 0:
     return builtin
   let dot = symbol.find('.')
-  let name = if dot < 0: symbol else: symbol[0 ..< dot]
+  let name =
+    if dot < 0:
+      symbol
+    else:
+      symbol[0 ..< dot]
   case name
-  of "bool", "char", "string", "cstring", "pointer",
-      "int", "int8", "int16", "int32", "int64",
-      "uint", "uint8", "uint16", "uint32", "uint64",
-      "float", "float32", "float64",
-      "cchar", "cschar", "cshort", "cint", "clong", "clonglong",
-      "cuchar", "cushort", "cuint", "culong", "culonglong",
-      "cfloat", "cdouble", "csize_t":
+  of "bool", "char", "string", "cstring", "pointer", "int", "int8", "int16", "int32",
+      "int64", "uint", "uint8", "uint16", "uint32", "uint64", "float", "float32",
+      "float64", "cchar", "cschar", "cshort", "cint", "clong", "clonglong", "cuchar",
+      "cushort", "cuint", "culong", "culonglong", "cfloat", "cdouble", "csize_t":
     result = name
   else:
-    raise newException(NativeArtifactError,
-      "unsupported native ABI type symbol: " & symbol)
+    raise
+      newException(NativeArtifactError, "unsupported native ABI type symbol: " & symbol)
 
 proc takeMangledName(cursor: var MangledCursor): string =
   let start = cursor.position
@@ -84,45 +122,54 @@ proc takeMangledName(cursor: var MangledCursor): string =
       cursor.value[cursor.position] in {'0' .. '9'}:
     inc cursor.position
   if cursor.position == start:
-    raise newException(NativeArtifactError,
-      "native ABI symbol has an invalid length-prefixed name: " & cursor.value)
+    raise newException(
+      NativeArtifactError,
+      "native ABI symbol has an invalid length-prefixed name: " & cursor.value,
+    )
   let length = parseInt(cursor.value[start ..< cursor.position])
   if length <= 0 or cursor.position + length > cursor.value.len:
-    raise newException(NativeArtifactError,
-      "native ABI symbol has an invalid name length: " & cursor.value)
+    raise newException(
+      NativeArtifactError,
+      "native ABI symbol has an invalid name length: " & cursor.value,
+    )
   result = cursor.value[cursor.position ..< cursor.position + length]
   cursor.position += length
 
 proc parseMangledType(cursor: var MangledCursor): MangledType =
   if cursor.position >= cursor.value.len:
-    raise newException(NativeArtifactError,
-      "native ABI symbol ends before its parameter type: " & cursor.value)
+    raise newException(
+      NativeArtifactError,
+      "native ABI symbol ends before its parameter type: " & cursor.value,
+    )
   if cursor.value[cursor.position] == 'N':
     inc cursor.position
-    while cursor.position < cursor.value.len and
-        cursor.value[cursor.position] != 'E':
+    while cursor.position < cursor.value.len and cursor.value[cursor.position] != 'E':
       result.name = takeMangledName(cursor)
     if cursor.position >= cursor.value.len:
-      raise newException(NativeArtifactError,
-        "native ABI symbol has an unterminated nested name: " & cursor.value)
+      raise newException(
+        NativeArtifactError,
+        "native ABI symbol has an unterminated nested name: " & cursor.value,
+      )
     inc cursor.position
   else:
     result.name = takeMangledName(cursor)
 
   if cursor.position < cursor.value.len and cursor.value[cursor.position] == 'I':
     inc cursor.position
-    while cursor.position < cursor.value.len and
-        cursor.value[cursor.position] != 'E':
+    while cursor.position < cursor.value.len and cursor.value[cursor.position] != 'E':
       result.arguments.add parseMangledType(cursor)
     if cursor.position >= cursor.value.len:
-      raise newException(NativeArtifactError,
-        "native ABI symbol has unterminated type arguments: " & cursor.value)
+      raise newException(
+        NativeArtifactError,
+        "native ABI symbol has unterminated type arguments: " & cursor.value,
+      )
     inc cursor.position
 
 proc mangledParameterTypes(symbol: string): seq[MangledType] =
   if not symbol.startsWith("_Z"):
-    raise newException(NativeArtifactError,
-      "native ABI symbol is not a Nim mangled name: " & symbol)
+    raise newException(
+      NativeArtifactError, "native ABI symbol is not a Nim mangled name: " & symbol
+    )
   var cursor = MangledCursor(value: symbol, position: 2)
   discard parseMangledType(cursor)
   while cursor.position < cursor.value.len:
@@ -134,37 +181,48 @@ func normalizedMangledName(name: string): string =
   if result.endsWith(objectSuffix):
     result.setLen(result.len - objectSuffix.len)
   case result
-  of "uInt": result = "uint"
-  of "uInt8": result = "uint8"
-  of "uInt16": result = "uint16"
-  of "uInt32": result = "uint32"
-  of "uInt64": result = "uint64"
-  else: discard
+  of "uInt":
+    result = "uint"
+  of "uInt8":
+    result = "uint8"
+  of "uInt16":
+    result = "uint16"
+  of "uInt32":
+    result = "uint32"
+  of "uInt64":
+    result = "uint64"
+  else:
+    discard
 
-proc renderMangledType(typ: MangledType;
-                       names: Table[string, string]): string =
+proc renderMangledType(typ: MangledType, names: Table[string, string]): string =
   let name = normalizedMangledName(typ.name)
   case name
   of "openArray", "seq", "varargs":
     if typ.arguments.len != 1:
-      raise newException(NativeArtifactError,
-        name & " expects one type argument in the native ABI symbol")
+      raise newException(
+        NativeArtifactError,
+        name & " expects one type argument in the native ABI symbol",
+      )
     result = name & "[" & renderMangledType(typ.arguments[0], names) & "]"
   of "tuple":
     if typ.arguments.len < 2:
-      raise newException(NativeArtifactError,
-        "tuple expects at least two type arguments in the native ABI symbol")
-    result = "(" & typ.arguments.mapIt(renderMangledType(it, names)).join(
-        ", ") & ")"
+      raise newException(
+        NativeArtifactError,
+        "tuple expects at least two type arguments in the native ABI symbol",
+      )
+    result = "(" & typ.arguments.mapIt(renderMangledType(it, names)).join(", ") & ")"
   of "ref":
     if typ.arguments.len != 1:
-      raise newException(NativeArtifactError,
-        "ref expects one type argument in the native ABI symbol")
+      raise newException(
+        NativeArtifactError, "ref expects one type argument in the native ABI symbol"
+      )
     result = renderMangledType(typ.arguments[0], names)
   of "ptr", "var", "lent":
     if typ.arguments.len != 1:
-      raise newException(NativeArtifactError,
-        name & " expects one type argument in the native ABI symbol")
+      raise newException(
+        NativeArtifactError,
+        name & " expects one type argument in the native ABI symbol",
+      )
     result = name & " " & renderMangledType(typ.arguments[0], names)
   else:
     if typ.arguments.len > 0:
@@ -182,30 +240,34 @@ proc renderMangledType(typ: MangledType;
         for generatedName in names.values:
           if generatedName == publicName:
             return generatedName
-      raise newException(NativeArtifactError,
-        "unsupported generic type in native ABI symbol: " & typ.name)
+      raise newException(
+        NativeArtifactError,
+        "unsupported generic type in native ABI symbol: " & typ.name,
+      )
     case name
-    of "bool", "char", "string", "cstring", "pointer",
-        "int", "int8", "int16", "int32", "int64",
-        "uint", "uint8", "uint16", "uint32", "uint64",
-        "float", "float32", "float64":
+    of "bool", "char", "string", "cstring", "pointer", "int", "int8", "int16", "int32",
+        "int64", "uint", "uint8", "uint16", "uint32", "uint64", "float", "float32",
+        "float64":
       result = name
     else:
       for generatedName in names.values:
         if generatedName == name:
           return generatedName
-      raise newException(NativeArtifactError,
-        "native ABI symbol references an unknown type: " & typ.name)
+      raise newException(
+        NativeArtifactError, "native ABI symbol references an unknown type: " & typ.name
+      )
 
-proc generateField(field: NativeField; names: Table[string, string];
-                   indent: string): string =
+proc generateField(
+    field: NativeField, names: Table[string, string], indent: string
+): string =
   result.add indent & nimIdentifier(field.name)
   if field.exported:
     result.add "*"
   result.add ": " & nimType(field.typeSymbol, names) & "\n"
 
-proc generateRecord(record: seq[NativeRecordPart];
-                    names: Table[string, string]; indent: string): string =
+proc generateRecord(
+    record: seq[NativeRecordPart], names: Table[string, string], indent: string
+): string =
   for part in record:
     case part.kind
     of nrField:
@@ -225,32 +287,39 @@ proc generateRecord(record: seq[NativeRecordPart];
         else:
           result.add generateRecord(branch.record, names, indent & "  ")
 
-proc generateTuple(record: seq[NativeRecordPart];
-                   names: Table[string, string]): string =
+proc generateTuple(
+    record: seq[NativeRecordPart], names: Table[string, string]
+): string =
   for part in record:
     if part.kind != nrField:
-      raise newException(NativeArtifactError,
-        "native ABI tuple cannot contain a case section")
+      raise newException(
+        NativeArtifactError, "native ABI tuple cannot contain a case section"
+      )
     result.add "    " & nimIdentifier(part.field.name) & ": " &
       nimType(part.field.typeSymbol, names) & "\n"
 
-proc generateTypes(api: NativeApi; names: Table[string, string]): string =
-  let types = api.types.filterIt(not it.isBuiltinType)
+proc generateTypes(api: NativeApi, names: Table[string, string]): string =
+  let types = api.types.filterIt(not it.isBuiltinType and it.kind != ntImportedGeneric)
   if types.len == 0:
     return
   result.add "type\n"
   for typ in types:
     result.add "  " & nimIdentifier(typ.name) & "*"
     var pragmas: seq[string] = @[]
-    if typ.inheritable: pragmas.add "inheritable"
-    if typ.packed: pragmas.add "packed"
-    if typ.union: pragmas.add "union"
+    if typ.inheritable:
+      pragmas.add "inheritable"
+    if typ.packed:
+      pragmas.add "packed"
+    if typ.union:
+      pragmas.add "union"
     if pragmas.len > 0:
       result.add " {." & pragmas.join(", ") & ".}"
     result.add " = "
     case typ.kind
-    of ntObject: result.add "object"
-    of ntRefObject: result.add "ref object"
+    of ntObject:
+      result.add "object"
+    of ntRefObject:
+      result.add "ref object"
     of ntAlias:
       result.add nimType(typ.elementTypeSymbol, names) & "\n\n"
       continue
@@ -270,15 +339,20 @@ proc generateTypes(api: NativeApi; names: Table[string, string]): string =
           break
       if elementSize <= 0:
         case builtinTypeId(typ.elementTypeSymbol)
-        of "bool", "char", "int8", "uint8": elementSize = 1
-        of "int16", "uint16": elementSize = 2
-        of "int32", "uint32", "float32": elementSize = 4
+        of "bool", "char", "int8", "uint8":
+          elementSize = 1
+        of "int16", "uint16":
+          elementSize = 2
+        of "int32", "uint32", "float32":
+          elementSize = 4
         of "int", "uint", "int64", "uint64", "float", "float64", "pointer":
           elementSize = 8
-        else: discard
+        else:
+          discard
       if elementSize <= 0 or typ.size < 0:
-        raise newException(NativeArtifactError,
-          "unsupported native ABI array layout: " & typ.nifSymbol)
+        raise newException(
+          NativeArtifactError, "unsupported native ABI array layout: " & typ.nifSymbol
+        )
       result.add "array[" & $(typ.size div elementSize) & ", " &
         nimType(typ.elementTypeSymbol, names) & "]\n\n"
       continue
@@ -294,13 +368,17 @@ proc generateTypes(api: NativeApi; names: Table[string, string]): string =
       result.add "\n"
       continue
     of ntRange:
-      raise newException(NativeArtifactError,
-        "unsupported named native ABI range: " & typ.name)
+      raise newException(
+        NativeArtifactError, "unsupported named native ABI range: " & typ.name
+      )
+    of ntImportedGeneric:
+      raise newException(
+        NativeArtifactError, "imported generic native ABI types are not declarations"
+      )
     of ntEnum:
       result.add "enum\n"
       for value in typ.enumValues:
-        result.add "    " & nimIdentifier(value.name) & " = " &
-          $value.ordinal & "\n"
+        result.add "    " & nimIdentifier(value.name) & " = " & $value.ordinal & "\n"
       result.add "\n"
       continue
     if typ.baseTypeSymbol.len > 0:
@@ -309,8 +387,9 @@ proc generateTypes(api: NativeApi; names: Table[string, string]): string =
     result.add generateRecord(typ.record, names, "    ")
     result.add "\n"
 
-proc generateFieldChecks(typeName: string; record: seq[NativeRecordPart];
-                         indent: string): string =
+proc generateFieldChecks(
+    typeName: string, record: seq[NativeRecordPart], indent: string
+): string =
   for part in record:
     case part.kind
     of nrField:
@@ -320,49 +399,58 @@ proc generateFieldChecks(typeName: string; record: seq[NativeRecordPart];
     of nrCase:
       if part.discriminant.offset >= 0:
         result.add indent & "doAssert offsetOf(" & typeName & ", " &
-          nimIdentifier(part.discriminant.name) & ") == " &
-          $part.discriminant.offset & "\n"
+          nimIdentifier(part.discriminant.name) & ") == " & $part.discriminant.offset &
+          "\n"
       for branch in part.branches:
         result.add generateFieldChecks(typeName, branch.record, indent)
 
-proc generateLayoutChecks(api: NativeApi): string =
+proc generateLayoutChecks(api: NativeApi, names: Table[string, string]): string =
   let types = api.types.filterIt(not it.isBuiltinType)
   if types.len == 0:
     return
   result.add "static:\n"
   for typ in types:
-    let typeName = nimIdentifier(typ.name)
+    let typeName =
+      if typ.kind == ntImportedGeneric:
+        nimType(typ.typeId, names)
+      else:
+        nimIdentifier(typ.name)
     if typ.size >= 0:
       result.add "  doAssert sizeof(" & typeName & ") == " & $typ.size & "\n"
     if typ.alignment >= 0:
-      result.add "  doAssert alignof(" & typeName & ") == " &
-        $typ.alignment & "\n"
+      result.add "  doAssert alignof(" & typeName & ") == " & $typ.alignment & "\n"
     if typ.kind == ntObject:
       result.add generateFieldChecks(typeName, typ.record, "  ")
   result.add "\n"
 
-proc params(procInfo: NativeProc; names: Table[string, string]): string =
+proc params(procInfo: NativeProc, names: Table[string, string]): string =
   var parts: seq[string] = @[]
   let hasHiddenLengths = procInfo.params.anyIt(it.hiddenLengthCount > 0)
   let mangledTypes =
-    if hasHiddenLengths: mangledParameterTypes(procInfo.cSymbol)
-    else: @[]
+    if hasHiddenLengths:
+      mangledParameterTypes(procInfo.cSymbol)
+    else:
+      @[]
   if hasHiddenLengths and mangledTypes.len != procInfo.params.len:
-    raise newException(NativeArtifactError,
+    raise newException(
+      NativeArtifactError,
       "native ABI symbol parameter count does not match its manifest: " &
-      procInfo.cSymbol)
+        procInfo.cSymbol,
+    )
   for index, param in procInfo.params:
     if param.hiddenLengthCount > 0:
       if param.hiddenLengthCount != 1:
-        raise newException(NativeArtifactError,
-          "native ABI parameter has an unsupported hidden length count: " &
-          param.name)
+        raise newException(
+          NativeArtifactError,
+          "native ABI parameter has an unsupported hidden length count: " & param.name,
+        )
       let logicalType = renderMangledType(mangledTypes[index], names)
       if not logicalType.startsWith("openArray[") and
           not logicalType.startsWith("varargs["):
-        raise newException(NativeArtifactError,
-          "native ABI hidden length is not attached to an open array: " &
-          param.name)
+        raise newException(
+          NativeArtifactError,
+          "native ABI hidden length is not attached to an open array: " & param.name,
+        )
       parts.add nimIdentifier(param.name) & ": " & logicalType
     else:
       let modifier = if param.byVar: "var " else: ""
@@ -370,79 +458,57 @@ proc params(procInfo: NativeProc; names: Table[string, string]): string =
         nimType(param.typeSymbol, names)
   result = parts.join("; ")
 
-func args(procInfo: NativeProc): string =
-  var parts: seq[string] = @[]
-  for param in procInfo.params:
-    parts.add nimIdentifier(param.name)
-  result = parts.join(", ")
-
-proc generateNativeModule*(api: NativeApi;
-                           libraryOverride = ""): string =
+proc generateNativeModule*(api: NativeApi, libraryOverride = ""): string =
   if api.procs.len == 0:
     raise newException(NativeArtifactError, "no native ABI exports found")
   let
     names = typeNames(api)
-    libraryName = if libraryOverride.len > 0:
-      libraryOverride
-    else:
-      api.libraryName
+    libraryName = if libraryOverride.len > 0: libraryOverride else: api.libraryName
   if libraryName.len == 0:
-    raise newException(NativeArtifactError,
-      "native library loader name is empty")
+    raise newException(NativeArtifactError, "native library loader name is empty")
   result.add "# Generated by nim_native_dynlib; do not edit.\n\n"
+  var imports: seq[string]
+  for typ in api.types:
+    if typ.importModule.len > 0 and typ.importModule notin imports:
+      imports.add typ.importModule
+  if imports.len > 0:
+    result.add "import " & imports.join(", ") & "\n\n"
   result.add "const nativeLibrary* = " & libraryName.escape & "\n\n"
   result.add generateTypes(api, names)
-  result.add generateLayoutChecks(api)
-  result.add "var nativeLibraryInitialized = false\n\n"
-  result.add "proc nativeNimMain() {.cdecl, importc: " &
-    api.initSymbol.escape & ", " &
-    "dynlib: nativeLibrary.}\n\n"
-  result.add "proc ensureNativeLibrary() {.raises: [].} =\n"
-  result.add "  if not nativeLibraryInitialized:\n"
-  result.add "    nativeNimMain()\n"
-  result.add "    nativeLibraryInitialized = true\n\n"
-  result.add "proc initNativeLibrary*() =\n"
-  result.add "  if not nativeLibraryInitialized:\n"
-  result.add "    echo \"Initializing native library: \", nativeLibrary\n"
-  result.add "    ensureNativeLibrary()\n"
-  result.add "    echo \"Native library initialized\"\n"
+  result.add generateLayoutChecks(api, names)
+  result.add "proc nativeNimMain() {.cdecl, importc: " & api.initSymbol.escape &
+    ", dynlib: nativeLibrary.}\n\n"
+  result.add "nativeNimMain()\n"
+  result.add "\n{.push nimcall, dynlib: nativeLibrary.}\n"
 
-  for i, hook in api.hooks:
+  for hook in api.hooks:
     let procInfo = hook.procInfo
     let returnType = nimType(procInfo.returnTypeSymbol, names)
-    let returnDecl = if returnType.len == 0: "" else: ": " & returnType
-    let formals = params(procInfo, names)
-    let callArgs = args(procInfo)
-    if hook.status == nhCustom:
-      result.add "\nproc nativeHookRaw" & $i & "(" & formals & ")" &
-        returnDecl & " {.nimcall, importc: " & procInfo.cSymbol.escape &
-        ", dynlib: nativeLibrary.}\n"
-      result.add "\nproc " & nimIdentifier(hook.kind) & "(" & formals & ")" &
-        returnDecl & " =\n"
-      result.add "  ensureNativeLibrary()\n"
+    let returnDecl =
       if returnType.len == 0:
-        result.add "  nativeHookRaw" & $i & "(" & callArgs & ")\n"
+        ""
       else:
-        result.add "  result = nativeHookRaw" & $i & "(" & callArgs & ")\n"
-    else:
-      result.add "\nproc " & nimIdentifier(hook.kind) & "(" & formals & ")" &
-        returnDecl & " {.error.}\n"
-
-  for i, procInfo in api.procs:
-    let returnType = nimType(procInfo.returnTypeSymbol, names)
-    let returnDecl = if returnType.len == 0: "" else: ": " & returnType
+        ": " & returnType
     let formals = params(procInfo, names)
-    let callArgs = args(procInfo)
-    result.add "\nproc nativeRaw" & $i & "(" & formals & ")" & returnDecl &
-      " {.nimcall, importc: " & procInfo.cSymbol.escape &
-      ", dynlib: nativeLibrary.}\n"
+    if hook.status == nhCustom:
+      result.add "\nproc " & nimIdentifier(hook.kind) & "(" & formals & ")" & returnDecl &
+        " {.importc: " & procInfo.cSymbol.escape & ".}\n"
+    else:
+      result.add "\nproc " & nimIdentifier(hook.kind) & "(" & formals & ")" & returnDecl &
+        " {.error.}\n"
+
+  for procInfo in api.procs:
+    let returnType = nimType(procInfo.returnTypeSymbol, names)
+    let returnDecl =
+      if returnType.len == 0:
+        ""
+      else:
+        ": " & returnType
+    let formals = params(procInfo, names)
     result.add "\nproc " & nimIdentifier(procInfo.name) & "*(" & formals & ")" &
       returnDecl
+    result.add " {.importc: " & procInfo.cSymbol.escape
     if procInfo.discardable:
-      result.add " {.discardable.}"
-    result.add " =\n"
-    result.add "  initNativeLibrary()\n"
-    if returnType.len == 0:
-      result.add "  nativeRaw" & $i & "(" & callArgs & ")\n"
-    else:
-      result.add "  result = nativeRaw" & $i & "(" & callArgs & ")\n"
+      result.add ", discardable"
+    result.add ".}\n"
+  result.add "\n{.pop.}\n"
