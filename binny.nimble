@@ -1,4 +1,4 @@
-version = "0.4.7"
+version = "0.4.8"
 
 feature "reference":
   requires "libbacktrace"
