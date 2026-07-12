@@ -594,3 +594,4 @@ block read_native_bindings_prefers_exported_container_aliases:
     doAssert "EntryList* =" notin generated
     doAssert "StringSeq* = seq[string]" in generated
     doAssert "labels*: StringSeq" in generated
+    doAssert "proc ensureEntry*(): var Entry" in generated

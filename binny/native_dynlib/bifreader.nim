@@ -675,6 +675,7 @@ proc parseNativeProc(
   if children.hasMore:
     if children.kind == Symbol:
       result.returnTypeSymbol = children.symName
+      result.returnByVar = result.returnTypeSymbol.startsWith("`t23.")
     children.skip
   proc collectParams(node: Cursor, params: var seq[NativeParam]) =
     var nested = node.childCursor()
@@ -697,6 +698,7 @@ proc parseNativeProc(
   collectParams(formals, result.params)
 
   if applyAbiLowering:
+    result.returnByVar = abi.returnTypeSymbol.startsWith("`t23.")
     result.returnTypeSymbol = abi.returnTypeSymbol
     if result.params.len != abi.params.len:
       fail(
@@ -719,6 +721,18 @@ proc parseNativeProc(
         result.params[i].typeSymbol = abi.params[i].typeSymbol
       result.params[i].lowering = abi.params[i].lowering
       result.params[i].hiddenLengthCount = abi.params[i].hiddenLengthCount
+
+proc unwrapVarReturn(
+    procInfo: var NativeProc, layouts: Table[string, AbiTypeEntry]
+) =
+  if not procInfo.returnByVar:
+    return
+  if procInfo.returnTypeSymbol notin layouts:
+    fail("native ABI var return type has no layout: " & procInfo.returnTypeSymbol)
+  let wrapper = layouts[procInfo.returnTypeSymbol]
+  if wrapper.kind != "var" or wrapper.elementTypeSymbol.len == 0:
+    fail("native ABI var return type has an invalid layout: " & procInfo.returnTypeSymbol)
+  procInfo.returnTypeSymbol = wrapper.elementTypeSymbol
 
 proc applyLayout(typ: var NativeType, layouts: Table[string, AbiTypeEntry]): bool =
   if typ.typeId notin layouts:
@@ -1195,6 +1209,11 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
         applyAbiLowering = false,
       ),
     )
+
+  for procInfo in result.procs.mitems:
+    unwrapVarReturn(procInfo, layouts)
+  for hook in result.hooks.mitems:
+    unwrapVarReturn(hook.procInfo, layouts)
 
   var skipInternalTypes = internalLayoutTypes
   for typ in importedGenericTypes.values:

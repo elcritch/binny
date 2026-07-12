@@ -82,6 +82,7 @@ type
     nifSymbol*: string
     cSymbol*: string
     returnTypeSymbol*: string
+    returnByVar*: bool
     returnLowering*: NativeLoweringMode
     callConv*: string
     closureEnv*: bool

@@ -490,7 +490,7 @@ proc generateNativeModule*(api: NativeApi, libraryOverride = ""): string =
       if returnType.len == 0:
         ""
       else:
-        ": " & returnType
+        ": " & (if procInfo.returnByVar: "var " else: "") & returnType
     let formals = params(procInfo, names)
     if hook.status == nhCustom:
       result.add "\nproc " & nimIdentifier(hook.kind) & "(" & formals & ")" & returnDecl &
@@ -505,7 +505,7 @@ proc generateNativeModule*(api: NativeApi, libraryOverride = ""): string =
       if returnType.len == 0:
         ""
       else:
-        ": " & returnType
+        ": " & (if procInfo.returnByVar: "var " else: "") & returnType
     let formals = params(procInfo, names)
     result.add "\nproc " & nimIdentifier(procInfo.name) & "*(" & formals & ")" &
       returnDecl

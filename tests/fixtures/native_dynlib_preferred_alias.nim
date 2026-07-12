@@ -15,6 +15,11 @@ type
     entries*: seq[Entry]
     labels*: seq[string]
 
+var ensuredEntry: Entry
+
+proc ensureEntry*(): var Entry {.exportabi.} =
+  ensuredEntry
+
 proc configure*(options: Options): Options {.exportabi.} =
   options
 
