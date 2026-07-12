@@ -73,3 +73,17 @@ block generated_module_preserves_builtin_range_types:
   let generated = generateNativeModule(api)
   doAssert "`position`: Natural" in generated
   doAssert "Natural* =" notin generated
+
+block generated_module_preserves_discardable_procs:
+  let api = NativeApi(
+    libraryName: "libsample.so",
+    initSymbol: "NimMain",
+    procs: @[
+      NativeProc(
+        name: "add",
+        cSymbol: "add",
+        returnTypeSymbol: "int.0.system",
+        discardable: true),
+    ])
+  let generated = generateNativeModule(api)
+  doAssert "proc `add`*(): int {.discardable.}" in generated

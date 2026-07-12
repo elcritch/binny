@@ -80,6 +80,7 @@ type
     callConv*: string
     closureEnv*: bool
     varargs*: bool
+    discardable*: bool
     params*: seq[NativeParam]
 
   NativeHookStatus* = enum

@@ -480,6 +480,17 @@ func symbolBase(symbol: string): string =
   if dot < 0: symbol
   else: symbol[0 ..< dot]
 
+proc hasDescendantIdent(node: Cursor; name: string): bool =
+  if node.kind != TagLit:
+    return false
+  var children = node.childCursor()
+  while children.hasMore:
+    if children.kind == Ident and children.strVal == name:
+      return true
+    if children.kind == TagLit and children.hasDescendantIdent(name):
+      return true
+    children.skip
+
 proc parseNativeType(declaration: Cursor; nifSymbol: string;
                      typ: var NativeType): bool =
   let sourceType = declaration.findChildTag("type0")
@@ -563,6 +574,7 @@ proc parseNativeProc(declaration: Cursor; abi: AbiProcEntry;
   result.callConv = abi.callConv
   result.closureEnv = abi.closureEnv
   result.varargs = abi.varargs
+  result.discardable = declaration.hasDescendantIdent("discardable")
   let formals = declaration.findDescendantTag("formalparams")
   if formals.cursorIsNil:
     fail("missing resolved signature for " & abi.nifSymbol)

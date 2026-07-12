@@ -282,7 +282,10 @@ proc generateNativeModule*(api: NativeApi;
       " {.nimcall, importc: " & procInfo.cSymbol.escape &
       ", dynlib: nativeLibrary.}\n"
     result.add "\nproc " & nimIdentifier(procInfo.name) & "*(" & formals & ")" &
-      returnDecl & " =\n"
+      returnDecl
+    if procInfo.discardable:
+      result.add " {.discardable.}"
+    result.add " =\n"
     result.add "  initNativeLibrary()\n"
     if returnType.len == 0:
       result.add "  nativeRaw" & $i & "(" & callArgs & ")\n"
