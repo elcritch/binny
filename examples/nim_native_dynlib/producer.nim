@@ -1,3 +1,4 @@
+import std/tables
 import support
 export support
 
@@ -44,6 +45,11 @@ type
     value*: int
 
   Number* = int16
+
+  RenderList* = seq[string]
+
+  Renders* = ref object
+    layers*: OrderedTable[Number, RenderList]
 
 var
   hookedCopies = 0
@@ -95,6 +101,9 @@ proc sumLabeledSpans*(spans: openArray[(NumberSpan,
 
 proc doubleNumber*(number: Number): Number {.exportabi.} =
   number * 2
+
+proc newRenders*(): Renders {.exportabi.} =
+  Renders(layers: initOrderedTable[Number, RenderList]())
 
 proc newTextPayload*(text: string): Payload {.exportabi.} =
   Payload(kind: pkText, text: text)
