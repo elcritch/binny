@@ -6,6 +6,11 @@ const NativeDependencyFixtureSource = "tests/fixtures/native_dynlib_hidden_depen
 const NativeDependencyFixtureCacheDir = "tests/.nimcache_hidden_dependency"
 const NativeDependencyLibrary = "libnative_dynlib_hidden_dependency"
 
+const NativeAliasDependencyFixtureSource =
+  "tests/fixtures/native_dynlib_alias_dependency.nim"
+const NativeAliasDependencyFixtureCacheDir = "tests/.nimcache_alias_dependency"
+const NativeAliasDependencyLibrary = "libnative_dynlib_alias_dependency"
+
 func nativeDependencyLibraryExt(): string =
   when defined(windows):
     "dll"
@@ -14,20 +19,37 @@ func nativeDependencyLibraryExt(): string =
   else:
     "so"
 
-proc nativeDependencyFixturePaths():
-    tuple[cacheDir: string, sourcePath: string, manifestPath: string] =
+proc nativeDependencyFixturePaths(
+    sourcePath, cacheDirName, libraryName: string
+): tuple[cacheDir: string, sourcePath: string, manifestPath: string] =
   let
     rootDir = getCurrentDir()
-    cacheDir = rootDir / NativeDependencyFixtureCacheDir
-    sourcePath = rootDir / NativeDependencyFixtureSource
-    manifestPath = cacheDir / (NativeDependencyLibrary & ".abi.nif")
+    cacheDir = rootDir / cacheDirName
+    sourcePath = rootDir / sourcePath
+    manifestPath = cacheDir / (libraryName & ".abi.nif")
   (cacheDir, sourcePath, manifestPath)
+
+proc nativeDependencyFixturePaths():
+    tuple[cacheDir: string, sourcePath: string, manifestPath: string] =
+  nativeDependencyFixturePaths(
+    NativeDependencyFixtureSource, NativeDependencyFixtureCacheDir, NativeDependencyLibrary
+  )
+
+proc nativeAliasDependencyFixturePaths():
+    tuple[cacheDir: string, sourcePath: string, manifestPath: string] =
+  nativeDependencyFixturePaths(
+    NativeAliasDependencyFixtureSource,
+    NativeAliasDependencyFixtureCacheDir,
+    NativeAliasDependencyLibrary,
+  )
 
 proc ensureNativeDependencyFixtureArtifacts(paths: tuple[
     cacheDir: string, sourcePath: string, manifestPath: string
   ]): bool =
   createDir(paths.cacheDir)
-  let libraryPath = paths.cacheDir / (NativeDependencyLibrary & "." & nativeDependencyLibraryExt())
+  let manifestName = splitFile(paths.manifestPath).name
+  let libraryName = splitFile(manifestName).name
+  let libraryPath = paths.cacheDir / (libraryName & "." & nativeDependencyLibraryExt())
   if fileExists(paths.manifestPath):
     return true
   let compileCommand = fmt(
@@ -39,7 +61,7 @@ proc ensureNativeDependencyFixtureArtifacts(paths: tuple[
     return true
   if "unknown experimental feature" in compiled.output:
     return false
-  doAssert false, "failed to compile hidden dependency fixture: " & compiled.output
+  doAssert false, "failed to compile dependency fixture: " & compiled.output
 
 proc hasNativeDependencyFixtureArtifacts(paths: tuple[
     cacheDir: string, sourcePath: string, manifestPath: string
@@ -440,3 +462,10 @@ block read_native_bindings_collects_dependent_hidden_type:
     let generated = generateNativeBindings(paths.cacheDir, paths.sourcePath, paths.manifestPath)
     doAssert "PublicBox* = object" in generated
     doAssert "= seq[int]" in generated
+
+block read_native_bindings_collects_exported_alias_type:
+  let paths = nativeAliasDependencyFixturePaths()
+  if hasNativeDependencyFixtureArtifacts(paths):
+    let generated = generateNativeBindings(paths.cacheDir, paths.sourcePath, paths.manifestPath)
+    doAssert "ZLevel* = int8" in generated
+    doAssert "proc layer*(lvl: ZLevel): ZLevel" in generated

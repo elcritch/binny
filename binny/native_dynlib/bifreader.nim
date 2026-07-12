@@ -915,9 +915,12 @@ proc collectReferencedType(
     requiredTypes: var Table[string, bool],
     skipInternal: Table[string, bool],
 ) =
-  if symbol.len == 0 or symbol in skipInternal or symbol notin layouts:
+  if symbol.len == 0 or symbol in skipInternal:
     return
   if symbol in requiredTypes:
+    return
+  if symbol notin layouts:
+    requiredTypes[symbol] = true
     return
   requiredTypes[symbol] = true
   collectReferencedLayoutDependencies(layouts[symbol], layouts, requiredTypes, skipInternal)
@@ -1009,8 +1012,17 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
     layouts[layout.typeSymbol] = layout
 
   var modules = loadAbiModules(bifPath, manifest)
+  var skipSystemModuleTypeSymbols: Table[string, bool]
   var stdTablesModules: Table[string, bool]
+  var manifestTypeSymbols: Table[string, bool]
+  for item in manifest.procs:
+    if item.returnTypeSymbol.len > 0:
+      manifestTypeSymbols[item.returnTypeSymbol] = true
+    for param in item.params:
+      manifestTypeSymbols[param.typeSymbol] = true
   for module in manifest.modules:
+    if module.name == "system":
+      skipSystemModuleTypeSymbols[module.identity] = true
     if module.name == "tables":
       let path = bifPath.parentDir / (module.identity & ".s.bif")
       if readModuleSource(path).isStdTablesSource:
@@ -1019,12 +1031,20 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
   var importedGenericTypes: Table[string, NativeType]
   for module in modules.mitems:
     for nifSymbol, visibility, declaration in module.declarations:
-      if visibility == ivExported:
+      let moduleId = symbolModule(nifSymbol)
+      if visibility == ivExported or moduleId.len > 0 and not (moduleId in skipSystemModuleTypeSymbols):
         if not declaration.findChildTag("type").cursorIsNil and
             not declaration.findChildTag("type0").cursorIsNil:
           var typ: NativeType
-          if parseNativeType(declaration, nifSymbol, typ) and applyLayout(typ, layouts) and
-              typ.size >= 0:
+          if parseNativeType(declaration, nifSymbol, typ) and typ.size >= 0:
+            if visibility != ivExported and typ.kind != ntAlias and
+                typ.typeId notin manifestTypeSymbols and typ.nifSymbol notin manifestTypeSymbols:
+              continue
+            if typ.kind != ntAlias:
+              if not applyLayout(typ, layouts):
+                continue
+            else:
+              discard applyLayout(typ, layouts)
             result.types.add typ
             collectStdOrderedTables(
               declaration, stdTablesModules, layouts, importedGenericTypes
@@ -1093,6 +1113,9 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
   var requiredTypes: Table[string, bool]
   for typ in result.types:
     if typ.kind == ntImportedGeneric or not isBacktickTypeSymbol(typ.nifSymbol):
+      let moduleIdentity = symbolModule(typ.nifSymbol)
+      if moduleIdentity.len > 0 and moduleIdentity in skipSystemModuleTypeSymbols:
+        continue
       collectReferencedType(typ.typeId, layouts, requiredTypes, skipInternalTypes)
 
   for procInfo in result.procs:
@@ -1103,10 +1126,12 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
     collectReferencedType(hook.procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternalTypes)
     for param in hook.procInfo.params:
       collectReferencedType(param.typeSymbol, layouts, requiredTypes, skipInternalTypes)
+  for symbol in manifestTypeSymbols.keys:
+    requiredTypes[symbol] = true
 
   var publicTypes: seq[NativeType]
   for typ in result.types:
-    if typ.kind == ntImportedGeneric or typ.typeId in requiredTypes:
+    if typ.kind == ntImportedGeneric or typ.typeId in requiredTypes or typ.nifSymbol in requiredTypes:
       publicTypes.add typ
   result.types = publicTypes
 
