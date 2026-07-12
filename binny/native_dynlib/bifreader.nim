@@ -61,10 +61,12 @@ type
     enumValues: seq[NativeEnumValue]
     record: seq[NativeRecordPart]
 
-  PreferredContainerAlias = object
+  PreferredTypeAlias = object
+    nifSymbol: string
     name: string
     kind: string
     elementSymbol: string
+    layoutSymbol: string
 
 proc fail(message: string) {.noinline, noreturn.} =
   raise newException(NativeBifError, message)
@@ -598,9 +600,9 @@ proc parseNativeType(
     return false
   result = true
 
-proc parsePreferredContainerAlias(
+proc parsePreferredTypeAlias(
     declaration: Cursor, nifSymbol: string
-): PreferredContainerAlias =
+): PreferredTypeAlias =
   let sourceType = declaration.findChildTag("type0")
   if sourceType.cursorIsNil:
     return
@@ -613,21 +615,27 @@ proc parsePreferredContainerAlias(
   while children.hasMore:
     if children.kind == Symbol:
       symbols.add children.symName
-    elif children.kind != DotToken:
+    elif children.kind notin {DotToken, TagLit}:
       return
     children.skip
-  if symbols.len != 3:
+  if symbols.len < 2:
     return
 
   case symbolBase(symbols[1])
   of "seq":
+    if symbols.len != 3:
+      return
     result.kind = "sequence"
   of "set":
+    if symbols.len != 3:
+      return
     result.kind = "set"
   else:
-    return
+    result.layoutSymbol = symbols[0]
+  result.nifSymbol = nifSymbol
   result.name = symbolBase(nifSymbol)
-  result.elementSymbol = symbols[2]
+  if result.kind.len > 0:
+    result.elementSymbol = symbols[2]
 
 proc parseParam(declaration: Cursor): NativeParam =
   let name = declaration.findChildKind(SymbolDef)
@@ -1032,25 +1040,35 @@ proc resolvedSemanticTypeSymbol(
       return layout.typeSymbol
   symbol
 
-proc preferredContainerLayoutNames(
-    aliases: openArray[PreferredContainerAlias],
+proc collectPreferredLayoutNames(
+    aliases: openArray[PreferredTypeAlias],
     semanticTypeSymbols: Table[string, string],
     layouts: Table[string, AbiTypeEntry],
     requiredTypes: Table[string, bool],
 ): Table[string, string] =
   var ambiguous: Table[string, bool]
   for alias in aliases:
-    let elementSymbol = resolvedSemanticTypeSymbol(
-      alias.elementSymbol, semanticTypeSymbols, layouts
-    )
-    for layout in layouts.values:
-      if layout.typeSymbol in requiredTypes and layout.kind == alias.kind and
-          layout.elementTypeSymbol == elementSymbol and layout.typeSymbol notin ambiguous:
-        if layout.typeSymbol notin result:
-          result[layout.typeSymbol] = alias.name
-        elif result[layout.typeSymbol] != alias.name:
-          result.del layout.typeSymbol
-          ambiguous[layout.typeSymbol] = true
+    if alias.layoutSymbol in requiredTypes and alias.layoutSymbol in layouts and
+        alias.layoutSymbol notin ambiguous:
+      if alias.layoutSymbol notin result:
+        result[alias.layoutSymbol] = alias.name
+      elif result[alias.layoutSymbol] != alias.name:
+        result.del alias.layoutSymbol
+        ambiguous[alias.layoutSymbol] = true
+  for alias in aliases:
+    if alias.kind.len > 0:
+      let elementSymbol = resolvedSemanticTypeSymbol(
+        alias.elementSymbol, semanticTypeSymbols, layouts
+      )
+      for layout in layouts.values:
+        if layout.typeSymbol in requiredTypes and layout.kind == alias.kind and
+            layout.elementTypeSymbol == elementSymbol and
+            layout.typeSymbol notin ambiguous:
+          if layout.typeSymbol notin result:
+            result[layout.typeSymbol] = alias.name
+          elif result[layout.typeSymbol] != alias.name:
+            result.del layout.typeSymbol
+            ambiguous[layout.typeSymbol] = true
 
 proc addAbiModule(
     modules: var seq[bif.BifModule], seenPaths: var Table[string, bool], path: string
@@ -1126,7 +1144,7 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
   var importedGenericTypes: Table[string, NativeType]
   var skipStdTableObjectTypes: Table[string, bool]
   var unmaterializedTypes: seq[NativeType]
-  var preferredContainerAliases: seq[PreferredContainerAlias]
+  var preferredTypeAliases: seq[PreferredTypeAlias]
   for moduleIndex, module in modules.mpairs:
     for nifSymbol, visibility, declaration in module.declarations:
       let moduleId = symbolModule(nifSymbol)
@@ -1160,11 +1178,11 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
             if typ.nifSymbol in skipStdTableObjectTypes or typ.typeId in skipStdTableObjectTypes:
               continue
             result.types.add typ
-            # Dependency aliases can name the same structural layout differently.
+            # Only root aliases should name equivalent layouts from dependencies.
             if moduleIndex == 0 and visibility == ivExported and typ.kind == ntAlias:
-              let alias = parsePreferredContainerAlias(declaration, nifSymbol)
+              let alias = parsePreferredTypeAlias(declaration, nifSymbol)
               if alias.name.len > 0:
-                preferredContainerAliases.add alias
+                preferredTypeAliases.add alias
 
   for typ in importedGenericTypes.values:
     result.types.add typ
@@ -1252,8 +1270,11 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
   for typ in result.types:
     if typ.nifSymbol.len > 0 and typ.typeId.len > 0:
       semanticTypeSymbols[typ.nifSymbol] = typ.typeId
-  let preferredLayoutNames = preferredContainerLayoutNames(
-    preferredContainerAliases,
+  for alias in preferredTypeAliases:
+    if alias.layoutSymbol.len > 0:
+      semanticTypeSymbols[alias.nifSymbol] = alias.layoutSymbol
+  let preferredLayoutNames = collectPreferredLayoutNames(
+    preferredTypeAliases,
     semanticTypeSymbols,
     layouts,
     requiredTypes,

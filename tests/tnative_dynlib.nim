@@ -595,3 +595,7 @@ block read_native_bindings_prefers_exported_container_aliases:
     doAssert "StringSeq* = seq[string]" in generated
     doAssert "labels*: StringSeq" in generated
     doAssert "proc ensureEntry*(): var Entry" in generated
+    doAssert "IntSlice* = object" in generated
+    doAssert "IntSlices* = seq[IntSlice]" in generated
+    doAssert "proc passSlice*(value: IntSlice): IntSlice" in generated
+    doAssert "proc slices*(): IntSlices" in generated
