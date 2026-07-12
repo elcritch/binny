@@ -825,6 +825,134 @@ proc collectStdOrderedTables(
 func isMaterializedKind(kind: string): bool =
   kind in ["object", "enum", "distinct", "array", "sequence", "set", "tuple"]
 
+proc addLayoutDependency(
+    layoutSymbol: string,
+    layouts: Table[string, AbiTypeEntry],
+    dependencies: var Table[string, bool]
+)
+
+proc collectLayoutDependencies(
+    layout: AbiTypeEntry,
+    layouts: Table[string, AbiTypeEntry],
+    dependencies: var Table[string, bool]
+)
+
+proc collectRecordDependencies(
+    record: seq[NativeRecordPart],
+    layouts: Table[string, AbiTypeEntry],
+    dependencies: var Table[string, bool]
+)
+
+proc collectBranchDependencies(
+    branches: seq[NativeBranch],
+    layouts: Table[string, AbiTypeEntry],
+    dependencies: var Table[string, bool]
+) =
+  for branch in branches:
+    collectRecordDependencies(branch.record, layouts, dependencies)
+
+proc collectRecordDependencies(
+    record: seq[NativeRecordPart],
+    layouts: Table[string, AbiTypeEntry],
+    dependencies: var Table[string, bool]
+) =
+  for part in record:
+    case part.kind
+    of nrField:
+      addLayoutDependency(part.field.typeSymbol, layouts, dependencies)
+    of nrCase:
+      addLayoutDependency(part.discriminant.typeSymbol, layouts, dependencies)
+      collectBranchDependencies(part.branches, layouts, dependencies)
+
+proc collectLayoutDependencies(
+    layout: AbiTypeEntry,
+    layouts: Table[string, AbiTypeEntry],
+    dependencies: var Table[string, bool]
+) =
+  if layout.typeSymbol.len == 0 or layout.typeSymbol in dependencies:
+    return
+  dependencies[layout.typeSymbol] = true
+  addLayoutDependency(layout.baseTypeSymbol, layouts, dependencies)
+  addLayoutDependency(layout.elementTypeSymbol, layouts, dependencies)
+  collectRecordDependencies(layout.record, layouts, dependencies)
+
+proc addLayoutDependency(
+    layoutSymbol: string,
+    layouts: Table[string, AbiTypeEntry],
+    dependencies: var Table[string, bool]
+) =
+  if layoutSymbol.len == 0 or layoutSymbol in dependencies or layoutSymbol notin layouts:
+    return
+  collectLayoutDependencies(layouts[layoutSymbol], layouts, dependencies)
+
+proc isBacktickTypeSymbol(symbol: string): bool =
+  symbol.startsWith("`t")
+
+proc collectReferencedBranchDependencies(
+    branches: seq[NativeBranch],
+    layouts: Table[string, AbiTypeEntry],
+    requiredTypes: var Table[string, bool],
+    skipInternal: Table[string, bool],
+)
+
+proc collectReferencedRecordDependencies(
+    record: seq[NativeRecordPart],
+    layouts: Table[string, AbiTypeEntry],
+    requiredTypes: var Table[string, bool],
+    skipInternal: Table[string, bool],
+)
+
+proc collectReferencedLayoutDependencies(
+    layout: AbiTypeEntry,
+    layouts: Table[string, AbiTypeEntry],
+    requiredTypes: var Table[string, bool],
+    skipInternal: Table[string, bool],
+)
+
+proc collectReferencedType(
+    symbol: string,
+    layouts: Table[string, AbiTypeEntry],
+    requiredTypes: var Table[string, bool],
+    skipInternal: Table[string, bool],
+) =
+  if symbol.len == 0 or symbol in requiredTypes or symbol in skipInternal or symbol notin layouts:
+    return
+  requiredTypes[symbol] = true
+  collectReferencedLayoutDependencies(layouts[symbol], layouts, requiredTypes, skipInternal)
+
+proc collectReferencedBranchDependencies(
+    branches: seq[NativeBranch],
+    layouts: Table[string, AbiTypeEntry],
+    requiredTypes: var Table[string, bool],
+    skipInternal: Table[string, bool],
+) =
+  for branch in branches:
+    collectReferencedRecordDependencies(branch.record, layouts, requiredTypes, skipInternal)
+
+proc collectReferencedRecordDependencies(
+    record: seq[NativeRecordPart],
+    layouts: Table[string, AbiTypeEntry],
+    requiredTypes: var Table[string, bool],
+    skipInternal: Table[string, bool],
+) =
+  for part in record:
+    case part.kind
+    of nrField:
+      collectReferencedType(part.field.typeSymbol, layouts, requiredTypes, skipInternal)
+    of nrCase:
+      collectReferencedType(part.discriminant.typeSymbol, layouts, requiredTypes, skipInternal)
+      collectReferencedBranchDependencies(part.branches, layouts, requiredTypes, skipInternal)
+
+proc collectReferencedLayoutDependencies(
+    layout: AbiTypeEntry,
+    layouts: Table[string, AbiTypeEntry],
+    requiredTypes: var Table[string, bool],
+    skipInternal: Table[string, bool],
+) =
+  collectReferencedType(layout.baseTypeSymbol, layouts, requiredTypes, skipInternal)
+  collectReferencedType(layout.elementTypeSymbol, layouts, requiredTypes, skipInternal)
+  collectReferencedRecordDependencies(layout.record, layouts, requiredTypes, skipInternal)
+
 proc addAbiModule(
     modules: var seq[bif.BifModule], seenPaths: var Table[string, bool], path: string
 ) =
@@ -906,6 +1034,11 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
   var represented: Table[string, bool]
   for typ in result.types:
     represented[typ.typeId] = true
+
+  var internalLayoutTypes: Table[string, bool]
+  for typ in importedGenericTypes.values:
+    addLayoutDependency(typ.typeId, layouts, internalLayoutTypes)
+
   for layout in manifest.types:
     let hasUnresolvedElement =
       layout.elementTypeSymbol in layouts and
@@ -913,8 +1046,8 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
     let hasMissingTupleFields =
       layout.kind == "tuple" and layout.size > 0 and layout.record.len == 0
     if layout.typeSymbol notin represented and layout.size >= 0 and
-        layout.kind.isMaterializedKind and not hasUnresolvedElement and
-        not hasMissingTupleFields:
+        layout.kind.isMaterializedKind and layout.typeSymbol notin internalLayoutTypes and
+        not hasUnresolvedElement and not hasMissingTupleFields:
       result.types.add typeFromLayout(layout)
       represented[layout.typeSymbol] = true
 
@@ -950,6 +1083,31 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
         applyAbiLowering = false,
       ),
     )
+
+  var skipInternalTypes = internalLayoutTypes
+  for typ in importedGenericTypes.values:
+    skipInternalTypes[typ.typeId] = true
+
+  var requiredTypes: Table[string, bool]
+  for typ in result.types:
+    if typ.kind == ntImportedGeneric or not isBacktickTypeSymbol(typ.nifSymbol):
+      requiredTypes[typ.typeId] = true
+      collectReferencedType(typ.typeId, layouts, requiredTypes, skipInternalTypes)
+
+  for procInfo in result.procs:
+    collectReferencedType(procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternalTypes)
+    for param in procInfo.params:
+      collectReferencedType(param.typeSymbol, layouts, requiredTypes, skipInternalTypes)
+  for hook in result.hooks:
+    collectReferencedType(hook.procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternalTypes)
+    for param in hook.procInfo.params:
+      collectReferencedType(param.typeSymbol, layouts, requiredTypes, skipInternalTypes)
+
+  var publicTypes: seq[NativeType]
+  for typ in result.types:
+    if typ.kind == ntImportedGeneric or typ.typeId in requiredTypes:
+      publicTypes.add typ
+  result.types = publicTypes
 
 proc readModuleSource*(path: string): string =
   var module = bif.load(path)
