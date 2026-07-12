@@ -135,6 +135,12 @@ proc generateTypes(api: NativeApi; names: Table[string, string]): string =
       result.add "array[" & $(typ.size div elementSize) & ", " &
         nimType(typ.elementTypeSymbol, names) & "]\n\n"
       continue
+    of ntSequence:
+      result.add "seq[" & nimType(typ.elementTypeSymbol, names) & "]\n\n"
+      continue
+    of ntSet:
+      result.add "set[" & nimType(typ.elementTypeSymbol, names) & "]\n\n"
+      continue
     of ntEnum:
       result.add "enum\n"
       for value in typ.enumValues:

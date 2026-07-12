@@ -493,14 +493,20 @@ proc parseNativeType(declaration: Cursor; nifSymbol: string;
   let arrayType = sourceType.findChildTag("arrayty")
   typ.name = symbolBase(nifSymbol)
   typ.nifSymbol = nifSymbol
-  let typeDesc = declaration.findDescendantTag("td")
-  if typeDesc.cursorIsNil:
-    return false
-  let typeId = typeDesc.findChildKind(SymbolDef)
-  if not typeId.cursorIsNil:
-    typ.typeId = typeId.symName
+  for typeNode in [refType, objectType, enumType, distinctType, arrayType]:
+    if not typeNode.cursorIsNil:
+      let typeId = typeNode.findChildKind(Symbol)
+      if not typeId.cursorIsNil:
+        typ.typeId = typeId.symName
+        break
   if typ.typeId.len == 0:
-    fail("missing resolved type id for " & nifSymbol)
+    let typeDesc = declaration.findDescendantTag("td")
+    if not typeDesc.cursorIsNil:
+      let typeId = typeDesc.findChildKind(SymbolDef)
+      if not typeId.cursorIsNil:
+        typ.typeId = typeId.symName
+  if typ.typeId.len == 0:
+    return false
   if not refType.cursorIsNil:
     let payload = refType.findChildTag("objectty")
     if payload.cursorIsNil:
@@ -589,6 +595,18 @@ proc parseNativeProc(declaration: Cursor; abi: AbiProcEntry;
       fail("semantic parameter count does not match ABI lowering for " &
         abi.nifSymbol & ": semantic=" & $result.params.len &
         " ABI=" & $abi.params.len)
+    var orderedParams: seq[NativeParam]
+    for abiParam in abi.params:
+      var found = false
+      for param in result.params:
+        if param.name == abiParam.name:
+          orderedParams.add param
+          found = true
+          break
+      if not found:
+        fail("semantic parameter not found for " & abi.nifSymbol & ": " &
+          abiParam.name)
+    result.params = orderedParams
     for i in 0 ..< result.params.len:
       result.params[i].lowering = abi.params[i].lowering
       result.params[i].hiddenLengthCount = abi.params[i].hiddenLengthCount
@@ -614,6 +632,32 @@ proc applyLayout(typ: var NativeType;
   typ.elementTypeSymbol = declared.elementTypeSymbol
   typ.record = recordLayout.record
   result = true
+
+proc typeFromLayout(layout: AbiTypeEntry): NativeType =
+  result.name = "NativeAbi" & layout.typeSymbol.multiReplace(
+    ("`", ""), (".", "_"), ("-", "_")
+  )
+  result.nifSymbol = layout.typeSymbol
+  result.typeId = layout.typeSymbol
+  result.baseTypeSymbol = layout.baseTypeSymbol
+  result.elementTypeSymbol = layout.elementTypeSymbol
+  result.size = layout.size
+  result.alignment = layout.alignment
+  result.layoutFingerprint = layout.layoutFingerprint
+  result.inheritable = layout.inheritable
+  result.packed = layout.packed
+  result.union = layout.union
+  result.enumValues = layout.enumValues
+  result.record = layout.record
+  case layout.kind
+  of "object": result.kind = ntObject
+  of "enum": result.kind = ntEnum
+  of "distinct": result.kind = ntDistinct
+  of "array": result.kind = ntArray
+  of "sequence": result.kind = ntSequence
+  of "set": result.kind = ntSet
+  else:
+    fail("unsupported native ABI layout kind: " & layout.kind)
 
 proc addAbiModule(modules: var seq[bif.BifModule];
                   seenPaths: var Table[string, bool]; path: string) =
@@ -671,8 +715,17 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
             not declaration.findChildTag("type0").cursorIsNil:
           var typ: NativeType
           if parseNativeType(declaration, nifSymbol, typ) and
-              applyLayout(typ, layouts):
+              applyLayout(typ, layouts) and typ.size >= 0:
             result.types.add typ
+
+  var represented: Table[string, bool]
+  for typ in result.types:
+    represented[typ.typeId] = true
+  for layout in manifest.types:
+    if layout.typeSymbol notin represented and layout.size >= 0 and
+        layout.kind in ["object", "enum", "distinct", "array", "sequence", "set"]:
+      result.types.add typeFromLayout(layout)
+      represented[layout.typeSymbol] = true
 
   for item in manifest.procs:
     if item.genericInstance:

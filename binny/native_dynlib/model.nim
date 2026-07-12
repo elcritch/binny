@@ -11,6 +11,8 @@ type
     ntEnum
     ntDistinct
     ntArray
+    ntSequence
+    ntSet
 
   NativeEnumValue* = object
     name*: string
