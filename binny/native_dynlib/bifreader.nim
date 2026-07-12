@@ -546,7 +546,7 @@ proc parseParam(declaration: Cursor): NativeParam =
       if not typeSymbol.cursorIsNil:
         result.typeSymbol = typeSymbol.symName
     else:
-      fail("native ABI does not support parameter type: " & typeId)
+      result.typeSymbol = typeId
   else:
     let typeSymbol = declaration.findChildKind(Symbol)
     if not typeSymbol.cursorIsNil:
@@ -614,6 +614,8 @@ proc parseNativeProc(declaration: Cursor; abi: AbiProcEntry;
           abiParam.name)
     result.params = orderedParams
     for i in 0 ..< result.params.len:
+      if not result.params[i].byVar:
+        result.params[i].typeSymbol = abi.params[i].typeSymbol
       result.params[i].lowering = abi.params[i].lowering
       result.params[i].hiddenLengthCount = abi.params[i].hiddenLengthCount
 
