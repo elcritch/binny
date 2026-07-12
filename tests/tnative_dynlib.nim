@@ -1,6 +1,50 @@
-import std/[assertions, strutils]
+import std/[assertions, os, osproc, strformat, strutils]
 import binny/native_dynlib
 import binny/native_dynlib/[artifacts, model]
+
+const NativeDependencyFixtureSource = "tests/fixtures/native_dynlib_hidden_dependency.nim"
+const NativeDependencyFixtureCacheDir = "tests/.nimcache_hidden_dependency"
+const NativeDependencyLibrary = "libnative_dynlib_hidden_dependency"
+
+func nativeDependencyLibraryExt(): string =
+  when defined(windows):
+    "dll"
+  elif defined(macosx):
+    "dylib"
+  else:
+    "so"
+
+proc nativeDependencyFixturePaths():
+    tuple[cacheDir: string, sourcePath: string, manifestPath: string] =
+  let
+    rootDir = getCurrentDir()
+    cacheDir = rootDir / NativeDependencyFixtureCacheDir
+    sourcePath = rootDir / NativeDependencyFixtureSource
+    manifestPath = cacheDir / (NativeDependencyLibrary & ".abi.nif")
+  (cacheDir, sourcePath, manifestPath)
+
+proc ensureNativeDependencyFixtureArtifacts(paths: tuple[
+    cacheDir: string, sourcePath: string, manifestPath: string
+  ]): bool =
+  createDir(paths.cacheDir)
+  let libraryPath = paths.cacheDir / (NativeDependencyLibrary & "." & nativeDependencyLibraryExt())
+  if fileExists(paths.manifestPath):
+    return true
+  let compileCommand = fmt(
+    "{getCurrentCompilerExe()} c --experimental:abi --emitBif:on --app:lib" &
+      " --nimcache:{paths.cacheDir} --out:{libraryPath} {paths.sourcePath}"
+  )
+  let compiled = execCmdEx(compileCommand)
+  if compiled.exitCode == 0:
+    return true
+  if "unknown experimental feature" in compiled.output:
+    return false
+  doAssert false, "failed to compile hidden dependency fixture: " & compiled.output
+
+proc hasNativeDependencyFixtureArtifacts(paths: tuple[
+    cacheDir: string, sourcePath: string, manifestPath: string
+  ]): bool =
+  ensureNativeDependencyFixtureArtifacts(paths)
 
 block config_defaults_to_manifest_directory:
   let config = initNativeBindingsConfig("src/producer.nim", "build/libproducer.abi.nif")
@@ -389,3 +433,10 @@ block generated_module_escapes_unsafe_identifiers:
   let generated = generateNativeModule(api)
   doAssert "proc `for`*()" in generated
   doAssert "proc `not-safe`*()" in generated
+
+block read_native_bindings_collects_dependent_hidden_type:
+  let paths = nativeDependencyFixturePaths()
+  if hasNativeDependencyFixtureArtifacts(paths):
+    let generated = generateNativeBindings(paths.cacheDir, paths.sourcePath, paths.manifestPath)
+    doAssert "PublicBox* = object" in generated
+    doAssert "= seq[int]" in generated

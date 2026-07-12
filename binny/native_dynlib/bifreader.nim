@@ -915,7 +915,9 @@ proc collectReferencedType(
     requiredTypes: var Table[string, bool],
     skipInternal: Table[string, bool],
 ) =
-  if symbol.len == 0 or symbol in requiredTypes or symbol in skipInternal or symbol notin layouts:
+  if symbol.len == 0 or symbol in skipInternal or symbol notin layouts:
+    return
+  if symbol in requiredTypes:
     return
   requiredTypes[symbol] = true
   collectReferencedLayoutDependencies(layouts[symbol], layouts, requiredTypes, skipInternal)
@@ -1091,7 +1093,6 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
   var requiredTypes: Table[string, bool]
   for typ in result.types:
     if typ.kind == ntImportedGeneric or not isBacktickTypeSymbol(typ.nifSymbol):
-      requiredTypes[typ.typeId] = true
       collectReferencedType(typ.typeId, layouts, requiredTypes, skipInternalTypes)
 
   for procInfo in result.procs:
