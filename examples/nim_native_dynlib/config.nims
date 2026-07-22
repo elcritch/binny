@@ -141,7 +141,9 @@ proc verifyExports() =
 proc buildProducer() =
   buildNativeDynlibTool()
   compileProducerBackend()
-  runCommand([toolBinary, "root", producerCache, producerSource, exportList])
+  runCommand([
+    toolBinary, "root", producerCache, producerSource, library, exportList,
+  ])
   compileProducerBackend()
   if hostOS == "linux" or hostOS == "freebsd":
     runCommand([toolBinary, "pic", producerCache, nimLibDir, exampleDir])

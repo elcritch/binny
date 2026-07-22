@@ -12,7 +12,8 @@ Why this is useful:
 - The original Nim bodies are retained and linked directly.
 - The same BIF reconstructs strongly typed Nim consumer bindings.
 - The final dylib exports the selected procedures, required ownership hooks,
-  and `NimMain`.
+  and a library-specific initializer such as
+  `libproducer_NimMain_pro47ngcy1`.
 
 ## Try it
 
@@ -53,8 +54,9 @@ nm -gU nimcache/libproducer.dylib
 
 The list contains the 20 public procedures from `producer.nim` and
 `support.nim`, three custom ownership hooks required by public types, and
-`NimMain`. Private procedures, generated default hooks, runtime helpers, and
-all other archive symbols remain hidden.
+one library-specific `NimMain` alias. Private procedures, the original
+`NimMain` name, generated default hooks, runtime helpers, and all other archive
+symbols remain hidden.
 
 ## How the build works
 
@@ -75,8 +77,10 @@ object file. The incremental backend gives us a useful interception point:
 6. The tool extracts that archive and promotes only matched public definitions:
    it clears Mach-O `N_PEXT` on macOS or changes ELF visibility from hidden to
    default on Linux and FreeBSD.
-7. The host linker force-loads the promoted archive and applies
-   `libproducer.exports` as a Darwin export list or GNU version script.
+7. The host linker aliases `NimMain` to a name made from the library name and
+   root BIF identity, force-loads the promoted archive, and applies
+   `libproducer.exports` as a Darwin export list or GNU version script. Only
+   the unique alias is public.
 8. The binding generator reads procedure signatures and concrete type layouts
    from BIF, then uses `.c.nif` for the exact import names.
 9. The consumer compiles against the generated Nim module and loads the dynamic

@@ -1,6 +1,7 @@
 import std/[assertions, strutils]
 import binny/native_dynlib
 import binny/native_dynlib/[artifacts, model]
+import binny/native_dynlib/staticlib
 
 block bif_config_defaults_to_source_directory:
   let config = initBifNativeBindingsConfig(
@@ -32,6 +33,11 @@ block manifest_binding_api_is_not_available:
   doAssert not compiles(
     generateNativeBindings("cache", "producer.nim", "manifest.nif")
   )
+
+block native_initializer_combines_library_and_bif_identity:
+  doAssert nativeInitSymbol(
+    "/tmp/libfoo-bar.so.3", "/cache/pro47-ngcy1.s.bif"
+  ) == "libfoo_bar_NimMain_pro47_ngcy1"
 
 block generated_module_uses_configured_loader_name:
   let api = NativeApi(
@@ -222,7 +228,7 @@ block generated_module_preserves_discardable_procs:
 block generated_module_directly_imports_procs:
   let api = NativeApi(
     libraryName: "libsample.so",
-    initSymbol: "NimMain",
+    initSymbol: "libsample_NimMain_pro47ngcy1",
     procs: @[NativeProc(name: "ping", cSymbol: "ping")],
   )
   let generated = generateNativeModule(api)
@@ -230,8 +236,8 @@ block generated_module_directly_imports_procs:
   doAssert "proc ping*() {.importc: \"ping\".}" in
     generated
   doAssert "initNativeLibrary" notin generated
-  doAssert "proc nativeNimMain() {.cdecl, importc: \"NimMain\", dynlib: nativeLibrary.}" in
-    generated
+  doAssert "proc nativeNimMain() {.cdecl, importc: " &
+    "\"libsample_NimMain_pro47ngcy1\", dynlib: nativeLibrary.}" in generated
   doAssert "nativeNimMain()\n\n{.push nimcall, dynlib: nativeLibrary.}" in generated
   doAssert "{.pop.}" in generated
   doAssert "nativeRaw" notin generated

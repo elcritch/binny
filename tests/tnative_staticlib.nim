@@ -32,6 +32,12 @@ proc elfSymbolHasVisibility(output, symbol, visibility: string): bool =
     if fields.len >= 8 and fields[^1] == symbol and visibility in fields:
       return true
 
+proc listsSymbol(output, symbol: string): bool =
+  for line in output.splitLines:
+    let fields = line.splitWhitespace
+    if fields.len > 0 and fields[^1] == symbol:
+      return true
+
 when defined(macosx) or defined(linux) or defined(freebsd):
   let compiler = getCurrentCompilerExe()
   if compiler.supportsStaticLibExperiment:
@@ -92,7 +98,10 @@ proc privateAdd(left, right: int): int {.noinline.} =
       ]
       discard run(compileArguments)
 
-      let exports = rootPublicRoutines(cache, temporary, source)
+      let
+        exports = rootPublicRoutines(cache, temporary, source)
+        bifPath = findSemanticBifPath(cache, source)
+        initSymbol = nativeInitSymbol(dylib, bifPath)
       var exportedNames: seq[string]
       for symbol in exports:
         exportedNames.add symbol.nifSymbol
@@ -101,7 +110,8 @@ proc privateAdd(left, right: int): int {.noinline.} =
       doAssert exports[1].nifSymbol.startsWith("publicAnswer.")
       doAssert exports[0].cSymbol.len > 0
       doAssert exports[1].cSymbol.len > 0
-      writeNativeExportList(exportList, exports)
+      doAssert initSymbol.startsWith("libproducer_NimMain_")
+      writeNativeExportList(exportList, initSymbol, exports)
 
       discard run(compileArguments)
       when defined(linux) or defined(freebsd):
@@ -122,7 +132,7 @@ proc privateAdd(left, right: int): int {.noinline.} =
       discard run(archiveArguments)
 
       promoteNativeArchive(privateArchive, publicArchive, exports)
-      linkNativeDynlib(publicArchive, dylib, exportList)
+      linkNativeDynlib(publicArchive, dylib, exportList, initSymbol)
 
       when defined(macosx):
         let
@@ -133,6 +143,8 @@ proc privateAdd(left, right: int): int {.noinline.} =
           doAssert "private external _" & symbol.cSymbol in privateSymbols
           doAssert "external _" & symbol.cSymbol in publicSymbols
           doAssert "_" & symbol.cSymbol in dylibSymbols
+        doAssert dylibSymbols.listsSymbol("_" & initSymbol)
+        doAssert not dylibSymbols.listsSymbol("_NimMain")
       else:
         let
           privateSymbols = run(["readelf", "-Ws", privateArchive])
@@ -144,11 +156,14 @@ proc privateAdd(left, right: int): int {.noinline.} =
           doAssert publicSymbols.elfSymbolHasVisibility(
             symbol.cSymbol, "DEFAULT")
           doAssert symbol.cSymbol in dylibSymbols
+        doAssert dylibSymbols.listsSymbol(initSymbol)
+        doAssert not dylibSymbols.listsSymbol("NimMain")
       doAssert "privateAdd" notin dylibSymbols
 
       let library = loadLib(dylib)
       doAssert not library.isNil
-      let initialize = cast[proc() {.cdecl.}](library.symAddr("NimMain"))
+      let initialize = cast[proc() {.cdecl.}](
+        library.symAddr(cstring(initSymbol)))
       let publicAdd = cast[proc(left, right: int): int {.nimcall.}](
         library.symAddr(cstring(exports[0].cSymbol)))
       doAssert not initialize.isNil
@@ -161,6 +176,7 @@ proc privateAdd(left, right: int): int {.noinline.} =
         source, cache, dylib, temporary
       )
       doAssert config.writeNativeBindings(bindings)
+      doAssert "importc: \"" & initSymbol & "\"" in readFile(bindings)
       writeFile(consumer, """
 import producer_abi
 

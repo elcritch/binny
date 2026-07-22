@@ -19,6 +19,8 @@ It requires a Nim devel compiler with `--genBif`, `nim ic`, and `nifler`.
 - Preserve objects, refs, inheritance, case objects, containers, and custom
   ownership hooks in generated bindings.
 - Export only the BIF-selected procedures and required runtime entry points.
+- Give each library its own initializer name, such as
+  `libproducer_NimMain_pro47ngcy1`.
 - Use the original Nim implementations instead of generating forwarding code.
 
 ## Try the native dynlib example

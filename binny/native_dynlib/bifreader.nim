@@ -974,12 +974,12 @@ func bifIdentity(path: string): string =
     result = name[0 ..< name.len - suffix.len]
 
 proc bifNativeDescription(
-    nimcacheDir, sourceRoot, libraryName: string;
+    nimcacheDir, sourceRoot, libraryName, initSymbol: string;
     routines: openArray[NativeExportSymbol];
     hooks: openArray[NativeHookSymbol]
 ): BifNativeDescription =
   result.libraryName = libraryName
-  result.initSymbol = "NimMain"
+  result.initSymbol = initSymbol
 
   let root = sourceRoot.normalizedAbsolutePath
   var paths: seq[string]
@@ -1250,18 +1250,14 @@ proc readModuleSource*(path: string): string =
   cursor.endRead()
 
 proc findSemanticBif*(nimcacheDir, sourcePath: string): string =
-  let expected = sourcePath.normalizedAbsolutePath
-  for path in walkFiles(nimcacheDir / "*.s.bif"):
-    let candidate = readModuleSource(path)
-    if candidate.len > 0 and candidate.normalizedAbsolutePath == expected:
-      return path
-  raise newException(IOError, "semantic BIF not found for: " & sourcePath)
+  result = findSemanticBifPath(nimcacheDir, sourcePath)
 
 proc readBifNativeApi*(nimcacheDir, sourceRoot, sourcePath,
     libraryName: string): NativeApi =
   ## Reconstructs a native API from semantic BIF and incremental C definitions.
   let
     bifPath = findSemanticBif(nimcacheDir, sourcePath)
+    initSymbol = nativeInitSymbol(libraryName, bifPath)
     routines = resolveNativeSymbols(
       nimcacheDir, publicRoutineSymbols(nimcacheDir, sourceRoot)
     )
@@ -1269,6 +1265,6 @@ proc readBifNativeApi*(nimcacheDir, sourceRoot, sourcePath,
       nimcacheDir, nativeHookSymbols(nimcacheDir, sourceRoot)
     )
     description = bifNativeDescription(
-      nimcacheDir, sourceRoot, libraryName, routines, hooks
+      nimcacheDir, sourceRoot, libraryName, initSymbol, routines, hooks
     )
   result = buildNativeApi(bifPath, description)

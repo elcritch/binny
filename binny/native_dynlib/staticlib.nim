@@ -85,6 +85,52 @@ proc readModuleSource(module: var BifModule): string =
     result = source.strVal
   cursor.endRead()
 
+proc findSemanticBifPath*(nimcacheDir, sourcePath: string): string =
+  ## Finds the semantic BIF whose module source matches ``sourcePath``.
+  let expected = normalizedAbsolutePath(sourcePath)
+  for path in walkFiles(nimcacheDir / "*.s.bif"):
+    var module = bif.load(path)
+    let candidate = module.readModuleSource()
+    if candidate.len > 0 and normalizedAbsolutePath(candidate) == expected:
+      return path
+  fail("semantic BIF not found for: " & sourcePath)
+
+func libraryStem(path: string): string =
+  let name = path.extractFilename
+  for marker in [".dylib", ".so", ".dll"]:
+    let position = name.find(marker)
+    if position > 0 and
+        (position + marker.len == name.len or
+          marker == ".so" and name[position + marker.len] == '.'):
+      return name[0 ..< position]
+  result = name.splitFile.name
+  if result.len == 0:
+    result = name
+
+func symbolFragment(value: string): string =
+  var previousWasUnderscore = false
+  for character in value:
+    if character in {'A'..'Z', 'a'..'z', '0'..'9'}:
+      result.add character
+      previousWasUnderscore = false
+    elif not previousWasUnderscore:
+      result.add '_'
+      previousWasUnderscore = true
+  while result.len > 0 and result[^1] == '_':
+    result.setLen(result.len - 1)
+  if result.len == 0:
+    result = "library"
+  elif result[0] in {'0'..'9'}:
+    result = "lib_" & result
+
+proc nativeInitSymbol*(libraryName, bifPath: string): string =
+  ## Returns the exported alias used to initialize one native Nim library.
+  let identity = bifModuleSuffix(bifPath)
+  if identity.len == 0:
+    fail("semantic BIF has an invalid filename: " & bifPath)
+  result = libraryStem(libraryName).symbolFragment &
+    "_NimMain_" & identity.symbolFragment
+
 proc isRoutineDeclaration(declaration: Cursor): bool =
   if declaration.kind != TagLit:
     return false
@@ -371,26 +417,29 @@ proc rootPublicRoutines*(nimcacheDir, sourceRoot, mainSource: string): seq[Nativ
 
   result = resolveNativeSymbols(nimcacheDir, exports)
 
-proc writeDarwinExportList*(path: string; symbols: openArray[NativeExportSymbol]) =
-  ## Writes an ld ``-exported_symbols_list`` including the Nim runtime entry.
-  var names = @["_NimMain"]
+proc writeDarwinExportList*(path, initSymbol: string;
+                            symbols: openArray[NativeExportSymbol]) =
+  ## Writes an ld ``-exported_symbols_list`` with a unique runtime initializer.
+  var names: seq[string]
   for symbol in symbols:
-    names.add "_" & symbol.cSymbol
+    if symbol.cSymbol != initSymbol:
+      names.add "_" & symbol.cSymbol
   names.sort()
-  var uniqueNames: seq[string]
+  var uniqueNames = @["_" & initSymbol]
   for name in names:
-    if uniqueNames.len == 0 or uniqueNames[^1] != name:
+    if uniqueNames[^1] != name:
       uniqueNames.add name
   writeFile(path, uniqueNames.join("\n") & "\n")
 
-proc writeElfVersionScript*(path: string;
+proc writeElfVersionScript*(path, initSymbol: string;
                             symbols: openArray[NativeExportSymbol]) =
   ## Writes a GNU ld version script containing only the selected native API.
-  var names = @["NimMain"]
+  var names: seq[string]
   for symbol in symbols:
-    names.add symbol.cSymbol
+    if symbol.cSymbol != initSymbol:
+      names.add symbol.cSymbol
   names.sort()
-  var lines = @["{", "  global:"]
+  var lines = @["{", "  global:", "    " & initSymbol & ";"]
   var previous = ""
   for name in names:
     if name != previous:
@@ -401,13 +450,13 @@ proc writeElfVersionScript*(path: string;
   lines.add "};"
   writeFile(path, lines.join("\n") & "\n")
 
-proc writeNativeExportList*(path: string;
+proc writeNativeExportList*(path, initSymbol: string;
                             symbols: openArray[NativeExportSymbol]) =
   ## Writes the host linker's export-control file.
   when defined(macosx):
-    writeDarwinExportList(path, symbols)
+    writeDarwinExportList(path, initSymbol, symbols)
   elif defined(linux) or defined(freebsd):
-    writeElfVersionScript(path, symbols)
+    writeElfVersionScript(path, initSymbol, symbols)
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)
 
@@ -692,8 +741,8 @@ proc promoteNativeArchive*(inputPath, outputPath: string;
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)
 
-proc linkMachODylib*(archivePath, outputPath, exportListPath: string;
-                     installName = "") =
+proc linkMachODylib*(archivePath, outputPath, exportListPath,
+                     initSymbol: string; installName = "") =
   ## Links every member of a promoted archive into a symbol-filtered dylib.
   let dylibName = if installName.len > 0:
     installName
@@ -703,13 +752,14 @@ proc linkMachODylib*(archivePath, outputPath, exportListPath: string;
   runProcess("clang", [
     "-dynamiclib",
     "-Wl,-force_load," & normalizedAbsolutePath(archivePath),
+    "-Wl,-alias,_NimMain,_" & initSymbol,
     "-Wl,-exported_symbols_list," & normalizedAbsolutePath(exportListPath),
     "-Wl,-install_name," & dylibName,
     "-o", normalizedAbsolutePath(outputPath),
   ])
 
-proc linkElfSharedLibrary*(archivePath, outputPath, exportListPath: string;
-                           soname = "") =
+proc linkElfSharedLibrary*(archivePath, outputPath, exportListPath,
+                           initSymbol: string; soname = "") =
   ## Links every archive member into a version-script-filtered ELF shared object.
   let libraryName = if soname.len > 0:
     soname
@@ -722,6 +772,7 @@ proc linkElfSharedLibrary*(archivePath, outputPath, exportListPath: string;
     "-Wl,--whole-archive",
     normalizedAbsolutePath(archivePath),
     "-Wl,--no-whole-archive",
+    "-Wl,--defsym=" & initSymbol & "=NimMain",
     "-Wl,--version-script," & normalizedAbsolutePath(exportListPath),
     "-Wl,-soname," & libraryName,
     "-pthread",
@@ -729,12 +780,14 @@ proc linkElfSharedLibrary*(archivePath, outputPath, exportListPath: string;
     "-o", normalizedAbsolutePath(outputPath),
   ])
 
-proc linkNativeDynlib*(archivePath, outputPath, exportListPath: string;
-                       libraryName = "") =
+proc linkNativeDynlib*(archivePath, outputPath, exportListPath,
+                       initSymbol: string; libraryName = "") =
   ## Links a filtered native dynamic library using the host linker.
   when defined(macosx):
-    linkMachODylib(archivePath, outputPath, exportListPath, libraryName)
+    linkMachODylib(
+      archivePath, outputPath, exportListPath, initSymbol, libraryName)
   elif defined(linux) or defined(freebsd):
-    linkElfSharedLibrary(archivePath, outputPath, exportListPath, libraryName)
+    linkElfSharedLibrary(
+      archivePath, outputPath, exportListPath, initSymbol, libraryName)
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)

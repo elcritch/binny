@@ -106,7 +106,7 @@ static:
   doAssert alignof(ImportedValue) == 8
   doAssert offsetOf(ImportedValue, label) == 0
 
-proc nativeNimMain() {.cdecl, importc: "NimMain", dynlib: nativeLibrary.}
+proc nativeNimMain() {.cdecl, importc: "libproducer_NimMain_pro47ngcy1", dynlib: nativeLibrary.}
 
 nativeNimMain()
 
