@@ -5,17 +5,33 @@ proc usage() {.noreturn.} =
   quit """
 usage:
   native_dynlib root NIMCACHE MAIN_SOURCE EXPORT_LIST
+  native_dynlib pic NIMCACHE NIM_INCLUDE SOURCE_ROOT
   native_dynlib promote INPUT.a OUTPUT.a EXPORT_LIST
-  native_dynlib link INPUT.a OUTPUT.dylib EXPORT_LIST
+  native_dynlib link INPUT.a OUTPUT_LIBRARY EXPORT_LIST
 """
 
 proc readExportList(path: string): seq[NativeExportSymbol] =
-  for line in path.readFile.splitLines:
-    let name = line.strip
-    if name.len > 0 and name != "_NimMain":
-      if name[0] != '_':
-        quit "invalid Darwin export name: " & name
-      result.add NativeExportSymbol(cSymbol: name[1..^1])
+  when defined(macosx):
+    for line in path.readFile.splitLines:
+      let name = line.strip
+      if name.len > 0 and name != "_NimMain":
+        if name[0] != '_':
+          quit "invalid Darwin export name: " & name
+        result.add NativeExportSymbol(cSymbol: name[1..^1])
+  elif defined(linux):
+    var inGlobalSection = false
+    for line in path.readFile.splitLines:
+      let value = line.strip
+      if value == "global:":
+        inGlobalSection = true
+      elif value == "local:":
+        inGlobalSection = false
+      elif inGlobalSection and value.endsWith(";"):
+        let name = value[0 ..< value.high].strip
+        if name.len > 0 and name != "NimMain":
+          result.add NativeExportSymbol(cSymbol: name)
+  else:
+    quit "native dynamic libraries are unsupported on " & hostOS
 
 if paramCount() != 4:
   usage()
@@ -26,13 +42,19 @@ try:
     let mainSource = paramStr(3)
     let symbols = rootPublicRoutines(
       paramStr(2), mainSource.parentDir, mainSource)
-    writeDarwinExportList(paramStr(4), symbols)
+    writeNativeExportList(paramStr(4), symbols)
     for symbol in symbols:
       echo symbol.nifSymbol, " -> ", symbol.cSymbol
+  of "pic":
+    when defined(linux):
+      compileElfPicObjects(paramStr(2), [paramStr(3), paramStr(4)])
+    else:
+      quit "PIC recompilation is only required on Linux"
   of "promote":
-    promoteMachOArchive(paramStr(2), paramStr(3), readExportList(paramStr(4)))
+    promoteNativeArchive(paramStr(2), paramStr(3),
+      readExportList(paramStr(4)))
   of "link":
-    linkMachODylib(paramStr(2), paramStr(3), paramStr(4))
+    linkNativeDynlib(paramStr(2), paramStr(3), paramStr(4))
   else:
     usage()
 except NativeStaticLibError as error:

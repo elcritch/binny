@@ -31,14 +31,21 @@ The tasks build these artifacts:
 
 ```text
 generated/producer_abi.nim       reconstructed native Nim bindings
-nimcache/libproducer.private.a   original private-external symbols
+nimcache/libproducer.private.a   original hidden/private symbols
 nimcache/libproducer.a           selected symbols promoted
-nimcache/libproducer.exports     exact BIF-derived Mach-O export names
-nimcache/libproducer.dylib       final filtered dynamic library
+nimcache/libproducer.exports     BIF-derived linker export control
+nimcache/libproducer.so          filtered library on Linux
+nimcache/libproducer.dylib       filtered library on macOS
 consumer                         ordinary Nim consumer executable
 ```
 
-Inspect the result with:
+Inspect the result on Linux with:
+
+```sh
+nm -D --defined-only nimcache/libproducer.so
+```
+
+Or on macOS with:
 
 ```sh
 nm -gU nimcache/libproducer.dylib
@@ -62,15 +69,17 @@ object file. The incremental backend gives us a useful interception point:
    `.c.nif` definition, obtaining the exact backend C name.
 4. It marks those definitions as liveness roots and lets Nim rerun its normal
    dependency closure and C emission.
-5. The generated objects are collected into `libproducer.private.a`.
-6. The tool extracts that archive and clears Mach-O `N_PEXT` only on the matched
-   public definitions, producing `libproducer.a`.
-7. Clang force-loads the promoted archive and applies
-   `libproducer.exports` while linking the dylib.
+5. On Linux, the emitted C is recompiled as position-independent code before
+   the generated objects are collected into `libproducer.private.a`.
+6. The tool extracts that archive and promotes only matched public definitions:
+   it clears Mach-O `N_PEXT` on macOS or changes ELF visibility from hidden to
+   default on Linux.
+7. The host linker force-loads the promoted archive and applies
+   `libproducer.exports` as a Darwin export list or GNU version script.
 8. The binding generator reads procedure signatures and concrete type layouts
    from BIF, then uses `.c.nif` for the exact import names.
-9. The consumer compiles against the generated Nim module and loads the dylib
-   directly.
+9. The consumer compiles against the generated Nim module and loads the dynamic
+   library directly.
 
 This keeps both policy decisions outside the compiler: BIF decides which Nim
 declarations are public, and the platform export list decides which native
@@ -78,7 +87,8 @@ symbols the dylib exposes.
 
 ## Current boundaries
 
-- Archive promotion currently supports 64-bit Mach-O on macOS.
+- Archive promotion supports 64-bit Mach-O on macOS and little-endian ELF64 on
+  Linux.
 - The producer and caller must agree on Nim compiler, memory manager, allocator,
   target, and native type layouts.
 - Application modules are the BIF modules whose source files live beside the

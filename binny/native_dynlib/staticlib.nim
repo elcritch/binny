@@ -3,7 +3,7 @@
 ## The incremental C backend records every owned routine in ``.c.nif`` before
 ## whole-program dead-code elimination. This module matches public routine
 ## declarations from semantic BIF to those backend definitions, keeps them live,
-## and promotes the resulting Mach-O symbols after they are archived.
+## and promotes the resulting Mach-O or ELF symbols after they are archived.
 
 import std/[algorithm, os, osproc, sets, streams, strutils, tables, tempfiles]
 import nif/[bif, nifcore, nifcoreparse, nifqueries]
@@ -40,6 +40,17 @@ const
   nTypeMask = 0x0e'u8
   nTypeUndefined = 0x00'u8
   nTypePrivateExternal = 0x10'u8
+  elfClass64 = 2'u8
+  elfDataLittleEndian = 1'u8
+  elfHeader64Size = 64
+  elfSectionHeader64Size = 64
+  elfSymbol64Size = 24
+  elfSectionSymbolTable = 2'u32
+  elfSectionDynamicSymbols = 11'u32
+  elfUndefinedSection = 0'u16
+  elfBindingGlobal = 1'u8
+  elfBindingWeak = 2'u8
+  elfVisibilityMask = 0x03'u8
 
 proc fail(message: string) {.noreturn.} =
   raise newException(NativeStaticLibError, message)
@@ -372,15 +383,63 @@ proc writeDarwinExportList*(path: string; symbols: openArray[NativeExportSymbol]
       uniqueNames.add name
   writeFile(path, uniqueNames.join("\n") & "\n")
 
+proc writeElfVersionScript*(path: string;
+                            symbols: openArray[NativeExportSymbol]) =
+  ## Writes a GNU ld version script containing only the selected native API.
+  var names = @["NimMain"]
+  for symbol in symbols:
+    names.add symbol.cSymbol
+  names.sort()
+  var lines = @["{", "  global:"]
+  var previous = ""
+  for name in names:
+    if name != previous:
+      lines.add "    " & name & ";"
+      previous = name
+  lines.add "  local:"
+  lines.add "    *;"
+  lines.add "};"
+  writeFile(path, lines.join("\n") & "\n")
+
+proc writeNativeExportList*(path: string;
+                            symbols: openArray[NativeExportSymbol]) =
+  ## Writes the host linker's export-control file.
+  when defined(macosx):
+    writeDarwinExportList(path, symbols)
+  elif defined(linux):
+    writeElfVersionScript(path, symbols)
+  else:
+    fail("native dynamic libraries are unsupported on " & hostOS)
+
 func readU32(data: string; offset: int): uint32 =
   if offset < 0 or offset + 4 > data.len:
-    fail("truncated Mach-O object")
+    fail("truncated native object")
   result = uint32(byte(data[offset])) or
     uint32(byte(data[offset + 1])) shl 8 or
     uint32(byte(data[offset + 2])) shl 16 or
     uint32(byte(data[offset + 3])) shl 24
 
-proc machString(data: string; offset, limit: int): string =
+func readU16(data: string; offset: int): uint16 =
+  if offset < 0 or offset + 2 > data.len:
+    fail("truncated native object")
+  result = uint16(byte(data[offset])) or
+    uint16(byte(data[offset + 1])) shl 8
+
+func readU64(data: string; offset: int): uint64 =
+  if offset < 0 or offset + 8 > data.len:
+    fail("truncated native object")
+  for index in 0 ..< 8:
+    result = result or uint64(byte(data[offset + index])) shl (index * 8)
+
+func checkedInt(value: uint64; path: string): int =
+  if value > uint64(high(int)):
+    fail("ELF offset exceeds host address space in " & path)
+  result = int(value)
+
+func rangeFits(offset, size, limit: int): bool =
+  offset >= 0 and size >= 0 and offset <= limit and size <= limit - offset
+
+proc objectString(data: string; offset, limit: int): string =
   if offset < 0 or offset >= limit or limit > data.len:
     return
   var index = offset
@@ -430,7 +489,7 @@ proc patchMachOObject(
     let
       entryOffset = symtabOffset + index * nlist64Size
       nameOffset = int(data.readU32(entryOffset))
-      symbolName = data.machString(stringOffset + nameOffset,
+      symbolName = data.objectString(stringOffset + nameOffset,
         stringOffset + stringSize)
       symbolType = uint8(data[entryOffset + 4])
       isDefinition = (symbolType and nTypeMask) != nTypeUndefined
@@ -444,6 +503,76 @@ proc patchMachOObject(
   if changed:
     writeFile(path, data)
 
+proc patchElfObject(
+    path: string; symbols: HashSet[string]; found: var HashSet[string]
+): bool =
+  var data = readFile(path)
+  if data.len < 4 or data[0] != '\x7f' or data[1] != 'E' or
+      data[2] != 'L' or data[3] != 'F':
+    return false
+  result = true
+  if data.len < elfHeader64Size:
+    fail("truncated ELF object: " & path)
+  if uint8(data[4]) != elfClass64:
+    fail("only ELF64 objects can be promoted: " & path)
+  if uint8(data[5]) != elfDataLittleEndian:
+    fail("only little-endian ELF objects can be promoted: " & path)
+
+  let
+    sectionOffset = data.readU64(40).checkedInt(path)
+    sectionEntrySize = int(data.readU16(58))
+    sectionCount = int(data.readU16(60))
+  if sectionEntrySize < elfSectionHeader64Size or sectionCount == 0 or
+      not rangeFits(sectionOffset, sectionEntrySize * sectionCount, data.len):
+    fail("invalid ELF section table in " & path)
+
+  var changed = false
+  for sectionIndex in 0 ..< sectionCount:
+    let sectionHeader = sectionOffset + sectionIndex * sectionEntrySize
+    let sectionType = data.readU32(sectionHeader + 4)
+    if sectionType == elfSectionSymbolTable or
+        sectionType == elfSectionDynamicSymbols:
+      let
+        symbolOffset = data.readU64(sectionHeader + 24).checkedInt(path)
+        symbolSize = data.readU64(sectionHeader + 32).checkedInt(path)
+        stringSectionIndex = int(data.readU32(sectionHeader + 40))
+        symbolEntrySize = data.readU64(sectionHeader + 56).checkedInt(path)
+      if stringSectionIndex < 0 or stringSectionIndex >= sectionCount or
+          symbolEntrySize < elfSymbol64Size or
+          not rangeFits(symbolOffset, symbolSize, data.len):
+        fail("invalid ELF symbol table in " & path)
+
+      let stringHeader = sectionOffset + stringSectionIndex * sectionEntrySize
+      let
+        stringOffset = data.readU64(stringHeader + 24).checkedInt(path)
+        stringSize = data.readU64(stringHeader + 32).checkedInt(path)
+      if not rangeFits(stringOffset, stringSize, data.len):
+        fail("invalid ELF string table in " & path)
+
+      let symbolCount = symbolSize div symbolEntrySize
+      for symbolIndex in 0 ..< symbolCount:
+        let entryOffset = symbolOffset + symbolIndex * symbolEntrySize
+        if not rangeFits(entryOffset, elfSymbol64Size, data.len):
+          fail("truncated ELF symbol table in " & path)
+        let
+          nameOffset = int(data.readU32(entryOffset))
+          symbolName = data.objectString(
+            stringOffset + nameOffset, stringOffset + stringSize)
+          symbolInfo = uint8(data[entryOffset + 4])
+          symbolOther = uint8(data[entryOffset + 5])
+          symbolSection = data.readU16(entryOffset + 6)
+          binding = symbolInfo shr 4
+        if symbolName in symbols and symbolSection != elfUndefinedSection:
+          if binding != elfBindingGlobal and binding != elfBindingWeak:
+            fail("cannot promote local ELF symbol: " & symbolName)
+          found.incl symbolName
+          if (symbolOther and elfVisibilityMask) != 0:
+            data[entryOffset + 5] =
+              char(symbolOther and not elfVisibilityMask)
+            changed = true
+  if changed:
+    writeFile(path, data)
+
 proc runProcess(command: string; arguments: openArray[string]; workingDir = "") =
   var process = startProcess(command, workingDir = workingDir, args = @arguments,
     options = {poUsePath, poStdErrToStdOut})
@@ -452,6 +581,28 @@ proc runProcess(command: string; arguments: openArray[string]; workingDir = "") 
   process.close()
   if exitCode != 0:
     fail(command & " failed with exit code " & $exitCode & ":\n" & output)
+
+proc compileElfPicObjects*(nimcacheDir: string;
+                           includePaths: openArray[string]; compiler = "cc") =
+  ## Recompiles incremental-backend C output as ELF position-independent code.
+  var sources: seq[string]
+  for path in walkFiles(nimcacheDir / "*.c"):
+    sources.add path
+  sources.sort()
+  if sources.len == 0:
+    fail("incremental backend emitted no C sources in " & nimcacheDir)
+
+  var includeArguments: seq[string]
+  for path in includePaths:
+    includeArguments.add "-I" & normalizedAbsolutePath(path)
+  for source in sources:
+    var arguments = @[
+      "-c", "-w", "-fno-strict-aliasing", "-fPIC", "-pthread",
+    ]
+    arguments.add includeArguments
+    arguments.add ["-o", normalizedAbsolutePath(source & ".o"),
+      normalizedAbsolutePath(source)]
+    runProcess(compiler, arguments)
 
 proc promoteMachOArchive*(inputPath, outputPath: string;
                           symbols: openArray[NativeExportSymbol]) =
@@ -492,6 +643,55 @@ proc promoteMachOArchive*(inputPath, outputPath: string;
   arguments.add members
   runProcess("ar", arguments)
 
+proc promoteElfArchive*(inputPath, outputPath: string;
+                        symbols: openArray[NativeExportSymbol]) =
+  ## Changes selected ELF definitions from hidden to default visibility.
+  let
+    input = normalizedAbsolutePath(inputPath)
+    output = normalizedAbsolutePath(outputPath)
+    temporary = createTempDir("binny-native-dynlib-", "")
+  defer:
+    removeDir(temporary)
+
+  runProcess("ar", ["-x", input], temporary)
+
+  var requested = initHashSet[string]()
+  for symbol in symbols:
+    requested.incl symbol.cSymbol
+  var found = initHashSet[string]()
+  var members: seq[string]
+  for path in walkFiles(temporary / "*"):
+    if patchElfObject(path, requested, found):
+      members.add path
+  members.sort()
+  if members.len == 0:
+    fail("static archive contains no ELF members: " & input)
+
+  var missing: seq[string]
+  for symbol in requested:
+    if symbol notin found:
+      missing.add symbol
+  if missing.len > 0:
+    missing.sort()
+    fail("archive has no promotable definitions for:\n  " & missing.join("\n  "))
+
+  createDir(output.parentDir)
+  if fileExists(output):
+    removeFile(output)
+  var arguments = @["-rcs", output]
+  arguments.add members
+  runProcess("ar", arguments)
+
+proc promoteNativeArchive*(inputPath, outputPath: string;
+                           symbols: openArray[NativeExportSymbol]) =
+  ## Promotes selected definitions using the host object format.
+  when defined(macosx):
+    promoteMachOArchive(inputPath, outputPath, symbols)
+  elif defined(linux):
+    promoteElfArchive(inputPath, outputPath, symbols)
+  else:
+    fail("native dynamic libraries are unsupported on " & hostOS)
+
 proc linkMachODylib*(archivePath, outputPath, exportListPath: string;
                      installName = "") =
   ## Links every member of a promoted archive into a symbol-filtered dylib.
@@ -507,3 +707,34 @@ proc linkMachODylib*(archivePath, outputPath, exportListPath: string;
     "-Wl,-install_name," & dylibName,
     "-o", normalizedAbsolutePath(outputPath),
   ])
+
+proc linkElfSharedLibrary*(archivePath, outputPath, exportListPath: string;
+                           soname = "") =
+  ## Links every archive member into a version-script-filtered ELF shared object.
+  let libraryName = if soname.len > 0:
+    soname
+  else:
+    outputPath.extractFilename
+  createDir(outputPath.parentDir)
+  runProcess("cc", [
+    "-shared",
+    "-Wl,-z,defs",
+    "-Wl,--whole-archive",
+    normalizedAbsolutePath(archivePath),
+    "-Wl,--no-whole-archive",
+    "-Wl,--version-script," & normalizedAbsolutePath(exportListPath),
+    "-Wl,-soname," & libraryName,
+    "-pthread",
+    "-ldl",
+    "-o", normalizedAbsolutePath(outputPath),
+  ])
+
+proc linkNativeDynlib*(archivePath, outputPath, exportListPath: string;
+                       libraryName = "") =
+  ## Links a filtered native dynamic library using the host linker.
+  when defined(macosx):
+    linkMachODylib(archivePath, outputPath, exportListPath, libraryName)
+  elif defined(linux):
+    linkElfSharedLibrary(archivePath, outputPath, exportListPath, libraryName)
+  else:
+    fail("native dynamic libraries are unsupported on " & hostOS)

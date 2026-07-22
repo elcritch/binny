@@ -7,7 +7,8 @@ Build native Nim dynamic libraries and strongly typed Nim bindings from compiler
 Binny turns ordinary public Nim routines (`proc name*`) into a filtered native dynamic-library API. It reads semantic BIF to identify the public surface, matches those declarations to their exact backend symbols, and reconstructs the Nim types and ownership hooks needed by consumers.
 
 The native-library workflow is experimental. The no-pragma archive promotion
-currently targets 64-bit Mach-O on macOS and requires a Nim devel compiler with `--genBif`, `nim ic`, and `nifler`.
+supports 64-bit Mach-O on macOS and little-endian ELF64 on Linux. It requires a
+Nim devel compiler with `--genBif`, `nim ic`, and `nifler`.
 
 ## Why try it?
 
@@ -30,8 +31,8 @@ nim e2e
 ```
 
 The `e2e` task builds an ordinary Nim producer as a static library, derives its
-public API from BIF, promotes only the selected symbols, links a dylib, generates
-`generated/producer_abi.nim`, and compiles the consumer. The resulting
+public API from BIF, promotes only the selected symbols, links a dynamic library,
+generates `generated/producer_abi.nim`, and compiles the consumer. The resulting
 `./consumer` remains runnable afterward.
 
 Public producer declarations remain ordinary Nim code:
@@ -82,7 +83,7 @@ import binny/native_dynlib
 let config = initBifNativeBindingsConfig(
   sourcePath = "src/plugin.nim",
   nimcacheDir = "build/nimcache",
-  libraryName = "libplugin.dylib",
+  libraryName = "build/libplugin.so", # Use .dylib on macOS.
 )
 
 discard config.writeNativeBindings("generated/plugin_abi.nim")
@@ -128,6 +129,6 @@ nim c binny.nim
 nim test
 ```
 
-The CI uses Nim devel to build the aggregate module and test native binding
-generation on Linux, then runs the native dynamic-library end-to-end workflow
-on macOS.
+The CI uses Nim devel to build the aggregate module, test native binding
+generation, and run the native dynamic-library end-to-end workflow on both
+Linux and macOS.

@@ -27,6 +27,7 @@ let
   exampleDir = parentDir(currentSourcePath)
   projectDir = parentDir(parentDir(exampleDir))
   compiler = selfExe()
+  nimLibDir = path(parentDir(parentDir(compiler)), "lib")
   nimcacheDir = path(exampleDir, "nimcache")
   producerCache = path(nimcacheDir, "producer")
   toolCache = path(nimcacheDir, "tool")
@@ -47,8 +48,9 @@ let
   exportList = path(nimcacheDir, "libproducer.exports")
   library = case hostOS
     of "macosx": path(nimcacheDir, "libproducer.dylib")
+    of "linux": path(nimcacheDir, "libproducer.so")
     else: raise newException(ValueError,
-      "static-library symbol promotion currently supports only macOS")
+      "native dynamic libraries currently support macOS and Linux")
 
 proc runNim(args: openArray[string]) =
   var command = @[compiler]
@@ -79,20 +81,51 @@ proc buildNativeDynlibTool() =
   ])
 
 proc archiveProducerObjects() =
-  var command = @["/usr/bin/libtool", "-static", "-o", privateArchive]
+  var objects: seq[string]
   for objectPath in listFiles(producerCache):
     if objectPath.endsWith(".o"):
-      command.add objectPath
-  if command.len == 4:
+      objects.add objectPath
+  objects.sort()
+  if objects.len == 0:
     raise newException(IOError, "producer backend emitted no object files")
+  var command = case hostOS
+    of "macosx": @["/usr/bin/libtool", "-static", "-o", privateArchive]
+    of "linux": @["ar", "-rcs", privateArchive]
+    else: raise newException(ValueError,
+      "native dynamic libraries currently support macOS and Linux")
+  command.add objects
   runCommand(command)
+
+proc expectedExportNames(): seq[string] =
+  var inGlobalSection = false
+  for line in readFile(exportList).splitLines:
+    let value = line.strip
+    case hostOS
+    of "macosx":
+      if value.len > 0:
+        result.add value
+    of "linux":
+      if value == "global:":
+        inGlobalSection = true
+      elif value == "local:":
+        inGlobalSection = false
+      elif inGlobalSection and value.endsWith(";"):
+        let name = value[0 ..< value.high].strip
+        if name.len > 0:
+          result.add name
 
 proc verifyExports() =
   let
-    (output, exitCode) = gorgeEx(quoteShellCommand(["/usr/bin/nm", "-gU", library]))
-    expected = readFile(exportList).strip.splitLines
+    command = case hostOS
+      of "macosx": @["/usr/bin/nm", "-gU", library]
+      of "linux": @["nm", "-D", "--defined-only", library]
+      else: raise newException(ValueError,
+        "native dynamic libraries currently support macOS and Linux")
+    (output, exitCode) = gorgeEx(quoteShellCommand(command))
+    expected = expectedExportNames()
   if exitCode != 0:
-    raise newException(OSError, "nm failed for the generated dylib:\n" & output)
+    raise newException(OSError,
+      "nm failed for the generated dynamic library:\n" & output)
   var actual: seq[string]
   for line in output.splitLines:
     let fields = line.splitWhitespace
@@ -103,13 +136,15 @@ proc verifyExports() =
   sortedExpected.sort()
   if actual != sortedExpected:
     raise newException(OSError,
-      "dylib exports do not match the BIF-derived export list")
+      "dynamic library exports do not match the BIF-derived export list")
 
 proc buildProducer() =
   buildNativeDynlibTool()
   compileProducerBackend()
   runCommand([toolBinary, "root", producerCache, producerSource, exportList])
   compileProducerBackend()
+  if hostOS == "linux":
+    runCommand([toolBinary, "pic", producerCache, nimLibDir, exampleDir])
   archiveProducerObjects()
   runCommand([toolBinary, "promote", privateArchive, publicArchive, exportList])
   runCommand([toolBinary, "link", publicArchive, library, exportList])

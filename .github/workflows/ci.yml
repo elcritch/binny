@@ -39,6 +39,15 @@ jobs:
       - name: Test native binding generation
         run: nim c -r tests/tnative_dynlib.nim
 
+      - name: Test native static library
+        run: nim c -r tests/tnative_staticlib.nim
+
+      - name: Run native dynlib example
+        working-directory: examples/nim_native_dynlib
+        run: |
+          nim e2e
+          ./consumer
+
   native-dynlib:
     runs-on: macos-latest
 

@@ -21,11 +21,17 @@ proc run(arguments: openArray[string]): string =
 
 proc supportsStaticLibExperiment(compiler: string): bool =
   let help = execCmdEx(compiler.quoteShell & " --fullhelp")
-  result = defined(macosx) and help.exitCode == 0 and
+  result = (defined(macosx) or defined(linux)) and help.exitCode == 0 and
     "--genBif:on|off" in help.output and
     fileExists(compiler.parentDir / "nifler")
 
-when defined(macosx):
+proc elfSymbolHasVisibility(output, symbol, visibility: string): bool =
+  for line in output.splitLines:
+    let fields = line.splitWhitespace
+    if fields.len >= 8 and fields[^1] == symbol and visibility in fields:
+      return true
+
+when defined(macosx) or defined(linux):
   let compiler = getCurrentCompilerExe()
   if compiler.supportsStaticLibExperiment:
     block public_bif_procs_become_dylib_exports:
@@ -37,7 +43,10 @@ when defined(macosx):
         privateArchive = temporary / "libproducer.private.a"
         publicArchive = temporary / "libproducer.a"
         exportList = temporary / "libproducer.exports"
-        dylib = temporary / "libproducer.dylib"
+        dylib = when defined(macosx):
+          temporary / "libproducer.dylib"
+        else:
+          temporary / "libproducer.so"
         bindings = temporary / "producer_abi.nim"
         consumer = temporary / "consumer.nim"
         consumerBinary = temporary / "consumer"
@@ -91,27 +100,49 @@ proc privateAdd(left, right: int): int {.noinline.} =
       doAssert exports[1].nifSymbol.startsWith("publicAnswer.")
       doAssert exports[0].cSymbol.len > 0
       doAssert exports[1].cSymbol.len > 0
-      writeDarwinExportList(exportList, exports)
+      writeNativeExportList(exportList, exports)
 
       discard run(compileArguments)
+      when defined(linux):
+        compileElfPicObjects(cache, [
+          compiler.parentDir.parentDir / "lib", temporary,
+        ])
 
-      var archiveArguments = @["/usr/bin/libtool", "-static", "-o", privateArchive]
+      var archiveArguments = when defined(macosx):
+        @["/usr/bin/libtool", "-static", "-o", privateArchive]
+      else:
+        @["ar", "-rcs", privateArchive]
       for path in walkFiles(cache / "*.o"):
         archiveArguments.add path
-      doAssert archiveArguments.len > 4
+      when defined(macosx):
+        doAssert archiveArguments.len > 4
+      else:
+        doAssert archiveArguments.len > 3
       discard run(archiveArguments)
 
-      promoteMachOArchive(privateArchive, publicArchive, exports)
-      linkMachODylib(publicArchive, dylib, exportList)
+      promoteNativeArchive(privateArchive, publicArchive, exports)
+      linkNativeDynlib(publicArchive, dylib, exportList)
 
-      let
-        privateSymbols = run(["/usr/bin/nm", "-m", privateArchive])
-        publicSymbols = run(["/usr/bin/nm", "-m", publicArchive])
-        dylibSymbols = run(["/usr/bin/nm", "-gU", dylib])
-      for symbol in exports:
-        doAssert "private external _" & symbol.cSymbol in privateSymbols
-        doAssert "external _" & symbol.cSymbol in publicSymbols
-        doAssert "_" & symbol.cSymbol in dylibSymbols
+      when defined(macosx):
+        let
+          privateSymbols = run(["/usr/bin/nm", "-m", privateArchive])
+          publicSymbols = run(["/usr/bin/nm", "-m", publicArchive])
+          dylibSymbols = run(["/usr/bin/nm", "-gU", dylib])
+        for symbol in exports:
+          doAssert "private external _" & symbol.cSymbol in privateSymbols
+          doAssert "external _" & symbol.cSymbol in publicSymbols
+          doAssert "_" & symbol.cSymbol in dylibSymbols
+      else:
+        let
+          privateSymbols = run(["readelf", "-Ws", privateArchive])
+          publicSymbols = run(["readelf", "-Ws", publicArchive])
+          dylibSymbols = run(["nm", "-D", "--defined-only", dylib])
+        for symbol in exports:
+          doAssert privateSymbols.elfSymbolHasVisibility(
+            symbol.cSymbol, "HIDDEN")
+          doAssert publicSymbols.elfSymbolHasVisibility(
+            symbol.cSymbol, "DEFAULT")
+          doAssert symbol.cSymbol in dylibSymbols
       doAssert "privateAdd" notin dylibSymbols
 
       let library = loadLib(dylib)
