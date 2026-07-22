@@ -7,13 +7,14 @@ Build native Nim dynamic libraries and strongly typed Nim bindings from compiler
 Binny turns ordinary public Nim routines (`proc name*`) into a filtered native dynamic-library API. It reads semantic BIF to identify the public surface, matches those declarations to their exact backend symbols, and reconstructs the Nim types and ownership hooks needed by consumers.
 
 The native-library workflow is experimental. The no-pragma archive promotion
-supports 64-bit Mach-O on macOS and little-endian ELF64 on Linux and FreeBSD.
+supports 64-bit Mach-O on macOS and little-endian ELF64 on Linux and FreeBSD. Windows should be possible, but I don't have a Windows Machine.
+
 It requires a Nim devel compiler with `--genBif`, `nim ic`, and `nifler`.
 
 ## Why try it?
 
 - Keep Nim's `*` marker as the source of truth for the public API.
-- Export native Nim routines without `exportc`, `exportabi`, or producer
+- Export native Nim routines without `exportc` or producer
   wrappers.
 - Preserve objects, refs, inheritance, case objects, containers, and custom
   ownership hooks in generated bindings.
