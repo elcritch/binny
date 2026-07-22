@@ -1,16 +1,16 @@
 import std/os
 import binny/native_dynlib
 
-if paramCount() notin {4, 5}:
-  quit "usage: generate NIMCACHE SOURCE MANIFEST OUTPUT [LIBRARY]"
+if paramCount() != 5:
+  quit "usage: generate NIMCACHE SOURCE_ROOT SOURCE OUTPUT LIBRARY"
 
 let
   nimcacheDir = paramStr(1)
-  sourcePath = paramStr(2)
-  manifestPath = paramStr(3)
+  sourceRoot = paramStr(2)
+  sourcePath = paramStr(3)
   outputPath = paramStr(4)
-  libraryOverride = if paramCount() == 5: paramStr(5) else: ""
-  config = initNativeBindingsConfig(
-    sourcePath, manifestPath, nimcacheDir, libraryOverride)
+  libraryName = paramStr(5)
+  config = initBifNativeBindingsConfig(
+    sourcePath, nimcacheDir, libraryName, sourceRoot)
 
 discard config.writeNativeBindings(outputPath)

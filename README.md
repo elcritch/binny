@@ -14,9 +14,10 @@ emits compile-time size, alignment, and field-offset checks.
 The newer `binny/native_dynlib/staticlib` experiment instead starts with
 ordinary public Nim procedures and `--genBif`. It matches BIF declarations to
 the incremental backend's exact symbols, keeps those procedures alive, promotes
-their visibility in a Mach-O static archive, and links a filtered dylib without
+their visibility in a Mach-O static archive, links a filtered dylib, and
+reconstructs its consumer bindings from BIF and `.c.nif`. It needs no `.abi.nif`,
 `exportc`, `exportabi`, or producer wrappers. See `examples/nim_native_dynlib`
-for the runnable build.
+for the runnable end-to-end build.
 
 ## Native dynamic-library bindings
 

@@ -93,6 +93,10 @@ proc typeNames(api: NativeApi): Table[string, string] =
       let rendered = typ.name & "[" & arguments.join(", ") & "]"
       result[typ.nifSymbol] = rendered
       result[typ.typeId] = rendered
+    elif typ.kind == ntOpenArray:
+      let rendered = "openArray[" & nimType(typ.elementTypeSymbol, result) & "]"
+      result[typ.nifSymbol] = rendered
+      result[typ.typeId] = rendered
 
 proc nimType(symbol: string, names: Table[string, string]): string =
   if symbol.len == 0:
@@ -301,7 +305,9 @@ proc generateTuple(
       nimType(part.field.typeSymbol, names) & "\n"
 
 proc generateTypes(api: NativeApi, names: Table[string, string]): string =
-  let types = api.types.filterIt(not it.isBuiltinType and it.kind != ntImportedGeneric)
+  let types = api.types.filterIt(
+    not it.isBuiltinType and it.kind notin {ntImportedGeneric, ntOpenArray}
+  )
   if types.len == 0:
     return
   result.add "type\n"
@@ -369,6 +375,10 @@ proc generateTypes(api: NativeApi, names: Table[string, string]): string =
       result.add generateTuple(typ.record, names)
       result.add "\n"
       continue
+    of ntOpenArray:
+      raise newException(
+        NativeArtifactError, "open arrays are not standalone type declarations"
+      )
     of ntRange:
       raise newException(
         NativeArtifactError, "unsupported named native ABI range: " & typ.name
@@ -407,7 +417,9 @@ proc generateFieldChecks(
         result.add generateFieldChecks(typeName, branch.record, indent)
 
 proc generateLayoutChecks(api: NativeApi, names: Table[string, string]): string =
-  let types = api.types.filterIt(not it.isBuiltinType)
+  let types = api.types.filterIt(
+    not it.isBuiltinType and it.kind != ntOpenArray
+  )
   if types.len == 0:
     return
   result.add "static:\n"
@@ -428,17 +440,19 @@ proc generateLayoutChecks(api: NativeApi, names: Table[string, string]): string 
 proc params(procInfo: NativeProc, names: Table[string, string]): string =
   var parts: seq[string] = @[]
   let hasHiddenLengths = procInfo.params.anyIt(it.hiddenLengthCount > 0)
-  let mangledTypes =
-    if hasHiddenLengths:
-      mangledParameterTypes(procInfo.cSymbol)
-    else:
-      @[]
-  if hasHiddenLengths and mangledTypes.len != procInfo.params.len:
-    raise newException(
-      NativeArtifactError,
-      "native ABI symbol parameter count does not match its manifest: " &
-        procInfo.cSymbol,
-    )
+  var mangledTypes: seq[MangledType]
+  let needsMangledTypes = hasHiddenLengths and procInfo.params.anyIt(
+    it.hiddenLengthCount > 0 and
+      (it.typeSymbol notin names or not names[it.typeSymbol].startsWith("openArray["))
+  )
+  if needsMangledTypes:
+    mangledTypes = mangledParameterTypes(procInfo.cSymbol)
+    if mangledTypes.len != procInfo.params.len:
+      raise newException(
+        NativeArtifactError,
+        "native ABI symbol parameter count does not match its manifest: " &
+          procInfo.cSymbol,
+      )
   for index, param in procInfo.params:
     if param.hiddenLengthCount > 0:
       if param.hiddenLengthCount != 1:
@@ -446,7 +460,15 @@ proc params(procInfo: NativeProc, names: Table[string, string]): string =
           NativeArtifactError,
           "native ABI parameter has an unsupported hidden length count: " & param.name,
         )
-      let logicalType = renderMangledType(mangledTypes[index], names)
+      let semanticType =
+        if param.typeSymbol in names: names[param.typeSymbol]
+        else: ""
+      let logicalType =
+        if semanticType.startsWith("openArray[") or
+            semanticType.startsWith("varargs["):
+          semanticType
+        else:
+          renderMangledType(mangledTypes[index], names)
       if not logicalType.startsWith("openArray[") and
           not logicalType.startsWith("varargs["):
         raise newException(

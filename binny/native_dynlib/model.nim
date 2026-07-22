@@ -15,6 +15,7 @@ type
     ntSequence
     ntSet
     ntTuple
+    ntOpenArray
     ntRange
     ntImportedGeneric
 

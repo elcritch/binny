@@ -30,9 +30,17 @@ let
   nimcacheDir = path(exampleDir, "nimcache")
   producerCache = path(nimcacheDir, "producer")
   toolCache = path(nimcacheDir, "tool")
+  generatorCache = path(nimcacheDir, "generator")
+  consumerCache = path(nimcacheDir, "consumer")
+  generatedDir = path(exampleDir, "generated")
   producerSource = path(exampleDir, "producer.nim")
+  consumerSource = path(exampleDir, "consumer.nim")
+  generatorSource = path(exampleDir, "generate.nim")
   toolSource = path(projectDir, "tools/native_dynlib.nim")
   toolBinary = path(toolCache, "native_dynlib")
+  generatorBinary = path(generatorCache, "generate")
+  consumerBinary = path(consumerCache, "consumer")
+  bindings = path(generatedDir, "producer_abi.nim")
   backendOutput = path(producerCache, "producer-backend")
   privateArchive = path(nimcacheDir, "libproducer.private.a")
   publicArchive = path(nimcacheDir, "libproducer.a")
@@ -108,14 +116,64 @@ proc buildProducer() =
   verifyExports()
   producerArtifactsExist()
 
+proc generateBindings() =
+  producerArtifactsExist()
+  runNim([
+    "c", "-d:release", "--hints:off", "--path:" & projectDir,
+    "--nimcache:" & generatorCache, "--out:" & generatorBinary,
+    generatorSource
+  ])
+  runCommand([
+    generatorBinary, producerCache, exampleDir, producerSource, bindings,
+    library
+  ])
+
+proc buildConsumer() =
+  if not fileExists(bindings):
+    raise newException(IOError,
+      "generated bindings are missing; run `nim bindings` first")
+  runNim([
+    "c", "--mm:orc", "-d:useMalloc", "--nimcache:" & consumerCache,
+    "--out:" & consumerBinary, consumerSource
+  ])
+
+proc runConsumer() =
+  runCommand([consumerBinary])
+
+proc checkMoveOnlyBinding() =
+  let command = quoteShellCommand([
+    compiler, "c", "--hints:off", "--warnings:off", "--mm:orc",
+    "-d:useMalloc", "--nimcache:" & consumerCache,
+    "--out:" & path(consumerCache, "consumer_copy_should_fail"),
+    path(exampleDir, "consumer_copy_should_fail.nim")
+  ])
+  let (_, exitCode) = gorgeEx(command)
+  if exitCode == 0:
+    raise newException(OSError,
+      "copying a generated move-only binding unexpectedly compiled")
+
 task producer, "Build a native-ABI dylib from ordinary public Nim procs":
   buildProducer()
 
-task build, "Build the promoted static archive and dynamic library":
+task bindings, "Generate consumer bindings from BIF and C NIF":
   buildProducer()
+  generateBindings()
 
-task nativeDynlibTest, "Build and verify the BIF-derived dylib export surface":
+task consumer, "Build the library and run its generated Nim consumer":
   buildProducer()
+  generateBindings()
+  buildConsumer()
+  runConsumer()
+
+task build, "Build the promoted library and generated consumer":
+  buildProducer()
+  generateBindings()
+  buildConsumer()
+
+task nativeDynlibTest, "Build and run the BIF-derived native dynlib example":
+  buildTask()
+  runConsumer()
+  checkMoveOnlyBinding()
 
 task e2e, "Alias for the native dynamic-library test":
   nativeDynlibTestTask()

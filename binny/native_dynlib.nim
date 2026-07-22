@@ -12,6 +12,8 @@ type
     manifestPath*: string
     nimcacheDir*: string
     libraryOverride*: string
+    sourceRoot*: string
+    bifDerived*: bool
 
 proc initNativeBindingsConfig*(sourcePath, manifestPath: string;
     nimcacheDir = ""; libraryOverride = ""): NativeBindingsConfig =
@@ -30,16 +32,37 @@ proc initNativeBindingsConfig*(sourcePath, manifestPath: string;
     if result.nimcacheDir.len == 0:
       result.nimcacheDir = "."
 
+proc initBifNativeBindingsConfig*(sourcePath, nimcacheDir,
+    libraryName: string; sourceRoot = ""): NativeBindingsConfig =
+  ## Creates configuration for bindings reconstructed from BIF and C NIF.
+  result.sourcePath = sourcePath
+  result.nimcacheDir = nimcacheDir
+  result.libraryOverride = libraryName
+  result.bifDerived = true
+  if sourceRoot.len > 0:
+    result.sourceRoot = sourceRoot
+  else:
+    result.sourceRoot = sourcePath.parentDir
+    if result.sourceRoot.len == 0:
+      result.sourceRoot = "."
+
 proc generateNativeBindings*(config: NativeBindingsConfig): string =
-  ## Returns a Nim module that binds the ABI exports described by ``manifestPath``.
+  ## Returns a Nim module for either manifest or BIF-derived native exports.
   ##
-  ## ``nimcacheDir`` must contain the semantic BIF files produced alongside the
-  ## library with ``--emitBif:on``. ``sourcePath`` identifies the library's root
-  ## Nim module. Relative input paths are resolved against the caller's current
-  ## directory.
-  let
-    bifPath = findSemanticBif(config.nimcacheDir, config.sourcePath)
-    api = readNativeApi(bifPath, config.manifestPath)
+  ## ``nimcacheDir`` must contain the matching semantic BIF. BIF-derived mode
+  ## also reads incremental ``.c.nif`` definitions for exact import names.
+  ## ``sourcePath`` identifies the library's root Nim module.
+  let api =
+    if config.bifDerived:
+      readBifNativeApi(
+        config.nimcacheDir,
+        config.sourceRoot,
+        config.sourcePath,
+        config.libraryOverride,
+      )
+    else:
+      let bifPath = findSemanticBif(config.nimcacheDir, config.sourcePath)
+      readNativeApi(bifPath, config.manifestPath)
   result = generateNativeModule(api, config.libraryOverride)
 
 proc generateNativeBindings*(nimcacheDir, sourcePath, manifestPath: string;

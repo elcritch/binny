@@ -16,6 +16,14 @@ type
     nifSymbol*: string
     cSymbol*: string
 
+  NativeHookSymbol* = object
+    sourcePath*: string
+    typeSymbol*: string
+    hookKind*: string
+    nifSymbol*: string
+    cSymbol*: string
+    forbidden*: bool
+
   CDefinition = object
     nifSymbol: string
     cSymbol: string
@@ -23,6 +31,7 @@ type
 
 const
   routineKinds = ["proc", "func", "method", "converter"]
+  hookKinds = ["=destroy", "=copy", "=dup", "=sink", "=trace", "=wasMoved"]
   machMagic64 = 0xfeedfacf'u32
   loadCommandSymtab = 0x2'u32
   machHeader64Size = 32
@@ -76,6 +85,64 @@ proc isRoutineDeclaration(declaration: Cursor): bool =
         return true
     children.skip
 
+proc isSourceRoutineDeclaration(declaration: Cursor): bool =
+  if not declaration.isRoutineDeclaration:
+    return false
+  var children = declaration.childCursor()
+  while children.hasMore:
+    if children.kind == TagLit and children.tagName in routineKinds and
+        not children.findChildTag("ht").cursorIsNil:
+      return true
+    children.skip
+
+proc declarationTypeSymbol(declaration: Cursor): string =
+  let typeDesc = declaration.findChildTag("td")
+  if not typeDesc.cursorIsNil:
+    let typeId = typeDesc.findChildKind(SymbolDef)
+    if not typeId.cursorIsNil:
+      result = typeId.symName
+
+func symbolBase(symbol: string): string =
+  let separator = symbol.find('.')
+  if separator < 0:
+    result = symbol
+  else:
+    result = symbol[0 ..< separator]
+
+proc hasDescendantIdent(node: Cursor, name: string): bool =
+  if node.kind != TagLit:
+    return false
+  var children = node.childCursor()
+  while children.hasMore:
+    if children.kind == Ident and children.strVal == name:
+      return true
+    if children.kind == TagLit and children.hasDescendantIdent(name):
+      return true
+    children.skip
+
+proc firstParameterType(declaration: Cursor): string =
+  let formals = declaration.findDescendantTag("formalparams")
+  if formals.cursorIsNil:
+    return
+  var children = formals.childCursor()
+  while children.hasMore:
+    if children.kind == TagLit and children.tagName == "sd" and
+        not children.findChildTag("param").cursorIsNil:
+      let typeDesc = children.findChildTag("td")
+      if not typeDesc.cursorIsNil:
+        let typeId = typeDesc.findChildKind(SymbolDef)
+        if not typeId.cursorIsNil:
+          result = typeId.symName
+          if result.startsWith("`t23."):
+            let element = typeDesc.findLastChildKind(Symbol)
+            if not element.cursorIsNil:
+              result = element.symName
+          return
+      let typeSymbol = children.findChildKind(Symbol)
+      if not typeSymbol.cursorIsNil:
+        return typeSymbol.symName
+    children.skip
+
 proc publicRoutineSymbols*(nimcacheDir, sourceRoot: string): seq[NativeExportSymbol] =
   ## Returns public, runtime routine declarations owned by application modules.
   ##
@@ -101,6 +168,45 @@ proc publicRoutineSymbols*(nimcacheDir, sourceRoot: string): seq[NativeExportSym
       if visibility == ivExported and semanticModule(name) == moduleSuffix and
           declaration.isRoutineDeclaration:
         result.add NativeExportSymbol(sourcePath: absoluteSource, nifSymbol: name)
+
+proc nativeHookSymbols*(nimcacheDir, sourceRoot: string): seq[NativeHookSymbol] =
+  ## Returns custom and forbidden ownership hooks belonging to public app types.
+  let root = normalizedAbsolutePath(sourceRoot)
+  var paths: seq[string]
+  for path in walkFiles(nimcacheDir / "*.s.bif"):
+    paths.add path
+  paths.sort()
+
+  for path in paths:
+    var module = bif.load(path)
+    let source = module.readModuleSource()
+    if source.len == 0:
+      continue
+    let absoluteSource = normalizedAbsolutePath(source)
+    if not pathIsWithin(absoluteSource, root):
+      continue
+
+    let moduleSuffix = bifModuleSuffix(path)
+    var publicTypes = initHashSet[string]()
+    for name, visibility, declaration in module.declarations:
+      if visibility == ivExported and semanticModule(name) == moduleSuffix and
+          not declaration.findChildTag("type").cursorIsNil:
+        let typeSymbol = declaration.declarationTypeSymbol()
+        if typeSymbol.len > 0:
+          publicTypes.incl typeSymbol
+
+    for name, visibility, declaration in module.declarations:
+      if visibility == ivHidden and semanticModule(name) == moduleSuffix and
+          name.symbolBase in hookKinds and declaration.isSourceRoutineDeclaration:
+        let typeSymbol = declaration.firstParameterType()
+        if typeSymbol in publicTypes:
+          result.add NativeHookSymbol(
+            sourcePath: absoluteSource,
+            typeSymbol: typeSymbol,
+            hookKind: name.symbolBase,
+            nifSymbol: name,
+            forbidden: declaration.hasDescendantIdent("error"),
+          )
 
 proc readCDefinitions(path: string): seq[CDefinition] =
   var artifact = nifcoreparse.parseFromFile(path)
@@ -154,17 +260,67 @@ proc replaceDefinitionFlags(content: var string; definition: CDefinition): bool 
   content[position ..< position + oldPrefix.len] = newPrefix
   result = true
 
+proc resolveNativeSymbols*(nimcacheDir: string;
+    symbols: openArray[NativeExportSymbol]): seq[NativeExportSymbol] =
+  ## Matches semantic routines to their exact incremental-backend C names.
+  result = @symbols
+  var indexes = initTable[string, int]()
+  for index, symbol in result:
+    indexes[symbol.nifSymbol] = index
+
+  var matched = initHashSet[string]()
+  for path in walkFiles(nimcacheDir / "*.c.nif"):
+    for definition in readCDefinitions(path):
+      if definition.nifSymbol in indexes:
+        let index = indexes[definition.nifSymbol]
+        if result[index].cSymbol.len == 0:
+          result[index].cSymbol = definition.cSymbol
+        elif result[index].cSymbol != definition.cSymbol:
+          fail("one semantic routine has multiple backend names: " &
+            definition.nifSymbol)
+        matched.incl definition.nifSymbol
+
+  var missing: seq[string]
+  for symbol in result:
+    if symbol.nifSymbol notin matched:
+      missing.add symbol.nifSymbol
+  if missing.len > 0:
+    missing.sort()
+    fail("native routines have no backend definitions:\n  " & missing.join("\n  "))
+
+proc resolveNativeHooks*(nimcacheDir: string;
+    hooks: openArray[NativeHookSymbol]): seq[NativeHookSymbol] =
+  ## Adds exact backend names to custom hooks; forbidden hooks have no definition.
+  result = @hooks
+  var unresolved: seq[NativeExportSymbol]
+  var indexes: seq[int]
+  for index, hook in result:
+    if not hook.forbidden:
+      indexes.add index
+      unresolved.add NativeExportSymbol(
+        sourcePath: hook.sourcePath,
+        nifSymbol: hook.nifSymbol,
+      )
+  let resolved = resolveNativeSymbols(nimcacheDir, unresolved)
+  for index, symbol in resolved:
+    result[indexes[index]].cSymbol = symbol.cSymbol
+
 proc rootPublicRoutines*(nimcacheDir, sourceRoot, mainSource: string): seq[NativeExportSymbol] =
-  ## Marks application-public routines as roots in the incremental C artifacts.
+  ## Roots public app routines and ownership hooks required by public types.
   ##
   ## Run this after the first ``nim ic`` backend pass. Running ``nim ic`` again
   ## then recomputes DCE and emits the public routines plus their dependencies.
   var exports = publicRoutineSymbols(nimcacheDir, sourceRoot)
+  for hook in nativeHookSymbols(nimcacheDir, sourceRoot):
+    if not hook.forbidden:
+      exports.add NativeExportSymbol(
+        sourcePath: hook.sourcePath,
+        nifSymbol: hook.nifSymbol,
+      )
   var indexes = initTable[string, int]()
   for index, symbol in exports:
     indexes[symbol.nifSymbol] = index
 
-  var matched = initHashSet[string]()
   type Artifact = object
     path: string
     definitions: seq[CDefinition]
@@ -197,20 +353,12 @@ proc rootPublicRoutines*(nimcacheDir, sourceRoot, mainSource: string): seq[Nativ
         elif exports[index].cSymbol != definition.cSymbol:
           fail("one semantic routine has multiple backend names: " &
             definition.nifSymbol)
-        matched.incl definition.nifSymbol
         if 'x' notin definition.flags:
           changed = content.replaceDefinitionFlags(definition) or changed
     if changed:
       writeFile(artifact.path, content)
 
-  var missing: seq[string]
-  for symbol in exports:
-    if symbol.nifSymbol notin matched:
-      missing.add symbol.nifSymbol
-  if missing.len > 0:
-    missing.sort()
-    fail("public routines have no backend definitions:\n  " & missing.join("\n  "))
-  result = exports
+  result = resolveNativeSymbols(nimcacheDir, exports)
 
 proc writeDarwinExportList*(path: string; symbols: openArray[NativeExportSymbol]) =
   ## Writes an ld ``-exported_symbols_list`` including the Nim runtime entry.

@@ -1,6 +1,7 @@
-import std/[os, strutils, tables]
+import std/[algorithm, os, strutils, tables]
 import ./nif/[bif, nifcoreparse, nifqueries]
 import model
+import staticlib
 
 type
   NativeBifError* = object of ValueError
@@ -16,6 +17,7 @@ type
     callConv: string
     closureEnv: bool
     varargs: bool
+    semanticOnly: bool
     params: seq[NativeParam]
 
   AbiHookEntry = object
@@ -46,6 +48,8 @@ type
     types: seq[AbiTypeEntry]
     hooks: seq[AbiHookEntry]
     procs: seq[AbiProcEntry]
+    bifDerived: bool
+    applicationModules: seq[string]
 
   AbiTypeEntry = object
     typeSymbol: string
@@ -521,6 +525,330 @@ func symbolModule(symbol: string): string =
   else:
     symbol[dot + 1 .. ^1]
 
+func typeOrdinal(symbol: string): int =
+  if not symbol.startsWith("`t"):
+    return -1
+  let separator = symbol.find('.', 2)
+  if separator < 0 or separator == 2:
+    return -1
+  for character in symbol[2 ..< separator]:
+    if character notin {'0'..'9'}:
+      return -1
+  result = parseInt(symbol[2 ..< separator])
+
+func bifLayoutKind(symbol: string): string =
+  # The number after ``t`` is Nim's ``TTypeKind`` ordinal in semantic BIF.
+  case symbol.typeOrdinal
+  of 1: "bool"
+  of 2: "char"
+  of 9: "genericinvocation"
+  of 10: "genericbody"
+  of 11: "genericinstance"
+  of 13: "distinct"
+  of 14: "enum"
+  of 16: "array"
+  of 17: "object"
+  of 18: "tuple"
+  of 19: "set"
+  of 20: "range"
+  of 21: "pointer"
+  of 22: "ref"
+  of 23: "var"
+  of 24: "sequence"
+  of 26: "pointer"
+  of 27: "openarray"
+  of 28: "string"
+  of 29: "cstring"
+  of 31: "int"
+  of 32: "int8"
+  of 33: "int16"
+  of 34: "int32"
+  of 35: "int64"
+  of 36: "float"
+  of 37: "float32"
+  of 38: "float64"
+  of 40: "uint"
+  of 41: "uint8"
+  of 42: "uint16"
+  of 43: "uint32"
+  of 44: "uint64"
+  else: ""
+
+func fieldName(symbol: string): string =
+  result = symbolBase(symbol)
+  let suffix = result.find("`f")
+  if suffix >= 0:
+    result.setLen(suffix)
+
+proc bifField(node: Cursor): NativeField =
+  var children = node.childCursor()
+  if children.hasMore and children.kind == SymbolDef:
+    result.name = children.symName.fieldName
+    children.skip
+
+  var sawMarker = false
+  var sawFlags = false
+  var integerIndex = 0
+  while children.hasMore:
+    case children.kind
+    of TagLit:
+      if children.tagName == "field":
+        sawMarker = true
+      elif children.tagName == "td" and result.typeSymbol.len == 0:
+        let typeId = children.findChildKind(SymbolDef)
+        if not typeId.cursorIsNil:
+          result.typeSymbol = typeId.symName
+    of Ident, Symbol:
+      let value =
+        if children.kind == Ident: children.strVal
+        else: children.symName
+      if sawMarker and not sawFlags:
+        sawFlags = true
+        result.exported = 'e' in value
+        result.discriminant = 'd' in value
+      elif sawMarker and result.typeSymbol.len == 0 and value.startsWith("`t"):
+        result.typeSymbol = value
+    of IntLit:
+      if sawFlags:
+        if integerIndex == 0:
+          result.offset = children.intVal
+        inc integerIndex
+    else:
+      discard
+    children.skip
+  result.size = -1
+  result.alignment = -1
+
+proc bifRecord(node: Cursor): seq[NativeRecordPart]
+
+proc bifBranch(node: Cursor): NativeBranch =
+  result.index = -1
+  result.isElse = node.tagName == "else"
+  var children = node.childCursor()
+  while children.hasMore:
+    if children.kind == TagLit:
+      case children.tagName
+      of "intlit":
+        var selector = children.childCursor()
+        while selector.hasMore:
+          if selector.kind == IntLit:
+            result.selectors.add $selector.intVal
+            break
+          selector.skip
+      of "reclist":
+        result.record = bifRecord(children)
+      else:
+        discard
+    children.skip
+
+proc bifRecord(node: Cursor): seq[NativeRecordPart] =
+  var children = node.childCursor()
+  while children.hasMore:
+    if children.kind == TagLit:
+      case children.tagName
+      of "sd":
+        if not children.findChildTag("field").cursorIsNil:
+          result.add NativeRecordPart(kind: nrField, field: bifField(children))
+      of "reccase":
+        var recordCase = NativeRecordPart(kind: nrCase)
+        var fields = children.childCursor()
+        while fields.hasMore:
+          if fields.kind == TagLit:
+            if fields.tagName == "sd" and
+                not fields.findChildTag("field").cursorIsNil:
+              recordCase.discriminant = bifField(fields)
+              recordCase.discriminant.discriminant = true
+            elif fields.tagName in ["of", "else"]:
+              recordCase.branches.add bifBranch(fields)
+          fields.skip
+        if recordCase.discriminant.name.len > 0:
+          result.add recordCase
+      else:
+        discard
+    children.skip
+
+proc bifEnum(node: Cursor): seq[NativeEnumValue] =
+  var children = node.childCursor()
+  while children.hasMore:
+    if children.kind == TagLit and children.tagName == "sd" and
+        not children.findChildTag("enumfield").cursorIsNil:
+      var value = NativeEnumValue(ordinal: -1)
+      var fields = children.childCursor()
+      var sawMarker = false
+      var hasOrdinal = false
+      var integerIndex = 0
+      while fields.hasMore:
+        case fields.kind
+        of SymbolDef:
+          value.name = symbolBase(fields.symName)
+        of TagLit:
+          if fields.tagName == "enumfield":
+            sawMarker = true
+        of IntLit:
+          if sawMarker:
+            if integerIndex == 1:
+              value.ordinal = fields.intVal
+              hasOrdinal = true
+            inc integerIndex
+        else:
+          discard
+        fields.skip
+      if value.name.len > 0 and hasOrdinal:
+        result.add value
+    children.skip
+
+proc bifLayout(node: Cursor): AbiTypeEntry =
+  var children = node.childCursor()
+  if not children.hasMore or children.kind != SymbolDef:
+    return
+  result.typeSymbol = children.symName
+  result.kind = result.typeSymbol.bifLayoutKind
+  result.size = -1
+  result.alignment = -1
+  children.skip
+
+  if children.hasMore:
+    children.skip # definition visibility
+  var flags = ""
+  if children.hasMore:
+    if children.kind in {Ident, Symbol}:
+      flags = if children.kind == Ident: children.strVal else: children.symName
+    children.skip
+  result.inheritable = 'i' in flags
+  result.packed = 'p' in flags
+  result.union = 'q' in flags
+  if children.hasMore:
+    children.skip # calling convention
+  if children.hasMore and children.kind == IntLit:
+    result.size = children.intVal
+    children.skip
+  if children.hasMore and children.kind == IntLit:
+    result.alignment = children.intVal
+    children.skip
+
+  var tailTypes: seq[string]
+  var nestedLayouts: seq[AbiTypeEntry]
+  var sawMetadataString = false
+  while children.hasMore:
+    case children.kind
+    of StrLit:
+      sawMetadataString = true
+    of Symbol:
+      if sawMetadataString and children.symName.startsWith("`t"):
+        tailTypes.add children.symName
+    of TagLit:
+      case children.tagName
+      of "reclist":
+        result.record = bifRecord(children)
+      of "enumty":
+        result.enumValues = bifEnum(children)
+      of "td":
+        let nested = bifLayout(children)
+        if nested.typeSymbol.len > 0:
+          nestedLayouts.add nested
+      else:
+        discard
+    else:
+      discard
+    children.skip
+
+  if result.kind == "genericinstance" and nestedLayouts.len > 0:
+    let actual = nestedLayouts[^1]
+    result.kind = actual.kind
+    result.baseTypeSymbol = actual.baseTypeSymbol
+    result.elementTypeSymbol = actual.elementTypeSymbol
+    result.enumValues = actual.enumValues
+    result.record = actual.record
+    result.inheritable = actual.inheritable
+    result.packed = actual.packed
+    result.union = actual.union
+    if result.size < 0:
+      result.size = actual.size
+    if result.alignment < 0:
+      result.alignment = actual.alignment
+  elif result.kind == "ref" and nestedLayouts.len > 0:
+    result.elementTypeSymbol = nestedLayouts[^1].typeSymbol
+  elif result.kind in ["array", "distinct", "genericbody", "genericinvocation",
+      "openarray", "range", "sequence", "set", "string", "var"]:
+    if tailTypes.len > 0:
+      result.elementTypeSymbol = tailTypes[^1]
+    elif nestedLayouts.len > 0:
+      result.elementTypeSymbol = nestedLayouts[^1].typeSymbol
+  elif result.kind == "object" and tailTypes.len > 0:
+    result.baseTypeSymbol = tailTypes[^1]
+  elif result.kind == "tuple" and result.record.len == 0:
+    for index, typeSymbol in tailTypes:
+      result.record.add NativeRecordPart(
+        kind: nrField,
+        field: NativeField(
+          name: "Field" & $index,
+          typeSymbol: typeSymbol,
+          offset: -1,
+          size: -1,
+          alignment: -1,
+        ),
+      )
+
+proc mergeLayout(layouts: var Table[string, AbiTypeEntry]; layout: AbiTypeEntry) =
+  if layout.typeSymbol.len == 0 or layout.kind.len == 0:
+    return
+  if layout.typeSymbol notin layouts:
+    layouts[layout.typeSymbol] = layout
+    return
+  var merged = layouts[layout.typeSymbol]
+  if merged.size < 0 and layout.size >= 0:
+    merged.size = layout.size
+  if merged.alignment < 0 and layout.alignment >= 0:
+    merged.alignment = layout.alignment
+  if merged.record.len == 0 and layout.record.len > 0:
+    merged.record = layout.record
+  if merged.enumValues.len == 0 and layout.enumValues.len > 0:
+    merged.enumValues = layout.enumValues
+  if merged.baseTypeSymbol.len == 0:
+    merged.baseTypeSymbol = layout.baseTypeSymbol
+  if merged.elementTypeSymbol.len == 0:
+    merged.elementTypeSymbol = layout.elementTypeSymbol
+  merged.inheritable = merged.inheritable or layout.inheritable
+  merged.packed = merged.packed or layout.packed
+  merged.union = merged.union or layout.union
+  layouts[layout.typeSymbol] = merged
+
+proc collectBifLayouts(node: Cursor; layouts: var Table[string, AbiTypeEntry]) =
+  if node.kind != TagLit:
+    return
+  if node.tagName == "td":
+    layouts.mergeLayout(bifLayout(node))
+  var children = node.childCursor()
+  while children.hasMore:
+    if children.kind == TagLit:
+      collectBifLayouts(children, layouts)
+    children.skip
+
+proc resolveRecordSelectors(
+    record: var seq[NativeRecordPart], layouts: Table[string, AbiTypeEntry]
+) =
+  for part in record.mitems:
+    if part.kind == nrCase:
+      let enumSymbol = part.discriminant.typeSymbol
+      for branch in part.branches.mitems:
+        if enumSymbol in layouts:
+          for selector in branch.selectors.mitems:
+            let ordinal = parseInt(selector)
+            for value in layouts[enumSymbol].enumValues:
+              if value.ordinal == ordinal:
+                selector = value.name
+                break
+        resolveRecordSelectors(branch.record, layouts)
+
+proc finalizeLayouts(layouts: var Table[string, AbiTypeEntry]) =
+  for layout in layouts.mvalues:
+    resolveRecordSelectors(layout.record, layouts)
+    for part in layout.record.mitems:
+      if part.kind == nrField and part.field.typeSymbol in layouts:
+        let fieldType = layouts[part.field.typeSymbol]
+        part.field.size = fieldType.size
+        part.field.alignment = fieldType.alignment
+
 proc hasDescendantIdent(node: Cursor, name: string): bool =
   if node.kind != TagLit:
     return false
@@ -812,6 +1140,8 @@ proc typeFromLayout(layout: AbiTypeEntry): NativeType =
     result.kind = ntSet
   of "tuple":
     result.kind = ntTuple
+  of "openarray":
+    result.kind = ntOpenArray
   else:
     fail("unsupported native ABI layout kind: " & layout.kind)
 
@@ -884,7 +1214,10 @@ proc collectStdOrderedTables(
     children.skip
 
 func isMaterializedKind(kind: string): bool =
-  kind in ["object", "enum", "distinct", "array", "sequence", "set", "tuple"]
+  kind in [
+    "object", "enum", "distinct", "array", "sequence", "set", "tuple",
+    "openarray",
+  ]
 
 proc addLayoutDependency(
     layoutSymbol: string,
@@ -973,7 +1306,11 @@ proc shouldSkipReferencedType(
   if symbol.len == 0 or symbol notin layouts:
     return false
   let layout = layouts[symbol]
-  layout.size < 0 or layout.kind in ["genericbody", "genericinvocation"]
+  let usableUnknownLayout =
+    layout.kind == "openarray" or
+      layout.kind == "tuple" and layout.record.len > 0
+  layout.size < 0 and not usableUnknownLayout or
+    layout.kind in ["genericbody", "genericinvocation"]
 
 proc collectReferencedType(
     symbol: string,
@@ -1100,8 +1437,83 @@ func isStdTablesSource(path: string): bool =
   normalized.endsWith("/lib/pure/collections/tables.nim") or
     normalized.endsWith("/lib/std/tables.nim")
 
-proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
-  let manifest = readAbiManifest(manifestPath)
+proc normalizedAbsolutePath(path: string): string =
+  if fileExists(path) or dirExists(path):
+    result = expandFilename(path)
+  else:
+    result = absolutePath(path)
+  normalizePath(result)
+
+proc pathIsWithin(path, root: string): bool =
+  let relative = relativePath(path, root)
+  result = relative != ".." and not relative.startsWith(".." & $DirSep)
+
+func bifIdentity(path: string): string =
+  const suffix = ".s.bif"
+  let name = path.extractFilename
+  if name.endsWith(suffix):
+    result = name[0 ..< name.len - suffix.len]
+
+proc bifAbiManifest(
+    nimcacheDir, sourceRoot, libraryName: string;
+    routines: openArray[NativeExportSymbol];
+    hooks: openArray[NativeHookSymbol]
+): AbiManifest =
+  result.bifDerived = true
+  result.libraryName = libraryName
+  result.initSymbol = "NimMain"
+  result.targetOS = hostOS
+  result.targetCPU = hostCPU
+  result.targetEndian = "littleEndian"
+  result.targetBits = sizeof(int) * 8
+  result.memoryManager = "compiler-matched"
+  result.allocator = "compiler-matched"
+
+  let root = sourceRoot.normalizedAbsolutePath
+  var paths: seq[string]
+  for path in walkFiles(nimcacheDir / "*.s.bif"):
+    paths.add path
+  paths.sort()
+
+  var layouts: Table[string, AbiTypeEntry]
+  for path in paths:
+    let source = readModuleSource(path)
+    if source.len == 0:
+      continue
+    let identity = path.bifIdentity
+    result.modules.add NativeModule(identity: identity, name: source.splitFile.name)
+    if source.normalizedAbsolutePath.pathIsWithin(root):
+      result.applicationModules.add identity
+
+    var module = bif.load(path)
+    for _, _, declaration in module.declarations:
+      collectBifLayouts(declaration, layouts)
+
+  finalizeLayouts(layouts)
+  for layout in layouts.values:
+    result.types.add layout
+  result.types.sort(proc(left, right: AbiTypeEntry): int =
+    cmp(left.typeSymbol, right.typeSymbol)
+  )
+
+  for symbol in routines:
+    result.procs.add AbiProcEntry(
+      nifSymbol: symbol.nifSymbol,
+      cSymbol: symbol.cSymbol,
+      callConv: "nimcall",
+      semanticOnly: true,
+    )
+  for hook in hooks:
+    result.hooks.add AbiHookEntry(
+      typeSymbol: hook.typeSymbol,
+      kind: hook.hookKind,
+      nifSymbol: hook.nifSymbol,
+      cSymbol: hook.cSymbol,
+      status: if hook.forbidden: nhForbidden else: nhCustom,
+    )
+
+proc buildNativeApi(bifPath: string; sourceManifest: AbiManifest): NativeApi =
+  var manifest = sourceManifest
   result.abiId = manifest.abiId
   result.libraryName = manifest.libraryName
   result.compilerVersion = manifest.compilerVersion
@@ -1125,6 +1537,24 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
     layouts[layout.typeSymbol] = layout
 
   var modules = loadAbiModules(bifPath, manifest)
+  if manifest.bifDerived:
+    for item in manifest.procs.mitems:
+      let declaration = findSemanticDeclaration(modules, item.nifSymbol)
+      if declaration.cursorIsNil:
+        fail("semantic declaration not found for " & item.nifSymbol)
+      let semantic = parseNativeProc(declaration, item, applyAbiLowering = false)
+      item.returnTypeSymbol = semantic.returnTypeSymbol
+      item.params = semantic.params
+      item.returnLowering =
+        if semantic.returnTypeSymbol.len == 0: nlVoid else: nlDirect
+      for param in item.params.mitems:
+        if param.typeSymbol in layouts and layouts[param.typeSymbol].kind == "openarray":
+          param.lowering = nlPointer
+          param.hiddenLengthCount = 1
+        elif param.byVar:
+          param.lowering = nlPointer
+        else:
+          param.lowering = nlDirect
   var skipSystemModuleTypeSymbols: Table[string, bool]
   var stdTablesModules: Table[string, bool]
   var manifestTypeSymbols: Table[string, bool]
@@ -1145,10 +1575,19 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
   var skipStdTableObjectTypes: Table[string, bool]
   var unmaterializedTypes: seq[NativeType]
   var preferredTypeAliases: seq[PreferredTypeAlias]
+  var applicationModules: Table[string, bool]
+  for identity in manifest.applicationModules:
+    applicationModules[identity] = true
   for moduleIndex, module in modules.mpairs:
     for nifSymbol, visibility, declaration in module.declarations:
       let moduleId = symbolModule(nifSymbol)
-      if visibility == ivExported or moduleId.len > 0 and not (moduleId in skipSystemModuleTypeSymbols):
+      let inspectDeclaration =
+        if manifest.bifDerived:
+          visibility == ivExported and moduleId in applicationModules
+        else:
+          visibility == ivExported or
+            moduleId.len > 0 and not (moduleId in skipSystemModuleTypeSymbols)
+      if inspectDeclaration:
         if not declaration.findChildTag("type").cursorIsNil and
             not declaration.findChildTag("type0").cursorIsNil:
           collectStdOrderedTables(
@@ -1205,7 +1644,9 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
     let declaration = findSemanticDeclaration(modules, nifSymbol)
     if declaration.cursorIsNil:
       fail("semantic declaration not found for " & nifSymbol)
-    result.procs.add parseNativeProc(declaration, item)
+    result.procs.add parseNativeProc(
+      declaration, item, applyAbiLowering = not item.semanticOnly
+    )
 
   for item in manifest.hooks:
     let declaration = findSemanticDeclaration(modules, item.nifSymbol)
@@ -1291,7 +1732,9 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
       layouts[layout.elementTypeSymbol].kind in ["genericbody", "genericinvocation"]
     let hasMissingTupleFields =
       layout.kind == "tuple" and layout.size > 0 and layout.record.len == 0
-    if layout.typeSymbol notin represented and layout.size >= 0 and
+    if layout.typeSymbol notin represented and
+        (layout.size >= 0 or layout.kind == "openarray" or
+          layout.kind == "tuple" and layout.record.len > 0) and
         layout.kind.isMaterializedKind and
         layout.typeSymbol in requiredTypes and
         not hasUnresolvedElement and not hasMissingTupleFields:
@@ -1312,7 +1755,8 @@ proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
 
   var publicTypes: seq[NativeType]
   for typ in result.types:
-    if typ.kind == ntImportedGeneric or typ.typeId in requiredTypes or typ.nifSymbol in requiredTypes:
+    if typ.kind == ntImportedGeneric or typ.typeId in requiredTypes or
+        typ.nifSymbol in requiredTypes:
       publicTypes.add typ
   result.types = publicTypes
 
@@ -1326,9 +1770,29 @@ proc readModuleSource*(path: string): string =
   cursor.endRead()
 
 proc findSemanticBif*(nimcacheDir, sourcePath: string): string =
-  let expected = normalizedPath(absolutePath(sourcePath))
+  let expected = sourcePath.normalizedAbsolutePath
   for path in walkFiles(nimcacheDir / "*.s.bif"):
     let candidate = readModuleSource(path)
-    if candidate.len > 0 and normalizedPath(absolutePath(candidate)) == expected:
+    if candidate.len > 0 and candidate.normalizedAbsolutePath == expected:
       return path
   raise newException(IOError, "semantic BIF not found for: " & sourcePath)
+
+proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
+  ## Reads the compiler's explicit native-ABI manifest and matching semantic BIF.
+  result = buildNativeApi(bifPath, readAbiManifest(manifestPath))
+
+proc readBifNativeApi*(nimcacheDir, sourceRoot, sourcePath,
+    libraryName: string): NativeApi =
+  ## Reconstructs a native API from semantic BIF and incremental C definitions.
+  let
+    bifPath = findSemanticBif(nimcacheDir, sourcePath)
+    routines = resolveNativeSymbols(
+      nimcacheDir, publicRoutineSymbols(nimcacheDir, sourceRoot)
+    )
+    hooks = resolveNativeHooks(
+      nimcacheDir, nativeHookSymbols(nimcacheDir, sourceRoot)
+    )
+    manifest = bifAbiManifest(
+      nimcacheDir, sourceRoot, libraryName, routines, hooks
+    )
+  result = buildNativeApi(bifPath, manifest)
