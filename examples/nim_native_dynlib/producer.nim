@@ -2,6 +2,8 @@ import std/tables
 import support
 export support
 
+{.pragma: exportabi.}
+
 type
   Vec2* = object
     x*, y*: float32
