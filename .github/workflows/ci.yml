@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Nim devel
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: devel
+          repo-token: ${{ github.token }}
+
+      - name: Show compiler version
+        run: nim --version
+
+      - name: Build aggregate module
+        run: nim c binny.nim
+
+      - name: Run tests
+        run: nim test
+
+  native-dynlib:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Nim devel
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: devel
+          repo-token: ${{ github.token }}
+
+      - name: Show compiler version
+        run: nim --version
+
+      - name: Run native dynlib example
+        working-directory: examples/nim_native_dynlib
+        run: |
+          nim e2e
+          ./consumer
