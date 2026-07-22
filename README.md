@@ -1,25 +1,68 @@
-Binny (Nim) — minimal sframe, elf, and dwarf library for Nim
+# Binny
 
-WIP - see `tests/` and `examples/`.
+Build native Nim dynamic libraries and strongly typed Nim bindings from compiler
+metadata—without C export shims or export pragmas.
 
-The SFrame walker appears to be working on AMD64! The ELF parser appears to work well.
+Binny turns ordinary public Nim routines (`proc name*`) into a filtered native
+dynamic-library API. It reads semantic BIF to identify the public surface,
+matches those declarations to their exact backend symbols, and reconstructs the
+Nim types and ownership hooks needed by consumers.
 
-The DWARF library stuff needs more work.
+The native-library workflow is experimental. The no-pragma archive promotion
+currently targets 64-bit Mach-O on macOS and requires a Nim devel compiler with
+`--genBif`, `nim ic`, and `nifler`.
 
-The experimental `binny/native_dynlib` module generates native Nim bindings
-from semantic BIF and `.abi.nif` artifacts emitted by the corresponding Nim
-compiler branch. It reconstructs objects, inheritance, and case branches, then
-emits compile-time size, alignment, and field-offset checks.
+## Why try it?
 
-The newer `binny/native_dynlib/staticlib` experiment instead starts with
-ordinary public Nim procedures and `--genBif`. It matches BIF declarations to
-the incremental backend's exact symbols, keeps those procedures alive, promotes
-their visibility in a Mach-O static archive, links a filtered dylib, and
-reconstructs its consumer bindings from BIF and `.c.nif`. It needs no `.abi.nif`,
-`exportc`, `exportabi`, or producer wrappers. See `examples/nim_native_dynlib`
-for the runnable end-to-end build.
+- Keep Nim's `*` marker as the source of truth for the public API.
+- Export native Nim routines without `exportc`, `exportabi`, or producer
+  wrappers.
+- Preserve objects, refs, inheritance, case objects, containers, and custom
+  ownership hooks in generated bindings.
+- Export only the BIF-selected procedures and required runtime entry points.
+- Use the original Nim implementations instead of generating forwarding code.
 
-## Native dynamic-library bindings
+## Try the native dynlib example
+
+With Nim devel available as `nim`:
+
+```sh
+cd examples/nim_native_dynlib
+nim e2e
+./consumer
+```
+
+The `e2e` task builds an ordinary Nim producer as a static library, derives its
+public API from BIF, promotes only the selected symbols, links a dylib, generates
+`generated/producer_abi.nim`, and compiles the consumer. The resulting
+`./consumer` remains runnable afterward.
+
+Public producer declarations remain ordinary Nim code:
+
+```nim
+proc message*(): string =
+  "hello from the dynlib"
+
+proc sumNumbers*(numbers: openArray[int]): int =
+  for number in numbers:
+    result += number
+```
+
+Both procedures are included in the generated API because they are public;
+private implementation routines remain hidden. Consumer code imports the
+generated Nim module and calls the producer with ordinary Nim syntax:
+
+```nim
+import generated/producer_abi
+
+echo message()
+```
+
+See [the native dynlib example](examples/nim_native_dynlib/README.md) for the
+artifact layout, symbol inspection command, supported types, and complete build
+sequence.
+
+## Add Binny to a project
 
 Add Binny as an Atlas dependency:
 
@@ -27,21 +70,66 @@ Add Binny as an Atlas dependency:
 requires "https://github.com/elcritch/binny"
 ```
 
-Then resolve dependencies with `atlas install` and generate a binding module:
+Then resolve it:
+
+```sh
+atlas install
+```
+
+After the compiler artifacts and dylib exist, generate BIF-derived consumer
+bindings with:
 
 ```nim
 import binny/native_dynlib
 
-let config = initNativeBindingsConfig(
+let config = initBifNativeBindingsConfig(
   sourcePath = "src/plugin.nim",
-  manifestPath = "build/libplugin.abi.nif",
-  nimcacheDir = "build/nimcache")
+  nimcacheDir = "build/nimcache",
+  libraryName = "libplugin.dylib",
+)
 
 discard config.writeNativeBindings("generated/plugin_abi.nim")
 ```
 
-By default, the generated `dynlib` imports use the library name recorded in the
-ABI manifest, such as `libplugin.so`. The operating-system loader can resolve it
-through the normal install name, rpath, or loader search path, so generated
-bindings are relocatable. Set `libraryOverride` in the configuration only when
-a build needs a specific loader name or path.
+Binny can also generate bindings from the `.abi.nif` manifests produced by Nim
+compiler branches that support them:
+
+```nim
+let config = initNativeBindingsConfig(
+  sourcePath = "src/plugin.nim",
+  manifestPath = "build/libplugin.abi.nif",
+  nimcacheDir = "build/nimcache",
+)
+
+discard config.writeNativeBindings("generated/plugin_abi.nim")
+```
+
+By default, manifest-derived bindings use the library name recorded in the ABI
+manifest. Set `libraryOverride` only when the loader needs a specific name or
+path.
+
+## Other binary tooling
+
+Binny also contains lower-level binary inspection and stack-walking work:
+
+- ELF metadata and symbol parsing.
+- DWARF parsing, call-frame information, line tables, and symbolization. This
+  area is still a work in progress.
+- SFrame types, encoding, decoding, and stack walking, with AMD64 and AArch64
+  test coverage.
+- Nim symbol demangling and tools for converting DWARF unwind data to SFrame.
+
+These modules remain available under `binny/elfparser`, `binny/dwarf`,
+`binny/sframe`, and `binny/demangler`.
+
+## Build and test
+
+Build the aggregate module and run the general test task with:
+
+```sh
+nim c binny.nim
+nim test
+```
+
+The CI uses Nim devel for the general ELF-oriented suite on Linux and the native
+dynamic-library end-to-end workflow on macOS.
