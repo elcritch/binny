@@ -19,12 +19,13 @@ Why this is useful:
 Use a Nim 2.3.1 devel compiler that provides `--genBif`, `nim ic`, and `nifler`:
 
 ```sh
-~/.local/share/grabnim/nim-devel/bin/nim consumer
+~/.local/share/grabnim/nim-devel/bin/nim e2e
+./consumer
 ```
 
-That builds the library, generates `generated/producer_abi.nim`, compiles the
-existing consumer, and runs it. Use `nim e2e` to also verify that the generated
-move-only type cannot be copied.
+That builds the library, generates `generated/producer_abi.nim`, compiles and
+runs the existing consumer, and verifies that the generated move-only type
+cannot be copied. The consumer remains available as `./consumer` afterward.
 
 The tasks build these artifacts:
 
@@ -34,7 +35,7 @@ nimcache/libproducer.private.a   original private-external symbols
 nimcache/libproducer.a           selected symbols promoted
 nimcache/libproducer.exports     exact BIF-derived Mach-O export names
 nimcache/libproducer.dylib       final filtered dynamic library
-nimcache/consumer/consumer       ordinary Nim consumer executable
+consumer                         ordinary Nim consumer executable
 ```
 
 Inspect the result with:

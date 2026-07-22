@@ -39,7 +39,7 @@ let
   toolSource = path(projectDir, "tools/native_dynlib.nim")
   toolBinary = path(toolCache, "native_dynlib")
   generatorBinary = path(generatorCache, "generate")
-  consumerBinary = path(consumerCache, "consumer")
+  consumerBinary = path(exampleDir, "consumer")
   bindings = path(generatedDir, "producer_abi.nim")
   backendOutput = path(producerCache, "producer-backend")
   privateArchive = path(nimcacheDir, "libproducer.private.a")
