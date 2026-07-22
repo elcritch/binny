@@ -84,28 +84,14 @@ import binny/native_dynlib
 let config = initBifNativeBindingsConfig(
   sourcePath = "src/plugin.nim",
   nimcacheDir = "build/nimcache",
-  libraryName = "build/libplugin.so", # Use .dylib on macOS.
+  libraryName = "build/libplugin",
 )
 
 discard config.writeNativeBindings("generated/plugin_abi.nim")
 ```
 
-Binny can also generate bindings from the `.abi.nif` manifests produced by Nim
-compiler branches that support them:
-
-```nim
-let config = initNativeBindingsConfig(
-  sourcePath = "src/plugin.nim",
-  manifestPath = "build/libplugin.abi.nif",
-  nimcacheDir = "build/nimcache",
-)
-
-discard config.writeNativeBindings("generated/plugin_abi.nim")
-```
-
-By default, manifest-derived bindings use the library name recorded in the ABI
-manifest. Set `libraryOverride` only when the loader needs a specific name or
-path.
+When `libraryName` has no extension, Binny appends `.dylib` on macOS or `.so`
+on Linux and FreeBSD.
 
 ## Other binary tooling
 

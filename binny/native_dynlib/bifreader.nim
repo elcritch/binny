@@ -8,16 +8,9 @@ type
 
   AbiProcEntry = object
     nifSymbol: string
-    nimName: string
     cSymbol: string
-    signatureFingerprint: string
-    genericInstance: bool
     returnTypeSymbol: string
     returnLowering: NativeLoweringMode
-    callConv: string
-    closureEnv: bool
-    varargs: bool
-    semanticOnly: bool
     params: seq[NativeParam]
 
   AbiHookEntry = object
@@ -27,28 +20,17 @@ type
     cSymbol: string
     status: NativeHookStatus
 
-  AbiManifest = object
-    formatVersion: int64
-    abiId: string
+  BifModule = object
+    identity: string
+    name: string
+
+  BifNativeDescription = object
     libraryName: string
-    compilerVersion: string
-    compilerApiVersion: int64
-    rodVersion: string
-    targetOS: string
-    targetCPU: string
-    targetEndian: string
-    targetBits: int64
-    memoryManager: string
-    allocator: string
-    exceptionSystem: string
-    stringMode: string
-    threads: bool
     initSymbol: string
-    modules: seq[NativeModule]
+    modules: seq[BifModule]
     types: seq[AbiTypeEntry]
     hooks: seq[AbiHookEntry]
     procs: seq[AbiProcEntry]
-    bifDerived: bool
     applicationModules: seq[string]
 
   AbiTypeEntry = object
@@ -74,442 +56,6 @@ type
 
 proc fail(message: string) {.noinline, noreturn.} =
   raise newException(NativeBifError, message)
-
-proc readStrings(node: Cursor, field: string, count: int): seq[string] =
-  var children = node.childCursor()
-  while children.hasMore:
-    if children.kind == StrLit:
-      result.add children.strVal
-    else:
-      fail("native ABI manifest " & field & " has an invalid field")
-    children.skip
-  if result.len != count:
-    fail("native ABI manifest " & field & " expects " & $count & " string value(s)")
-
-proc takeString(children: var Cursor, field: string): string =
-  if not children.hasMore or children.kind != StrLit:
-    fail("native ABI manifest " & field & " expects a string")
-  result = children.strVal
-  children.skip
-
-proc takeIdent(children: var Cursor, field: string): string =
-  if not children.hasMore or children.kind != Ident:
-    fail("native ABI manifest " & field & " expects an identifier")
-  result = children.strVal
-  children.skip
-
-proc takeInt(children: var Cursor, field: string): int64 =
-  if not children.hasMore or children.kind != IntLit:
-    fail("native ABI manifest " & field & " expects an integer")
-  result = children.intVal
-  children.skip
-
-proc takeLayoutInt(children: var Cursor, field: string): int64 =
-  if not children.hasMore:
-    fail("native ABI manifest " & field & " expects a layout integer")
-  case children.kind
-  of IntLit:
-    result = children.intVal
-  of Ident:
-    if children.strVal != "unknown":
-      fail("native ABI manifest " & field & " has an invalid layout value")
-    result = -1
-  else:
-    fail("native ABI manifest " & field & " expects a layout integer")
-  children.skip
-
-proc parseBool(value, field: string): bool =
-  case value
-  of "true":
-    result = true
-  of "false":
-    result = false
-  else:
-    fail("native ABI manifest " & field & " expects true or false")
-
-proc parseLoweringMode(value: string): NativeLoweringMode =
-  case value
-  of "void":
-    nlVoid
-  of "direct":
-    nlDirect
-  of "indirect":
-    nlIndirect
-  of "pointer":
-    nlPointer
-  else:
-    fail("native ABI manifest has an invalid lowering mode: " & value)
-
-proc parseAbiParameter(node: Cursor): NativeParam =
-  var children = node.childCursor()
-  result.name = takeString(children, "parameter name")
-  result.typeSymbol = takeString(children, "parameter type")
-  result.lowering = parseLoweringMode(takeIdent(children, "parameter lowering"))
-  result.hiddenLengthCount = int(takeInt(children, "parameter hidden lengths"))
-  if children.hasMore:
-    fail("native ABI manifest parameter has extra fields")
-
-proc parseAbiLowering(node: Cursor, result: var AbiProcEntry) =
-  var children = node.childCursor()
-  while children.hasMore:
-    if children.kind != TagLit:
-      fail("native ABI manifest lowering contains an invalid entry")
-    case children.tagName
-    of "callconv":
-      result.callConv = readStrings(children, "callconv", 1)[0]
-    of "result":
-      var values = children.childCursor()
-      result.returnTypeSymbol = takeString(values, "result type")
-      result.returnLowering = parseLoweringMode(takeIdent(values, "result lowering"))
-      if values.hasMore:
-        fail("native ABI manifest result has extra fields")
-    of "parameters":
-      var values = children.childCursor()
-      while values.hasMore:
-        if values.kind == TagLit and values.tagName == "parameter":
-          result.params.add parseAbiParameter(values)
-        elif values.kind != DotToken:
-          fail("native ABI manifest parameters contains an invalid entry")
-        values.skip
-    of "closureenv":
-      var values = children.childCursor()
-      result.closureEnv =
-        parseBool(takeIdent(values, "closure environment"), "closure environment")
-      if values.hasMore:
-        fail("native ABI manifest closureenv has extra fields")
-    of "varargs":
-      var values = children.childCursor()
-      result.varargs = parseBool(takeIdent(values, "varargs"), "varargs")
-      if values.hasMore:
-        fail("native ABI manifest varargs has extra fields")
-    else:
-      fail("native ABI manifest lowering has an unknown entry")
-    children.skip
-
-proc parseAbiProc(node: Cursor): AbiProcEntry =
-  var values: seq[string] = @[]
-  var hasGenericInstance = false
-  var children = node.childCursor()
-  while children.hasMore:
-    case children.kind
-    of StrLit:
-      values.add children.strVal
-    of Ident:
-      if hasGenericInstance:
-        fail("native ABI manifest proc has duplicate generic flag")
-      case children.strVal
-      of "true":
-        result.genericInstance = true
-      of "false":
-        result.genericInstance = false
-      else:
-        fail("native ABI manifest proc has invalid generic flag")
-      hasGenericInstance = true
-    of TagLit:
-      if children.tagName != "lowering":
-        fail("native ABI manifest proc has an invalid subtree")
-      parseAbiLowering(children, result)
-    else:
-      fail("native ABI manifest proc has an invalid field")
-    children.skip
-
-  if values.len != 4 or not hasGenericInstance or result.callConv.len == 0:
-    fail("native ABI manifest proc has an invalid shape")
-  result.nifSymbol = values[0]
-  result.nimName = values[1]
-  result.cSymbol = values[2]
-  result.signatureFingerprint = values[3]
-
-proc parseAbiProcs(node: Cursor): seq[AbiProcEntry] =
-  var children = node.childCursor()
-  while children.hasMore:
-    if children.kind == TagLit and children.tagName == "proc":
-      result.add parseAbiProc(children)
-    elif children.kind != DotToken:
-      fail("native ABI manifest procs contains an invalid entry")
-    children.skip
-
-proc parseAbiHook(node: Cursor): AbiHookEntry =
-  var values: seq[string] = @[]
-  var hasStatus = false
-  var children = node.childCursor()
-  while children.hasMore:
-    case children.kind
-    of StrLit:
-      values.add children.strVal
-    of Ident:
-      if hasStatus:
-        fail("native ABI manifest hook has duplicate status")
-      case children.strVal
-      of "custom":
-        result.status = nhCustom
-      of "forbidden":
-        result.status = nhForbidden
-      else:
-        fail("native ABI manifest hook has invalid status")
-      hasStatus = true
-    of DotToken:
-      discard
-    else:
-      fail("native ABI manifest hook has an invalid field")
-    children.skip
-
-  if not hasStatus or values.len notin {3, 4}:
-    fail("native ABI manifest hook has an invalid shape")
-  result.typeSymbol = values[0]
-  result.kind = values[1]
-  result.nifSymbol = values[2]
-  if result.status == nhCustom:
-    if values.len != 4:
-      fail("custom native ABI hook has no linker symbol")
-    result.cSymbol = values[3]
-  elif values.len != 3:
-    fail("forbidden native ABI hook has a linker symbol")
-
-proc parseAbiHooks(node: Cursor): seq[AbiHookEntry] =
-  var children = node.childCursor()
-  while children.hasMore:
-    if children.kind == TagLit and children.tagName == "hook":
-      result.add parseAbiHook(children)
-    elif children.kind != DotToken:
-      fail("native ABI manifest hooks contains an invalid entry")
-    children.skip
-
-proc parseAbiModules(node: Cursor): seq[NativeModule] =
-  var children = node.childCursor()
-  while children.hasMore:
-    if children.kind == TagLit and children.tagName == "module":
-      let values = readStrings(children, "module", 2)
-      result.add NativeModule(identity: values[0], name: values[1])
-    elif children.kind != DotToken:
-      fail("native ABI manifest modules contains an invalid entry")
-    children.skip
-
-proc parseAbiField(node: Cursor): NativeField =
-  var children = node.childCursor()
-  result.name = takeString(children, "field name")
-  result.typeSymbol = takeString(children, "field type")
-  result.offset = takeLayoutInt(children, "field offset")
-  result.size = takeLayoutInt(children, "field size")
-  result.alignment = takeLayoutInt(children, "field alignment")
-  case takeIdent(children, "field visibility")
-  of "exported":
-    result.exported = true
-  of "private":
-    result.exported = false
-  else:
-    fail("native ABI manifest field has invalid visibility")
-  case takeIdent(children, "field management")
-  of "managed":
-    result.managed = true
-  of "plain":
-    result.managed = false
-  else:
-    fail("native ABI manifest field has invalid management")
-  case takeIdent(children, "field role")
-  of "discriminant":
-    result.discriminant = true
-  of "field":
-    result.discriminant = false
-  else:
-    fail("native ABI manifest field has invalid role")
-  if children.hasMore:
-    fail("native ABI manifest field has extra fields")
-
-proc parseAbiRecord(node: Cursor): seq[NativeRecordPart]
-
-proc parseAbiBranch(node: Cursor): NativeBranch =
-  var children = node.childCursor()
-  result.index = int(takeInt(children, "branch index"))
-  case takeIdent(children, "branch kind")
-  of "else":
-    result.isElse = true
-  of "of":
-    result.isElse = false
-  else:
-    fail("native ABI manifest branch has invalid kind")
-
-  while children.hasMore:
-    if children.kind != TagLit:
-      fail("native ABI manifest branch contains an invalid entry")
-    case children.tagName
-    of "selectors":
-      var selectors = children.childCursor()
-      while selectors.hasMore:
-        result.selectors.add takeString(selectors, "branch selector")
-    of "record":
-      result.record = parseAbiRecord(children)
-    else:
-      fail("native ABI manifest branch has an unknown entry")
-    children.skip
-
-proc parseAbiCase(node: Cursor): NativeRecordPart =
-  result = NativeRecordPart(kind: nrCase)
-  var children = node.childCursor()
-  while children.hasMore:
-    if children.kind != TagLit:
-      fail("native ABI manifest case contains an invalid entry")
-    case children.tagName
-    of "field":
-      if result.discriminant.name.len > 0:
-        fail("native ABI manifest case has duplicate discriminants")
-      result.discriminant = parseAbiField(children)
-    of "branch":
-      result.branches.add parseAbiBranch(children)
-    else:
-      fail("native ABI manifest case has an unknown entry")
-    children.skip
-  if result.discriminant.name.len == 0 or result.branches.len == 0:
-    fail("native ABI manifest case is incomplete")
-
-proc parseAbiRecord(node: Cursor): seq[NativeRecordPart] =
-  var children = node.childCursor()
-  while children.hasMore:
-    if children.kind != TagLit:
-      fail("native ABI manifest record contains an invalid entry")
-    case children.tagName
-    of "field":
-      result.add NativeRecordPart(kind: nrField, field: parseAbiField(children))
-    of "case":
-      result.add parseAbiCase(children)
-    else:
-      fail("native ABI manifest record has an unknown entry")
-    children.skip
-
-proc parseAbiType(node: Cursor): AbiTypeEntry =
-  var children = node.childCursor()
-  result.typeSymbol = takeString(children, "type symbol")
-  result.kind = takeIdent(children, "type kind")
-  result.size = takeLayoutInt(children, "type size")
-  result.alignment = takeLayoutInt(children, "type alignment")
-  result.layoutFingerprint = takeString(children, "layout fingerprint")
-  discard takeIdent(children, "type management")
-  case takeIdent(children, "type packing")
-  of "packed":
-    result.packed = true
-  of "unpacked":
-    result.packed = false
-  else:
-    fail("native ABI manifest type has invalid packing")
-  case takeIdent(children, "type union mode")
-  of "union":
-    result.union = true
-  of "regular":
-    result.union = false
-  else:
-    fail("native ABI manifest type has invalid union mode")
-  case takeIdent(children, "type inheritance")
-  of "inheritable":
-    result.inheritable = true
-  of "final":
-    result.inheritable = false
-  else:
-    fail("native ABI manifest type has invalid inheritance")
-  while children.hasMore:
-    if children.kind != TagLit:
-      fail("native ABI manifest type contains an invalid entry")
-    case children.tagName
-    of "base":
-      result.baseTypeSymbol = readStrings(children, "base", 1)[0]
-    of "element":
-      result.elementTypeSymbol = readStrings(children, "element", 1)[0]
-    of "record":
-      result.record = parseAbiRecord(children)
-    of "enum":
-      var values = children.childCursor()
-      while values.hasMore:
-        if values.kind != TagLit or values.tagName != "value":
-          fail("native ABI manifest enum contains an invalid entry")
-        var enumValue = values.childCursor()
-        result.enumValues.add NativeEnumValue(
-          name: takeString(enumValue, "enum value name"),
-          ordinal: takeInt(enumValue, "enum value ordinal"),
-        )
-        if enumValue.hasMore:
-          fail("native ABI manifest enum value has extra fields")
-        values.skip
-    else:
-      fail("native ABI manifest type has an unknown entry")
-    children.skip
-
-proc parseAbiTypes(node: Cursor): seq[AbiTypeEntry] =
-  var children = node.childCursor()
-  while children.hasMore:
-    if children.kind == TagLit and children.tagName == "type":
-      result.add parseAbiType(children)
-    elif children.kind != DotToken:
-      fail("native ABI manifest types contains an invalid entry")
-    children.skip
-
-proc readAbiManifest(path: string): AbiManifest =
-  var manifest = nifcoreparse.parseFromFile(path)
-  var cursor = manifest.beginRead()
-  if cursor.kind != TagLit or cursor.tagName != "abi":
-    fail("native ABI manifest has no abi root")
-
-  result.formatVersion = -1
-  cursor.loopInto:
-    if cursor.kind == TagLit:
-      case cursor.tagName
-      of "format":
-        var values = cursor.childCursor()
-        if not values.hasMore or values.kind != IntLit:
-          fail("native ABI manifest has no format version")
-        result.formatVersion = values.intVal
-        values.skip
-        if values.hasMore:
-          fail("native ABI manifest format has extra fields")
-      of "compiler":
-        if result.formatVersion != 4:
-          fail("unsupported native ABI manifest format: " & $result.formatVersion)
-        var values = cursor.childCursor()
-        result.compilerVersion = takeString(values, "compiler version")
-        result.compilerApiVersion = takeInt(values, "compiler API version")
-        result.rodVersion = takeString(values, "rod version")
-        if values.hasMore:
-          fail("native ABI manifest compiler has extra fields")
-      of "abiid":
-        result.abiId = readStrings(cursor, "abiid", 1)[0]
-      of "target":
-        var values = cursor.childCursor()
-        result.targetOS = takeString(values, "target OS")
-        result.targetCPU = takeString(values, "target CPU")
-        result.targetEndian = takeString(values, "target endianness")
-        result.targetBits = takeInt(values, "target bits")
-        if values.hasMore:
-          fail("native ABI manifest target has extra fields")
-      of "runtime":
-        var values = cursor.childCursor()
-        result.memoryManager = takeString(values, "memory manager")
-        result.allocator = takeString(values, "allocator")
-        result.exceptionSystem = takeString(values, "exception system")
-        result.stringMode = takeString(values, "string mode")
-        result.threads = parseBool(takeIdent(values, "threads"), "threads")
-        result.initSymbol = takeString(values, "initialization symbol")
-        if values.hasMore:
-          fail("native ABI manifest runtime has extra fields")
-      of "library":
-        result.libraryName = readStrings(cursor, "library", 1)[0]
-      of "modules":
-        result.modules = parseAbiModules(cursor)
-      of "types":
-        result.types = parseAbiTypes(cursor)
-      of "hooks":
-        result.hooks = parseAbiHooks(cursor)
-      of "procs":
-        result.procs = parseAbiProcs(cursor)
-      else:
-        discard
-    cursor.skip
-  cursor.endRead()
-
-  if result.formatVersion != 4:
-    fail("unsupported native ABI manifest format")
-  if result.abiId.len == 0 or result.compilerVersion.len == 0 or result.targetOS.len == 0 or
-      result.targetCPU.len == 0 or result.memoryManager.len == 0 or
-      result.allocator.len == 0 or result.libraryName.len == 0 or result.modules.len == 0 or
-      result.types.len == 0 or result.initSymbol.len == 0:
-    fail("native ABI manifest is missing target metadata")
 
 func symbolBase(symbol: string): string =
   let dot = symbol.find('.')
@@ -825,7 +371,7 @@ proc collectBifLayouts(node: Cursor; layouts: var Table[string, AbiTypeEntry]) =
     children.skip
 
 proc resolveRecordSelectors(
-    record: var seq[NativeRecordPart], layouts: Table[string, AbiTypeEntry]
+    record: var seq[NativeRecordPart]; layouts: Table[string, AbiTypeEntry]
 ) =
   for part in record.mitems:
     if part.kind == nrCase:
@@ -849,7 +395,7 @@ proc finalizeLayouts(layouts: var Table[string, AbiTypeEntry]) =
         part.field.size = fieldType.size
         part.field.alignment = fieldType.alignment
 
-proc hasDescendantIdent(node: Cursor, name: string): bool =
+proc hasDescendantIdent(node: Cursor; name: string): bool =
   if node.kind != TagLit:
     return false
   var children = node.childCursor()
@@ -861,7 +407,7 @@ proc hasDescendantIdent(node: Cursor, name: string): bool =
     children.skip
 
 proc parseNativeType(
-    declaration: Cursor, nifSymbol: string, typ: var NativeType
+    declaration: Cursor; nifSymbol: string; typ: var NativeType
 ): bool =
   let sourceType = declaration.findChildTag("type0")
   if sourceType.cursorIsNil:
@@ -929,7 +475,7 @@ proc parseNativeType(
   result = true
 
 proc parsePreferredTypeAlias(
-    declaration: Cursor, nifSymbol: string
+    declaration: Cursor; nifSymbol: string
 ): PreferredTypeAlias =
   let sourceType = declaration.findChildTag("type0")
   if sourceType.cursorIsNil:
@@ -990,16 +536,12 @@ proc parseParam(declaration: Cursor): NativeParam =
   if result.typeSymbol.len == 0:
     fail("native ABI only supports value parameters: " & result.name)
 
-proc parseNativeProc(
-    declaration: Cursor, abi: AbiProcEntry, applyAbiLowering = true
-): NativeProc =
+proc parseNativeProc(declaration: Cursor; abi: AbiProcEntry): NativeProc =
   result.name = symbolBase(abi.nifSymbol)
   result.nifSymbol = abi.nifSymbol
   result.cSymbol = abi.cSymbol
   result.returnLowering = abi.returnLowering
-  result.callConv = abi.callConv
-  result.closureEnv = abi.closureEnv
-  result.varargs = abi.varargs
+  result.callConv = "nimcall"
   result.discardable = declaration.hasDescendantIdent("discardable")
   let formals = declaration.findDescendantTag("formalparams")
   if formals.cursorIsNil:
@@ -1013,7 +555,7 @@ proc parseNativeProc(
       result.returnTypeSymbol = children.symName
       result.returnByVar = result.returnTypeSymbol.startsWith("`t23.")
     children.skip
-  proc collectParams(node: Cursor, params: var seq[NativeParam]) =
+  proc collectParams(node: Cursor; params: var seq[NativeParam]) =
     var nested = node.childCursor()
     while nested.hasMore:
       if nested.kind == TagLit:
@@ -1033,33 +575,8 @@ proc parseNativeProc(
 
   collectParams(formals, result.params)
 
-  if applyAbiLowering:
-    result.returnByVar = abi.returnTypeSymbol.startsWith("`t23.")
-    result.returnTypeSymbol = abi.returnTypeSymbol
-    if result.params.len != abi.params.len:
-      fail(
-        "semantic parameter count does not match ABI lowering for " & abi.nifSymbol &
-          ": semantic=" & $result.params.len & " ABI=" & $abi.params.len
-      )
-    var orderedParams: seq[NativeParam]
-    for abiParam in abi.params:
-      var found = false
-      for param in result.params:
-        if param.name == abiParam.name:
-          orderedParams.add param
-          found = true
-          break
-      if not found:
-        fail("semantic parameter not found for " & abi.nifSymbol & ": " & abiParam.name)
-    result.params = orderedParams
-    for i in 0 ..< result.params.len:
-      if not result.params[i].byVar:
-        result.params[i].typeSymbol = abi.params[i].typeSymbol
-      result.params[i].lowering = abi.params[i].lowering
-      result.params[i].hiddenLengthCount = abi.params[i].hiddenLengthCount
-
 proc unwrapVarReturn(
-    procInfo: var NativeProc, layouts: Table[string, AbiTypeEntry]
+    procInfo: var NativeProc; layouts: Table[string, AbiTypeEntry]
 ) =
   if not procInfo.returnByVar:
     return
@@ -1070,7 +587,7 @@ proc unwrapVarReturn(
     fail("native ABI var return type has an invalid layout: " & procInfo.returnTypeSymbol)
   procInfo.returnTypeSymbol = wrapper.elementTypeSymbol
 
-proc applyLayout(typ: var NativeType, layouts: Table[string, AbiTypeEntry]): bool =
+proc applyLayout(typ: var NativeType; layouts: Table[string, AbiTypeEntry]): bool =
   if typ.typeId notin layouts:
     return false
   let declared = layouts[typ.typeId]
@@ -1146,10 +663,10 @@ proc typeFromLayout(layout: AbiTypeEntry): NativeType =
     fail("unsupported native ABI layout kind: " & layout.kind)
 
 proc parseStdOrderedTable(
-    node: Cursor,
-    stdTablesModules: Table[string, bool],
-    layouts: Table[string, AbiTypeEntry],
-    typ: var NativeType,
+    node: Cursor;
+    stdTablesModules: Table[string, bool];
+    layouts: Table[string, AbiTypeEntry];
+    typ: var NativeType;
 ): bool =
   if node.kind != TagLit or node.tagName != "at":
     return false
@@ -1194,11 +711,11 @@ proc parseStdOrderedTable(
   result = true
 
 proc collectStdOrderedTables(
-    node: Cursor,
-    stdTablesModules: Table[string, bool],
-    layouts: Table[string, AbiTypeEntry],
-    instances: var Table[string, NativeType],
-    skipTypes: var Table[string, bool],
+    node: Cursor;
+    stdTablesModules: Table[string, bool];
+    layouts: Table[string, AbiTypeEntry];
+    instances: var Table[string, NativeType];
+    skipTypes: var Table[string, bool];
 ) =
   if node.kind != TagLit:
     return
@@ -1220,34 +737,34 @@ func isMaterializedKind(kind: string): bool =
   ]
 
 proc addLayoutDependency(
-    layoutSymbol: string,
-    layouts: Table[string, AbiTypeEntry],
+    layoutSymbol: string;
+    layouts: Table[string, AbiTypeEntry];
     dependencies: var Table[string, bool]
 )
 
 proc collectLayoutDependencies(
-    layout: AbiTypeEntry,
-    layouts: Table[string, AbiTypeEntry],
+    layout: AbiTypeEntry;
+    layouts: Table[string, AbiTypeEntry];
     dependencies: var Table[string, bool]
 )
 
 proc collectRecordDependencies(
-    record: seq[NativeRecordPart],
-    layouts: Table[string, AbiTypeEntry],
+    record: seq[NativeRecordPart];
+    layouts: Table[string, AbiTypeEntry];
     dependencies: var Table[string, bool]
 )
 
 proc collectBranchDependencies(
-    branches: seq[NativeBranch],
-    layouts: Table[string, AbiTypeEntry],
+    branches: seq[NativeBranch];
+    layouts: Table[string, AbiTypeEntry];
     dependencies: var Table[string, bool]
 ) =
   for branch in branches:
     collectRecordDependencies(branch.record, layouts, dependencies)
 
 proc collectRecordDependencies(
-    record: seq[NativeRecordPart],
-    layouts: Table[string, AbiTypeEntry],
+    record: seq[NativeRecordPart];
+    layouts: Table[string, AbiTypeEntry];
     dependencies: var Table[string, bool]
 ) =
   for part in record:
@@ -1259,8 +776,8 @@ proc collectRecordDependencies(
       collectBranchDependencies(part.branches, layouts, dependencies)
 
 proc collectLayoutDependencies(
-    layout: AbiTypeEntry,
-    layouts: Table[string, AbiTypeEntry],
+    layout: AbiTypeEntry;
+    layouts: Table[string, AbiTypeEntry];
     dependencies: var Table[string, bool]
 ) =
   if layout.typeSymbol.len == 0 or layout.typeSymbol in dependencies:
@@ -1271,8 +788,8 @@ proc collectLayoutDependencies(
   collectRecordDependencies(layout.record, layouts, dependencies)
 
 proc addLayoutDependency(
-    layoutSymbol: string,
-    layouts: Table[string, AbiTypeEntry],
+    layoutSymbol: string;
+    layouts: Table[string, AbiTypeEntry];
     dependencies: var Table[string, bool]
 ) =
   if layoutSymbol.len == 0 or layoutSymbol in dependencies or layoutSymbol notin layouts:
@@ -1280,28 +797,28 @@ proc addLayoutDependency(
   collectLayoutDependencies(layouts[layoutSymbol], layouts, dependencies)
 
 proc collectReferencedBranchDependencies(
-    branches: seq[NativeBranch],
-    layouts: Table[string, AbiTypeEntry],
-    requiredTypes: var Table[string, bool],
-    skipInternal: Table[string, bool],
+    branches: seq[NativeBranch];
+    layouts: Table[string, AbiTypeEntry];
+    requiredTypes: var Table[string, bool];
+    skipInternal: Table[string, bool];
 )
 
 proc collectReferencedRecordDependencies(
-    record: seq[NativeRecordPart],
-    layouts: Table[string, AbiTypeEntry],
-    requiredTypes: var Table[string, bool],
-    skipInternal: Table[string, bool],
+    record: seq[NativeRecordPart];
+    layouts: Table[string, AbiTypeEntry];
+    requiredTypes: var Table[string, bool];
+    skipInternal: Table[string, bool];
 )
 
 proc collectReferencedLayoutDependencies(
-    layout: AbiTypeEntry,
-    layouts: Table[string, AbiTypeEntry],
-    requiredTypes: var Table[string, bool],
-    skipInternal: Table[string, bool],
+    layout: AbiTypeEntry;
+    layouts: Table[string, AbiTypeEntry];
+    requiredTypes: var Table[string, bool];
+    skipInternal: Table[string, bool];
 )
 
 proc shouldSkipReferencedType(
-    symbol: string, layouts: Table[string, AbiTypeEntry]
+    symbol: string; layouts: Table[string, AbiTypeEntry]
 ): bool =
   if symbol.len == 0 or symbol notin layouts:
     return false
@@ -1313,10 +830,10 @@ proc shouldSkipReferencedType(
     layout.kind in ["genericbody", "genericinvocation"]
 
 proc collectReferencedType(
-    symbol: string,
-    layouts: Table[string, AbiTypeEntry],
-    requiredTypes: var Table[string, bool],
-    skipInternal: Table[string, bool],
+    symbol: string;
+    layouts: Table[string, AbiTypeEntry];
+    requiredTypes: var Table[string, bool];
+    skipInternal: Table[string, bool];
 ) =
   if symbol.len == 0 or symbol in skipInternal:
     return
@@ -1331,19 +848,19 @@ proc collectReferencedType(
   collectReferencedLayoutDependencies(layouts[symbol], layouts, requiredTypes, skipInternal)
 
 proc collectReferencedBranchDependencies(
-    branches: seq[NativeBranch],
-    layouts: Table[string, AbiTypeEntry],
-    requiredTypes: var Table[string, bool],
-    skipInternal: Table[string, bool],
+    branches: seq[NativeBranch];
+    layouts: Table[string, AbiTypeEntry];
+    requiredTypes: var Table[string, bool];
+    skipInternal: Table[string, bool];
 ) =
   for branch in branches:
     collectReferencedRecordDependencies(branch.record, layouts, requiredTypes, skipInternal)
 
 proc collectReferencedRecordDependencies(
-    record: seq[NativeRecordPart],
-    layouts: Table[string, AbiTypeEntry],
-    requiredTypes: var Table[string, bool],
-    skipInternal: Table[string, bool],
+    record: seq[NativeRecordPart];
+    layouts: Table[string, AbiTypeEntry];
+    requiredTypes: var Table[string, bool];
+    skipInternal: Table[string, bool];
 ) =
   for part in record:
     case part.kind
@@ -1354,19 +871,19 @@ proc collectReferencedRecordDependencies(
       collectReferencedBranchDependencies(part.branches, layouts, requiredTypes, skipInternal)
 
 proc collectReferencedLayoutDependencies(
-    layout: AbiTypeEntry,
-    layouts: Table[string, AbiTypeEntry],
-    requiredTypes: var Table[string, bool],
-    skipInternal: Table[string, bool],
+    layout: AbiTypeEntry;
+    layouts: Table[string, AbiTypeEntry];
+    requiredTypes: var Table[string, bool];
+    skipInternal: Table[string, bool];
 ) =
   collectReferencedType(layout.baseTypeSymbol, layouts, requiredTypes, skipInternal)
   collectReferencedType(layout.elementTypeSymbol, layouts, requiredTypes, skipInternal)
   collectReferencedRecordDependencies(layout.record, layouts, requiredTypes, skipInternal)
 
 proc resolvedSemanticTypeSymbol(
-    symbol: string,
-    semanticTypeSymbols: Table[string, string],
-    layouts: Table[string, AbiTypeEntry],
+    symbol: string;
+    semanticTypeSymbols: Table[string, string];
+    layouts: Table[string, AbiTypeEntry];
 ): string =
   if symbol in semanticTypeSymbols:
     return semanticTypeSymbols[symbol]
@@ -1378,10 +895,10 @@ proc resolvedSemanticTypeSymbol(
   symbol
 
 proc collectPreferredLayoutNames(
-    aliases: openArray[PreferredTypeAlias],
-    semanticTypeSymbols: Table[string, string],
-    layouts: Table[string, AbiTypeEntry],
-    requiredTypes: Table[string, bool],
+    aliases: openArray[PreferredTypeAlias];
+    semanticTypeSymbols: Table[string, string];
+    layouts: Table[string, AbiTypeEntry];
+    requiredTypes: Table[string, bool];
 ): Table[string, string] =
   var ambiguous: Table[string, bool]
   for alias in aliases:
@@ -1408,7 +925,7 @@ proc collectPreferredLayoutNames(
             ambiguous[layout.typeSymbol] = true
 
 proc addAbiModule(
-    modules: var seq[bif.BifModule], seenPaths: var Table[string, bool], path: string
+    modules: var seq[bif.BifModule]; seenPaths: var Table[string, bool]; path: string
 ) =
   let normalized = normalizedPath(absolutePath(path))
   if normalized notin seenPaths:
@@ -1417,14 +934,16 @@ proc addAbiModule(
     seenPaths[normalized] = true
     modules.add bif.load(normalized)
 
-proc loadAbiModules(bifPath: string, manifest: AbiManifest): seq[bif.BifModule] =
+proc loadBifModules(
+    bifPath: string; description: BifNativeDescription
+): seq[bif.BifModule] =
   let nimcacheDir = bifPath.parentDir
   var seenPaths: Table[string, bool]
   addAbiModule(result, seenPaths, bifPath)
-  for module in manifest.modules:
+  for module in description.modules:
     addAbiModule(result, seenPaths, nimcacheDir / (module.identity & ".s.bif"))
 
-proc findSemanticDeclaration(modules: var seq[bif.BifModule], symbol: string): Cursor =
+proc findSemanticDeclaration(modules: var seq[bif.BifModule]; symbol: string): Cursor =
   for module in modules.mitems:
     let declaration = bif.findDeclaration(module, symbol)
     if not declaration.cursorIsNil:
@@ -1454,20 +973,13 @@ func bifIdentity(path: string): string =
   if name.endsWith(suffix):
     result = name[0 ..< name.len - suffix.len]
 
-proc bifAbiManifest(
+proc bifNativeDescription(
     nimcacheDir, sourceRoot, libraryName: string;
     routines: openArray[NativeExportSymbol];
     hooks: openArray[NativeHookSymbol]
-): AbiManifest =
-  result.bifDerived = true
+): BifNativeDescription =
   result.libraryName = libraryName
   result.initSymbol = "NimMain"
-  result.targetOS = hostOS
-  result.targetCPU = hostCPU
-  result.targetEndian = "littleEndian"
-  result.targetBits = sizeof(int) * 8
-  result.memoryManager = "compiler-matched"
-  result.allocator = "compiler-matched"
 
   let root = sourceRoot.normalizedAbsolutePath
   var paths: seq[string]
@@ -1481,7 +993,7 @@ proc bifAbiManifest(
     if source.len == 0:
       continue
     let identity = path.bifIdentity
-    result.modules.add NativeModule(identity: identity, name: source.splitFile.name)
+    result.modules.add BifModule(identity: identity, name: source.splitFile.name)
     if source.normalizedAbsolutePath.pathIsWithin(root):
       result.applicationModules.add identity
 
@@ -1500,8 +1012,6 @@ proc bifAbiManifest(
     result.procs.add AbiProcEntry(
       nifSymbol: symbol.nifSymbol,
       cSymbol: symbol.cSymbol,
-      callConv: "nimcall",
-      semanticOnly: true,
     )
   for hook in hooks:
     result.hooks.add AbiHookEntry(
@@ -1512,58 +1022,45 @@ proc bifAbiManifest(
       status: if hook.forbidden: nhForbidden else: nhCustom,
     )
 
-proc buildNativeApi(bifPath: string; sourceManifest: AbiManifest): NativeApi =
-  var manifest = sourceManifest
-  result.abiId = manifest.abiId
-  result.libraryName = manifest.libraryName
-  result.compilerVersion = manifest.compilerVersion
-  result.compilerApiVersion = manifest.compilerApiVersion
-  result.rodVersion = manifest.rodVersion
-  result.targetOS = manifest.targetOS
-  result.targetCPU = manifest.targetCPU
-  result.targetEndian = manifest.targetEndian
-  result.targetBits = manifest.targetBits
-  result.memoryManager = manifest.memoryManager
-  result.allocator = manifest.allocator
-  result.exceptionSystem = manifest.exceptionSystem
-  result.stringMode = manifest.stringMode
-  result.threads = manifest.threads
-  result.initSymbol = manifest.initSymbol
-  result.modules = manifest.modules
+proc buildNativeApi(
+    bifPath: string; sourceDescription: BifNativeDescription
+): NativeApi =
+  var description = sourceDescription
+  result.libraryName = description.libraryName
+  result.initSymbol = description.initSymbol
 
   var layouts: Table[string, AbiTypeEntry]
   var preferredTypeIndexes: Table[string, int]
-  for layout in manifest.types:
+  for layout in description.types:
     layouts[layout.typeSymbol] = layout
 
-  var modules = loadAbiModules(bifPath, manifest)
-  if manifest.bifDerived:
-    for item in manifest.procs.mitems:
-      let declaration = findSemanticDeclaration(modules, item.nifSymbol)
-      if declaration.cursorIsNil:
-        fail("semantic declaration not found for " & item.nifSymbol)
-      let semantic = parseNativeProc(declaration, item, applyAbiLowering = false)
-      item.returnTypeSymbol = semantic.returnTypeSymbol
-      item.params = semantic.params
-      item.returnLowering =
-        if semantic.returnTypeSymbol.len == 0: nlVoid else: nlDirect
-      for param in item.params.mitems:
-        if param.typeSymbol in layouts and layouts[param.typeSymbol].kind == "openarray":
-          param.lowering = nlPointer
-          param.hiddenLengthCount = 1
-        elif param.byVar:
-          param.lowering = nlPointer
-        else:
-          param.lowering = nlDirect
+  var modules = loadBifModules(bifPath, description)
+  for item in description.procs.mitems:
+    let declaration = findSemanticDeclaration(modules, item.nifSymbol)
+    if declaration.cursorIsNil:
+      fail("semantic declaration not found for " & item.nifSymbol)
+    let semantic = parseNativeProc(declaration, item)
+    item.returnTypeSymbol = semantic.returnTypeSymbol
+    item.params = semantic.params
+    item.returnLowering =
+      if semantic.returnTypeSymbol.len == 0: nlVoid else: nlDirect
+    for param in item.params.mitems:
+      if param.typeSymbol in layouts and layouts[param.typeSymbol].kind == "openarray":
+        param.lowering = nlPointer
+        param.hiddenLengthCount = 1
+      elif param.byVar:
+        param.lowering = nlPointer
+      else:
+        param.lowering = nlDirect
   var skipSystemModuleTypeSymbols: Table[string, bool]
   var stdTablesModules: Table[string, bool]
-  var manifestTypeSymbols: Table[string, bool]
-  for item in manifest.procs:
+  var signatureTypeSymbols: Table[string, bool]
+  for item in description.procs:
     if item.returnTypeSymbol.len > 0:
-      manifestTypeSymbols[item.returnTypeSymbol] = true
+      signatureTypeSymbols[item.returnTypeSymbol] = true
     for param in item.params:
-      manifestTypeSymbols[param.typeSymbol] = true
-  for module in manifest.modules:
+      signatureTypeSymbols[param.typeSymbol] = true
+  for module in description.modules:
     if module.name == "system":
       skipSystemModuleTypeSymbols[module.identity] = true
     if module.name == "tables":
@@ -1576,17 +1073,13 @@ proc buildNativeApi(bifPath: string; sourceManifest: AbiManifest): NativeApi =
   var unmaterializedTypes: seq[NativeType]
   var preferredTypeAliases: seq[PreferredTypeAlias]
   var applicationModules: Table[string, bool]
-  for identity in manifest.applicationModules:
+  for identity in description.applicationModules:
     applicationModules[identity] = true
   for moduleIndex, module in modules.mpairs:
     for nifSymbol, visibility, declaration in module.declarations:
       let moduleId = symbolModule(nifSymbol)
       let inspectDeclaration =
-        if manifest.bifDerived:
-          visibility == ivExported and moduleId in applicationModules
-        else:
-          visibility == ivExported or
-            moduleId.len > 0 and not (moduleId in skipSystemModuleTypeSymbols)
+        visibility == ivExported and moduleId in applicationModules
       if inspectDeclaration:
         if not declaration.findChildTag("type").cursorIsNil and
             not declaration.findChildTag("type0").cursorIsNil:
@@ -1599,9 +1092,6 @@ proc buildNativeApi(bifPath: string; sourceManifest: AbiManifest): NativeApi =
           )
           var typ: NativeType
           if parseNativeType(declaration, nifSymbol, typ):
-            if visibility != ivExported and typ.kind != ntAlias and
-                typ.typeId notin manifestTypeSymbols and typ.nifSymbol notin manifestTypeSymbols:
-              continue
             let hasLayout = applyLayout(typ, layouts)
             if typ.kind != ntAlias and not hasLayout:
               typ.size = -1
@@ -1634,21 +1124,14 @@ proc buildNativeApi(bifPath: string; sourceManifest: AbiManifest): NativeApi =
   for typ in importedGenericTypes.values:
     addLayoutDependency(typ.typeId, layouts, internalLayoutTypes)
 
-  for item in manifest.procs:
-    if item.genericInstance:
-      fail(
-        "concrete generic exports need signature materialization support: " &
-          item.cSymbol
-      )
+  for item in description.procs:
     let nifSymbol = item.nifSymbol
     let declaration = findSemanticDeclaration(modules, nifSymbol)
     if declaration.cursorIsNil:
       fail("semantic declaration not found for " & nifSymbol)
-    result.procs.add parseNativeProc(
-      declaration, item, applyAbiLowering = not item.semanticOnly
-    )
+    result.procs.add parseNativeProc(declaration, item)
 
-  for item in manifest.hooks:
+  for item in description.hooks:
     let declaration = findSemanticDeclaration(modules, item.nifSymbol)
     if declaration.cursorIsNil:
       fail("semantic hook declaration not found for " & item.nifSymbol)
@@ -1661,11 +1144,8 @@ proc buildNativeApi(bifPath: string; sourceManifest: AbiManifest): NativeApi =
         AbiProcEntry(
           nifSymbol: item.nifSymbol,
           cSymbol: item.cSymbol,
-          callConv: "nimcall",
           returnLowering: nlDirect,
-          params: @[],
         ),
-        applyAbiLowering = false,
       ),
     )
 
@@ -1680,10 +1160,10 @@ proc buildNativeApi(bifPath: string; sourceManifest: AbiManifest): NativeApi =
 
   var requiredTypes: Table[string, bool]
   for typ in result.types:
-    let isManifestType =
-      typ.nifSymbol in manifestTypeSymbols or typ.typeId in manifestTypeSymbols
+    let isSignatureType =
+      typ.nifSymbol in signatureTypeSymbols or typ.typeId in signatureTypeSymbols
     let isMaterializedSemanticType = typ.kind != ntAlias
-    if typ.kind == ntImportedGeneric or isManifestType or isMaterializedSemanticType:
+    if typ.kind == ntImportedGeneric or isSignatureType or isMaterializedSemanticType:
       let moduleIdentity = symbolModule(typ.nifSymbol)
       if moduleIdentity.len > 0 and moduleIdentity in skipSystemModuleTypeSymbols:
         continue
@@ -1704,7 +1184,7 @@ proc buildNativeApi(bifPath: string; sourceManifest: AbiManifest): NativeApi =
     collectReferencedType(hook.procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternalTypes)
     for param in hook.procInfo.params:
       collectReferencedType(param.typeSymbol, layouts, requiredTypes, skipInternalTypes)
-  for symbol in manifestTypeSymbols.keys:
+  for symbol in signatureTypeSymbols.keys:
     requiredTypes[symbol] = true
 
   var semanticTypeSymbols: Table[string, string]
@@ -1726,7 +1206,7 @@ proc buildNativeApi(bifPath: string; sourceManifest: AbiManifest): NativeApi =
       result.types.add typ
       represented[typ.typeId] = true
 
-  for layout in manifest.types:
+  for layout in description.types:
     let hasUnresolvedElement =
       layout.elementTypeSymbol in layouts and
       layouts[layout.elementTypeSymbol].kind in ["genericbody", "genericinvocation"]
@@ -1777,10 +1257,6 @@ proc findSemanticBif*(nimcacheDir, sourcePath: string): string =
       return path
   raise newException(IOError, "semantic BIF not found for: " & sourcePath)
 
-proc readNativeApi*(bifPath, manifestPath: string): NativeApi =
-  ## Reads the compiler's explicit native-ABI manifest and matching semantic BIF.
-  result = buildNativeApi(bifPath, readAbiManifest(manifestPath))
-
 proc readBifNativeApi*(nimcacheDir, sourceRoot, sourcePath,
     libraryName: string): NativeApi =
   ## Reconstructs a native API from semantic BIF and incremental C definitions.
@@ -1792,7 +1268,7 @@ proc readBifNativeApi*(nimcacheDir, sourceRoot, sourcePath,
     hooks = resolveNativeHooks(
       nimcacheDir, nativeHookSymbols(nimcacheDir, sourceRoot)
     )
-    manifest = bifAbiManifest(
+    description = bifNativeDescription(
       nimcacheDir, sourceRoot, libraryName, routines, hooks
     )
-  result = buildNativeApi(bifPath, manifest)
+  result = buildNativeApi(bifPath, description)

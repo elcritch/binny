@@ -450,7 +450,7 @@ proc params(procInfo: NativeProc, names: Table[string, string]): string =
     if mangledTypes.len != procInfo.params.len:
       raise newException(
         NativeArtifactError,
-        "native ABI symbol parameter count does not match its manifest: " &
+        "native ABI symbol parameter count does not match its resolved signature: " &
           procInfo.cSymbol,
       )
   for index, param in procInfo.params:

@@ -101,27 +101,9 @@ type
     status*: NativeHookStatus
     procInfo*: NativeProc
 
-  NativeModule* = object
-    identity*: string
-    name*: string
-
   NativeApi* = object
-    abiId*: string
     libraryName*: string
-    compilerVersion*: string
-    compilerApiVersion*: int64
-    rodVersion*: string
-    targetOS*: string
-    targetCPU*: string
-    targetEndian*: string
-    targetBits*: int64
-    memoryManager*: string
-    allocator*: string
-    exceptionSystem*: string
-    stringMode*: string
-    threads*: bool
     initSymbol*: string
-    modules*: seq[NativeModule]
     types*: seq[NativeType]
     hooks*: seq[NativeHook]
     procs*: seq[NativeProc]

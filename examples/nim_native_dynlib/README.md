@@ -102,4 +102,4 @@ symbols the dylib exposes.
   tuples, open arrays, and custom or forbidden ownership hooks.
 
 The integration test in `tests/tnative_staticlib.nim` builds a fresh fixture,
-generates bindings without `.abi.nif`, and runs a separate Nim consumer.
+generates bindings from BIF and C NIF, and runs a separate Nim consumer.
