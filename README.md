@@ -128,5 +128,6 @@ nim c binny.nim
 nim test
 ```
 
-The CI uses Nim devel for the general ELF-oriented suite on Linux and the native
-dynamic-library end-to-end workflow on macOS.
+The CI uses Nim devel to build the aggregate module and test native binding
+generation on Linux, then runs the native dynamic-library end-to-end workflow
+on macOS.

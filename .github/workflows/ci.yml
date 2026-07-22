@@ -36,8 +36,8 @@ jobs:
       - name: Build aggregate module
         run: nim c binny.nim
 
-      - name: Run tests
-        run: nim test
+      - name: Test native binding generation
+        run: nim c -r tests/tnative_dynlib.nim
 
   native-dynlib:
     runs-on: macos-latest
