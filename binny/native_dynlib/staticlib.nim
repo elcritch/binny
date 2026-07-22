@@ -406,7 +406,7 @@ proc writeNativeExportList*(path: string;
   ## Writes the host linker's export-control file.
   when defined(macosx):
     writeDarwinExportList(path, symbols)
-  elif defined(linux):
+  elif defined(linux) or defined(freebsd):
     writeElfVersionScript(path, symbols)
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)
@@ -687,7 +687,7 @@ proc promoteNativeArchive*(inputPath, outputPath: string;
   ## Promotes selected definitions using the host object format.
   when defined(macosx):
     promoteMachOArchive(inputPath, outputPath, symbols)
-  elif defined(linux):
+  elif defined(linux) or defined(freebsd):
     promoteElfArchive(inputPath, outputPath, symbols)
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)
@@ -734,7 +734,7 @@ proc linkNativeDynlib*(archivePath, outputPath, exportListPath: string;
   ## Links a filtered native dynamic library using the host linker.
   when defined(macosx):
     linkMachODylib(archivePath, outputPath, exportListPath, libraryName)
-  elif defined(linux):
+  elif defined(linux) or defined(freebsd):
     linkElfSharedLibrary(archivePath, outputPath, exportListPath, libraryName)
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)

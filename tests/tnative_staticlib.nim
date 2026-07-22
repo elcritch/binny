@@ -21,7 +21,8 @@ proc run(arguments: openArray[string]): string =
 
 proc supportsStaticLibExperiment(compiler: string): bool =
   let help = execCmdEx(compiler.quoteShell & " --fullhelp")
-  result = (defined(macosx) or defined(linux)) and help.exitCode == 0 and
+  result = (defined(macosx) or defined(linux) or defined(freebsd)) and
+    help.exitCode == 0 and
     "--genBif:on|off" in help.output and
     fileExists(compiler.parentDir / "nifler")
 
@@ -31,7 +32,7 @@ proc elfSymbolHasVisibility(output, symbol, visibility: string): bool =
     if fields.len >= 8 and fields[^1] == symbol and visibility in fields:
       return true
 
-when defined(macosx) or defined(linux):
+when defined(macosx) or defined(linux) or defined(freebsd):
   let compiler = getCurrentCompilerExe()
   if compiler.supportsStaticLibExperiment:
     block public_bif_procs_become_dylib_exports:
@@ -103,7 +104,7 @@ proc privateAdd(left, right: int): int {.noinline.} =
       writeNativeExportList(exportList, exports)
 
       discard run(compileArguments)
-      when defined(linux):
+      when defined(linux) or defined(freebsd):
         compileElfPicObjects(cache, [
           compiler.parentDir.parentDir / "lib", temporary,
         ])

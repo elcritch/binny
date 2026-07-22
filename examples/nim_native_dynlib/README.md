@@ -34,12 +34,12 @@ generated/producer_abi.nim       reconstructed native Nim bindings
 nimcache/libproducer.private.a   original hidden/private symbols
 nimcache/libproducer.a           selected symbols promoted
 nimcache/libproducer.exports     BIF-derived linker export control
-nimcache/libproducer.so          filtered library on Linux
+nimcache/libproducer.so          filtered library on Linux and FreeBSD
 nimcache/libproducer.dylib       filtered library on macOS
 consumer                         ordinary Nim consumer executable
 ```
 
-Inspect the result on Linux with:
+Inspect the result on Linux or FreeBSD with:
 
 ```sh
 nm -D --defined-only nimcache/libproducer.so
@@ -69,11 +69,12 @@ object file. The incremental backend gives us a useful interception point:
    `.c.nif` definition, obtaining the exact backend C name.
 4. It marks those definitions as liveness roots and lets Nim rerun its normal
    dependency closure and C emission.
-5. On Linux, the emitted C is recompiled as position-independent code before
-   the generated objects are collected into `libproducer.private.a`.
+5. On Linux and FreeBSD, the emitted C is recompiled as position-independent
+   code before the generated objects are collected into
+   `libproducer.private.a`.
 6. The tool extracts that archive and promotes only matched public definitions:
    it clears Mach-O `N_PEXT` on macOS or changes ELF visibility from hidden to
-   default on Linux.
+   default on Linux and FreeBSD.
 7. The host linker force-loads the promoted archive and applies
    `libproducer.exports` as a Darwin export list or GNU version script.
 8. The binding generator reads procedure signatures and concrete type layouts
@@ -88,7 +89,7 @@ symbols the dylib exposes.
 ## Current boundaries
 
 - Archive promotion supports 64-bit Mach-O on macOS and little-endian ELF64 on
-  Linux.
+  Linux and FreeBSD.
 - The producer and caller must agree on Nim compiler, memory manager, allocator,
   target, and native type layouts.
 - Application modules are the BIF modules whose source files live beside the

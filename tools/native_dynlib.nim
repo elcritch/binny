@@ -18,7 +18,7 @@ proc readExportList(path: string): seq[NativeExportSymbol] =
         if name[0] != '_':
           quit "invalid Darwin export name: " & name
         result.add NativeExportSymbol(cSymbol: name[1..^1])
-  elif defined(linux):
+  elif defined(linux) or defined(freebsd):
     var inGlobalSection = false
     for line in path.readFile.splitLines:
       let value = line.strip
@@ -46,10 +46,10 @@ try:
     for symbol in symbols:
       echo symbol.nifSymbol, " -> ", symbol.cSymbol
   of "pic":
-    when defined(linux):
+    when defined(linux) or defined(freebsd):
       compileElfPicObjects(paramStr(2), [paramStr(3), paramStr(4)])
     else:
-      quit "PIC recompilation is only required on Linux"
+      quit "PIC recompilation is only required on ELF hosts"
   of "promote":
     promoteNativeArchive(paramStr(2), paramStr(3),
       readExportList(paramStr(4)))

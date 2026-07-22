@@ -48,9 +48,9 @@ let
   exportList = path(nimcacheDir, "libproducer.exports")
   library = case hostOS
     of "macosx": path(nimcacheDir, "libproducer.dylib")
-    of "linux": path(nimcacheDir, "libproducer.so")
+    of "linux", "freebsd": path(nimcacheDir, "libproducer.so")
     else: raise newException(ValueError,
-      "native dynamic libraries currently support macOS and Linux")
+      "native dynamic libraries currently support macOS, Linux, and FreeBSD")
 
 proc runNim(args: openArray[string]) =
   var command = @[compiler]
@@ -90,9 +90,9 @@ proc archiveProducerObjects() =
     raise newException(IOError, "producer backend emitted no object files")
   var command = case hostOS
     of "macosx": @["/usr/bin/libtool", "-static", "-o", privateArchive]
-    of "linux": @["ar", "-rcs", privateArchive]
+    of "linux", "freebsd": @["ar", "-rcs", privateArchive]
     else: raise newException(ValueError,
-      "native dynamic libraries currently support macOS and Linux")
+      "native dynamic libraries currently support macOS, Linux, and FreeBSD")
   command.add objects
   runCommand(command)
 
@@ -104,7 +104,7 @@ proc expectedExportNames(): seq[string] =
     of "macosx":
       if value.len > 0:
         result.add value
-    of "linux":
+    of "linux", "freebsd":
       if value == "global:":
         inGlobalSection = true
       elif value == "local:":
@@ -118,9 +118,9 @@ proc verifyExports() =
   let
     command = case hostOS
       of "macosx": @["/usr/bin/nm", "-gU", library]
-      of "linux": @["nm", "-D", "--defined-only", library]
+      of "linux", "freebsd": @["nm", "-D", "--defined-only", library]
       else: raise newException(ValueError,
-        "native dynamic libraries currently support macOS and Linux")
+        "native dynamic libraries currently support macOS, Linux, and FreeBSD")
     (output, exitCode) = gorgeEx(quoteShellCommand(command))
     expected = expectedExportNames()
   if exitCode != 0:
@@ -143,7 +143,7 @@ proc buildProducer() =
   compileProducerBackend()
   runCommand([toolBinary, "root", producerCache, producerSource, exportList])
   compileProducerBackend()
-  if hostOS == "linux":
+  if hostOS == "linux" or hostOS == "freebsd":
     runCommand([toolBinary, "pic", producerCache, nimLibDir, exampleDir])
   archiveProducerObjects()
   runCommand([toolBinary, "promote", privateArchive, publicArchive, exportList])
