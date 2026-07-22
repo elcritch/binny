@@ -1,16 +1,19 @@
 ## Builds a native Nim export surface from semantic BIF and compiler artifacts.
 ##
-## The incremental C backend records every owned routine in ``.c.nif`` before
-## whole-program dead-code elimination. This module matches public routine
-## declarations from semantic BIF to those backend definitions, keeps them live,
-## and promotes the resulting Mach-O or ELF symbols after they are archived.
+## This module matches public routine declarations from semantic BIF to compiler
+## C artifacts, keeps the selected routines live across whole-program dead-code
+## elimination, and promotes their Mach-O or ELF symbols after archiving.
 
-import std/[algorithm, os, osproc, sets, streams, strutils, tables, tempfiles]
+import std/[algorithm, cmdline, os, osproc, sets, streams, strutils, tables, tempfiles]
 import nif/[bif, nifcore, nifcoreparse, nifqueries]
 import exportconfig
 
 type
   NativeStaticLibError* = object of CatchableError
+
+  NativeCodegenBackend* = enum
+    ncbC
+    ncbIncremental
 
   NativeExportSymbol* = object
     sourcePath*: string
@@ -20,6 +23,7 @@ type
   NativeHookSymbol* = object
     sourcePath*: string
     typeSymbol*: string
+    typeName*: string
     hookKind*: string
     nifSymbol*: string
     cSymbol*: string
@@ -59,18 +63,93 @@ proc fail(message: string) {.noreturn.} =
 func semanticModule(symbol: string): string =
   let separator = symbol.rfind('.')
   if separator >= 0:
-    result = symbol[separator + 1..^1]
+    result = symbol[separator + 1 ..^ 1]
 
 func semanticName(symbol: string): string =
   let moduleSeparator = symbol.rfind('.')
   if moduleSeparator < 0:
     return symbol
-  let qualifiedName = symbol[0..<moduleSeparator]
+  let qualifiedName = symbol[0 ..< moduleSeparator]
   let overloadSeparator = qualifiedName.rfind('.')
   if overloadSeparator < 0:
     result = qualifiedName
   else:
-    result = qualifiedName[0..<overloadSeparator]
+    result = qualifiedName[0 ..< overloadSeparator]
+
+func semanticOverload(symbol: string): string =
+  let moduleSeparator = symbol.rfind('.')
+  if moduleSeparator < 0:
+    return
+  let
+    qualifiedName = symbol[0 ..< moduleSeparator]
+    overloadSeparator = qualifiedName.rfind('.')
+  if overloadSeparator >= 0:
+    result = qualifiedName[overloadSeparator + 1 ..^ 1]
+
+func mangleCName(value: string): string =
+  var requiresUnderscore = false
+  for index, character in value:
+    template special(replacement: string) =
+      result.add replacement
+      requiresUnderscore = true
+
+    case character
+    of 'a' .. 'z', 'A' .. 'Z', '0' .. '9':
+      if index == 0 and character in {'0' .. '9'}:
+        result.add 'X'
+      result.add character
+    of '_':
+      if index == 0 or index == value.high or value[index + 1] notin {'0' .. '9'}:
+        result.add character
+    of '$':
+      special("dollar")
+    of '%':
+      special("percent")
+    of '&':
+      special("amp")
+    of '^':
+      special("roof")
+    of '!':
+      special("emark")
+    of '?':
+      special("qmark")
+    of '*':
+      special("star")
+    of '+':
+      special("plus")
+    of '-':
+      special("minus")
+    of '/':
+      special("slash")
+    of '\\':
+      special("backslash")
+    of '=':
+      special("eq")
+    of '<':
+      special("lt")
+    of '>':
+      special("gt")
+    of '~':
+      special("tilde")
+    of ':':
+      special("colon")
+    of '.':
+      special("dot")
+    of '@':
+      special("at")
+    of '|':
+      special("bar")
+    else:
+      result.add 'X'
+      result.add toHex(ord(character), 2)
+      requiresUnderscore = true
+  if requiresUnderscore:
+    result.add '_'
+
+func cSymbolPrefix(symbol: string): string =
+  let overload = symbol.semanticOverload
+  if overload.len > 0:
+    result = symbol.semanticName.mangleCName & "_u" & overload & "__"
 
 func bifModuleSuffix(path: string): string =
   let name = path.extractFilename
@@ -111,9 +190,10 @@ func libraryStem(path: string): string =
   let name = path.extractFilename
   for marker in [".dylib", ".so", ".dll"]:
     let position = name.find(marker)
-    if position > 0 and
-        (position + marker.len == name.len or
-          marker == ".so" and name[position + marker.len] == '.'):
+    if position > 0 and (
+      position + marker.len == name.len or
+      marker == ".so" and name[position + marker.len] == '.'
+    ):
       return name[0 ..< position]
   result = name.splitFile.name
   if result.len == 0:
@@ -122,7 +202,7 @@ func libraryStem(path: string): string =
 func symbolFragment(value: string): string =
   var previousWasUnderscore = false
   for character in value:
-    if character in {'A'..'Z', 'a'..'z', '0'..'9'}:
+    if character in {'A' .. 'Z', 'a' .. 'z', '0' .. '9'}:
       result.add character
       previousWasUnderscore = false
     elif not previousWasUnderscore:
@@ -132,7 +212,7 @@ func symbolFragment(value: string): string =
     result.setLen(result.len - 1)
   if result.len == 0:
     result = "library"
-  elif result[0] in {'0'..'9'}:
+  elif result[0] in {'0' .. '9'}:
     result = "lib_" & result
 
 proc nativeInitSymbol*(libraryName, bifPath: string): string =
@@ -140,8 +220,8 @@ proc nativeInitSymbol*(libraryName, bifPath: string): string =
   let identity = bifModuleSuffix(bifPath)
   if identity.len == 0:
     fail("semantic BIF has an invalid filename: " & bifPath)
-  result = libraryStem(libraryName).symbolFragment &
-    "_NimMain_" & identity.symbolFragment
+  result =
+    libraryStem(libraryName).symbolFragment & "_NimMain_" & identity.symbolFragment
 
 proc isRoutineDeclaration(declaration: Cursor): bool =
   if declaration.kind != TagLit:
@@ -213,41 +293,52 @@ proc firstParameterType(declaration: Cursor): string =
     children.skip
 
 proc applyExportConfig(
-    symbols: openArray[NativeExportSymbol]; sourceRoot: string;
-    exportConfig: NativeExportConfig
+    symbols: openArray[NativeExportSymbol],
+    sourceRoot: string,
+    exportConfig: NativeExportConfig,
 ): seq[NativeExportSymbol] =
   exportConfig.validateNativeExportConfig()
-  if exportConfig.excludeProcs.len == 0:
+  if exportConfig.includeProcs.len == 0 and exportConfig.excludeProcs.len == 0:
     return @symbols
 
   let root = normalizedAbsolutePath(sourceRoot)
+  var includedMatches = newSeq[bool](exportConfig.includeProcs.len)
   var matched = newSeq[bool](exportConfig.excludeProcs.len)
   for symbol in symbols:
     let
       source = relativePath(symbol.sourcePath, root).replace('\\', '/')
       name = semanticName(symbol.nifSymbol)
+    var included = exportConfig.includeProcs.len == 0
+    for index, selector in exportConfig.includeProcs:
+      if selector.matches(source, name):
+        includedMatches[index] = true
+        included = true
     var excluded = false
     for index, selector in exportConfig.excludeProcs:
       if selector.matches(source, name):
         matched[index] = true
         excluded = true
-    if not excluded:
+    if included and not excluded:
       result.add symbol
 
   if exportConfig.requireMatches:
     var missing: seq[string]
+    for index, selector in exportConfig.includeProcs:
+      if not includedMatches[index]:
+        let source = if selector.source.len == 0: "*" else: selector.source
+        missing.add "include " & source & ":" & selector.name
     for index, selector in exportConfig.excludeProcs:
       if not matched[index]:
-        let source =
-          if selector.source.len == 0: "*" else: selector.source
-        missing.add source & ":" & selector.name
+        let source = if selector.source.len == 0: "*" else: selector.source
+        missing.add "exclude " & source & ":" & selector.name
     if missing.len > 0:
-      fail("native export exclusions matched no public procedures:\n  " &
-        missing.join("\n  "))
+      fail(
+        "native export selectors matched no public procedures:\n  " &
+          missing.join("\n  ")
+      )
 
 proc publicRoutineSymbols*(
-    nimcacheDir, sourceRoot: string;
-    exportConfig = NativeExportConfig()
+    nimcacheDir, sourceRoot: string, exportConfig = NativeExportConfig()
 ): seq[NativeExportSymbol] =
   ## Returns public, runtime routine declarations owned by application modules.
   ##
@@ -265,7 +356,7 @@ proc publicRoutineSymbols*(
     if source.len == 0:
       continue
     let absoluteSource = normalizedAbsolutePath(source)
-    if not pathIsWithin(absoluteSource, root):
+    if not pathIsWithin(absoluteSource, root) and exportConfig.includeProcs.len == 0:
       continue
 
     let moduleSuffix = bifModuleSuffix(path)
@@ -293,13 +384,13 @@ proc nativeHookSymbols*(nimcacheDir, sourceRoot: string): seq[NativeHookSymbol] 
       continue
 
     let moduleSuffix = bifModuleSuffix(path)
-    var publicTypes = initHashSet[string]()
+    var publicTypes: Table[string, string]
     for name, visibility, declaration in module.declarations:
       if visibility == ivExported and semanticModule(name) == moduleSuffix and
           not declaration.findChildTag("type").cursorIsNil:
         let typeSymbol = declaration.declarationTypeSymbol()
         if typeSymbol.len > 0:
-          publicTypes.incl typeSymbol
+          publicTypes[typeSymbol] = name.semanticName
 
     for name, visibility, declaration in module.declarations:
       if visibility == ivHidden and semanticModule(name) == moduleSuffix and
@@ -309,6 +400,7 @@ proc nativeHookSymbols*(nimcacheDir, sourceRoot: string): seq[NativeHookSymbol] 
           result.add NativeHookSymbol(
             sourcePath: absoluteSource,
             typeSymbol: typeSymbol,
+            typeName: publicTypes[typeSymbol],
             hookKind: name.symbolBase,
             nifSymbol: name,
             forbidden: declaration.hasDescendantIdent("error"),
@@ -352,7 +444,7 @@ func withRootFlag(flags: string): string =
     return flags
   result = flags & "x"
 
-proc replaceDefinitionFlags(content: var string; definition: CDefinition): bool =
+proc replaceDefinitionFlags(content: var string, definition: CDefinition): bool =
   let
     oldFlags = if definition.flags.len == 0: "." else: definition.flags
     newFlags = definition.flags.withRootFlag
@@ -366,8 +458,9 @@ proc replaceDefinitionFlags(content: var string; definition: CDefinition): bool 
   content[position ..< position + oldPrefix.len] = newPrefix
   result = true
 
-proc resolveNativeSymbols*(nimcacheDir: string;
-    symbols: openArray[NativeExportSymbol]): seq[NativeExportSymbol] =
+proc resolveIncrementalNativeSymbols(
+    nimcacheDir: string, symbols: openArray[NativeExportSymbol]
+): seq[NativeExportSymbol] =
   ## Matches semantic routines to their exact incremental-backend C names.
   result = @symbols
   var indexes = initTable[string, int]()
@@ -382,8 +475,9 @@ proc resolveNativeSymbols*(nimcacheDir: string;
         if result[index].cSymbol.len == 0:
           result[index].cSymbol = definition.cSymbol
         elif result[index].cSymbol != definition.cSymbol:
-          fail("one semantic routine has multiple backend names: " &
-            definition.nifSymbol)
+          fail(
+            "one semantic routine has multiple backend names: " & definition.nifSymbol
+          )
         matched.incl definition.nifSymbol
 
   var missing: seq[string]
@@ -394,8 +488,97 @@ proc resolveNativeSymbols*(nimcacheDir: string;
     missing.sort()
     fail("native routines have no backend definitions:\n  " & missing.join("\n  "))
 
-proc resolveNativeHooks*(nimcacheDir: string;
-    hooks: openArray[NativeHookSymbol]): seq[NativeHookSymbol] =
+func isCIdentifierCharacter(character: char): bool =
+  character in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_'}
+
+func cTokenPrefix(token: string): string =
+  var marker = token.find("_u")
+  while marker >= 0:
+    var position = marker + 2
+    let digitStart = position
+    while position < token.len and token[position] in {'0' .. '9'}:
+      inc position
+    if position > digitStart and position + 1 < token.len and token[position] == '_' and
+        token[position + 1] == '_':
+      return token[0 .. position + 1]
+    marker = token.find("_u", marker + 2)
+
+proc cBackendSymbols(nimcacheDir: string): Table[string, HashSet[string]] =
+  for path in walkFiles(nimcacheDir / "*.c"):
+    let content = readFile(path)
+    var position = 0
+    while position < content.len:
+      if not content[position].isCIdentifierCharacter:
+        inc position
+        continue
+      var ending = position + 1
+      while ending < content.len and content[ending].isCIdentifierCharacter:
+        inc ending
+      let token = content[position ..< ending]
+      let prefix = token.cTokenPrefix
+      if prefix.len > 0 and token.len > prefix.len:
+        result.mgetOrPut(prefix, initHashSet[string]()).incl token
+      position = ending
+
+proc resolveCNativeSymbols(
+    nimcacheDir: string, symbols: openArray[NativeExportSymbol]
+): seq[NativeExportSymbol] =
+  result = @symbols
+  var moduleIndexes: Table[string, seq[int]]
+  var candidates = newSeq[HashSet[string]](result.len)
+  var missing: seq[string]
+  let backendSymbols = cBackendSymbols(nimcacheDir)
+  for index, symbol in result:
+    let prefix = symbol.nifSymbol.cSymbolPrefix
+    if prefix.len == 0:
+      missing.add symbol.nifSymbol
+    else:
+      candidates[index] = backendSymbols.getOrDefault(prefix)
+      if candidates[index].len == 0:
+        missing.add symbol.nifSymbol
+    moduleIndexes.mgetOrPut(symbol.nifSymbol.semanticModule, @[]).add index
+  if missing.len > 0:
+    missing.sort()
+    fail("native routines have no C backend definitions:\n  " & missing.join("\n  "))
+
+  for module, indexes in moduleIndexes:
+    var commonSuffixes: HashSet[string]
+    var first = true
+    for index in indexes:
+      let prefix = result[index].nifSymbol.cSymbolPrefix
+      var suffixes: HashSet[string]
+      for candidate in candidates[index]:
+        suffixes.incl candidate[prefix.len ..^ 1]
+      if first:
+        commonSuffixes = suffixes
+        first = false
+      else:
+        commonSuffixes = commonSuffixes * suffixes
+    if commonSuffixes.len != 1:
+      fail("cannot determine one C backend module suffix for " & module)
+    let suffix = commonSuffixes.pop()
+    for index in indexes:
+      let candidate = result[index].nifSymbol.cSymbolPrefix & suffix
+      if candidate notin candidates[index]:
+        fail("C backend definition mismatch for " & result[index].nifSymbol)
+      result[index].cSymbol = candidate
+
+proc hasIncrementalCArtifacts*(nimcacheDir: string): bool =
+  for _ in walkFiles(nimcacheDir / "*.c.nif"):
+    return true
+
+proc resolveNativeSymbols*(
+    nimcacheDir: string, symbols: openArray[NativeExportSymbol]
+): seq[NativeExportSymbol] =
+  ## Matches semantic routines to exact names from either compiler C backend.
+  if nimcacheDir.hasIncrementalCArtifacts:
+    result = resolveIncrementalNativeSymbols(nimcacheDir, symbols)
+  else:
+    result = resolveCNativeSymbols(nimcacheDir, symbols)
+
+proc resolveNativeHooks*(
+    nimcacheDir: string, hooks: openArray[NativeHookSymbol]
+): seq[NativeHookSymbol] =
   ## Adds exact backend names to custom hooks; forbidden hooks have no definition.
   result = @hooks
   var unresolved: seq[NativeExportSymbol]
@@ -404,16 +587,138 @@ proc resolveNativeHooks*(nimcacheDir: string;
     if not hook.forbidden:
       indexes.add index
       unresolved.add NativeExportSymbol(
-        sourcePath: hook.sourcePath,
-        nifSymbol: hook.nifSymbol,
+        sourcePath: hook.sourcePath, nifSymbol: hook.nifSymbol
       )
   let resolved = resolveNativeSymbols(nimcacheDir, unresolved)
   for index, symbol in resolved:
     result[indexes[index]].cSymbol = symbol.cSymbol
 
+proc nativeCRootSourcePath*(nimcacheDir: string): string =
+  ## Returns the generated reachability-root module used by ``nim c`` builds.
+  nimcacheDir / "binny_native_root.nim"
+
+func nimStringLiteral(value: string): string =
+  "\"" & value.replace("\\", "\\\\").replace("\"", "\\\"") & "\""
+
+func nimQuotedIdentifier(value: string): string =
+  "`" & value.replace("`", "") & "`"
+
+proc writeCBackendRoot(
+    outputPath: string,
+    routines: openArray[NativeExportSymbol],
+    hooks: openArray[NativeHookSymbol],
+) =
+  var routineNamesBySource: Table[string, seq[string]]
+  var sources: seq[string]
+  for routine in routines:
+    let source = normalizedAbsolutePath(routine.sourcePath)
+    if source notin sources:
+      sources.add source
+    let name = routine.nifSymbol.semanticName
+    if name notin routineNamesBySource.mgetOrPut(source, @[]):
+      routineNamesBySource[source].add name
+  for hook in hooks:
+    let source = normalizedAbsolutePath(hook.sourcePath)
+    if source notin sources:
+      sources.add source
+  sources.sort()
+
+  var aliases: Table[string, string]
+  var content = "## Generated by Binny to keep public native routines reachable.\n\n"
+  content.add "import std/macros\n"
+  for index, source in sources:
+    let
+      parts = source.splitFile
+      modulePath = parts.dir / parts.name
+      moduleAlias = "binnyRootModule" & $index
+    aliases[source] = moduleAlias
+    content.add "import " & modulePath.nimStringLiteral & " as " & moduleAlias & "\n"
+    if source in routineNamesBySource:
+      var names = routineNamesBySource[source]
+      names.sort()
+      content.add "from " & modulePath.nimStringLiteral & " import "
+      for nameIndex, name in names:
+        if nameIndex > 0:
+          content.add ", "
+        content.add name.nimQuotedIdentifier
+      content.add "\n"
+
+  var rootedNames = initHashSet[string]()
+  for routine in routines:
+    let
+      source = normalizedAbsolutePath(routine.sourcePath)
+      name = routine.nifSymbol.semanticName
+      key = source & "\x1f" & name
+    if key notin rootedNames:
+      rootedNames.incl key
+      let keepMacro = "binnyKeepRoutine" & $rootedNames.len
+      content.add "\nmacro " & keepMacro & "(): untyped =\n"
+      content.add "  let symbols = bindSym(" & name.nimStringLiteral & ", brForceOpen)\n"
+      content.add "  result = newStmtList()\n"
+      content.add "  for symbol in symbols:\n"
+      content.add "    let implementation = symbol.getImpl\n"
+      content.add "    if implementation.lineInfoObj.filename == " &
+        source.nimStringLiteral & " and\n"
+      content.add "        implementation.kind in {nnkProcDef, nnkFuncDef, " &
+        "nnkMethodDef, nnkConverterDef, nnkIteratorDef} and\n"
+      content.add "        implementation[2].kind == nnkEmpty:\n"
+      content.add "      result.add newLetStmt(genSym(nskLet, " &
+        "\"binnyRoot\"), symbol)\n"
+      content.add "\n" & keepMacro & "()\n"
+
+  var typeHooks: Table[string, seq[NativeHookSymbol]]
+  for hook in hooks:
+    typeHooks.mgetOrPut(hook.typeSymbol, @[]).add hook
+  var typeSymbols: seq[string]
+  for typeSymbol in typeHooks.keys:
+    typeSymbols.add typeSymbol
+  typeSymbols.sort()
+  if typeSymbols.len > 0:
+    content.add "\nvar binnyHookSource {.volatile.}: pointer\n"
+  for index, typeSymbol in typeSymbols:
+    let hooksForType = typeHooks[typeSymbol]
+    if hooksForType.len == 0:
+      continue
+    let
+      source = normalizedAbsolutePath(hooksForType[0].sourcePath)
+      qualifiedType =
+        aliases[source] & "." & hooksForType[0].typeName.nimQuotedIdentifier
+      keepProc = "binnyKeepHooks" & $index
+    content.add "\nproc " & keepProc & "() =\n"
+    content.add "  var source {.noinit.}: " & qualifiedType & "\n"
+    content.add "  var destination {.noinit.}: " & qualifiedType & "\n"
+    content.add "  copyMem(addr source, binnyHookSource, sizeof(source))\n"
+    content.add "  copyMem(addr destination, binnyHookSource, sizeof(destination))\n"
+    for hook in hooksForType:
+      if hook.forbidden:
+        continue
+      case hook.hookKind
+      of "=destroy":
+        discard
+      of "=copy":
+        content.add "  destination = source\n"
+      of "=sink":
+        content.add "  destination = move(source)\n"
+      of "=dup":
+        content.add "  discard dup(source)\n"
+      of "=wasMoved":
+        content.add "  wasMoved(source)\n"
+      else:
+        fail(
+          "nim c reachability roots do not support hook " & hook.hookKind &
+            "; use nim ic for this producer"
+        )
+    content.add "  binnyHookSource = addr source\n"
+    content.add "\nlet binnyHookRoot" & $index & " = " & keepProc & "\n"
+
+  let outputDir = outputPath.parentDir
+  if outputDir.len > 0:
+    createDir(outputDir)
+  if not fileExists(outputPath) or readFile(outputPath) != content:
+    writeFile(outputPath, content)
+
 proc rootPublicRoutines*(
-    nimcacheDir, sourceRoot, mainSource: string;
-    exportConfig = NativeExportConfig()
+    nimcacheDir, sourceRoot, mainSource: string, exportConfig = NativeExportConfig()
 ): seq[NativeExportSymbol] =
   ## Roots public app routines and ownership hooks required by public types.
   ##
@@ -423,8 +728,7 @@ proc rootPublicRoutines*(
   for hook in nativeHookSymbols(nimcacheDir, sourceRoot):
     if not hook.forbidden:
       exports.add NativeExportSymbol(
-        sourcePath: hook.sourcePath,
-        nifSymbol: hook.nifSymbol,
+        sourcePath: hook.sourcePath, nifSymbol: hook.nifSymbol
       )
   var indexes = initTable[string, int]()
   for index, symbol in exports:
@@ -434,6 +738,7 @@ proc rootPublicRoutines*(
     path: string
     definitions: seq[CDefinition]
     ownsMain: bool
+
   let absoluteMain = normalizedAbsolutePath(mainSource)
   var artifacts: seq[Artifact]
   for path in walkFiles(nimcacheDir / "*.c.nif"):
@@ -444,11 +749,12 @@ proc rootPublicRoutines*(
         artifact.ownsMain = true
         break
     artifacts.add artifact
-  artifacts.sort(proc(left, right: Artifact): int =
-    if left.ownsMain != right.ownsMain:
-      if left.ownsMain: 1 else: -1
-    else:
-      cmp(left.path, right.path)
+  artifacts.sort(
+    proc(left, right: Artifact): int =
+      if left.ownsMain != right.ownsMain:
+        if left.ownsMain: 1 else: -1
+      else:
+        cmp(left.path, right.path)
   )
 
   for artifact in artifacts:
@@ -460,8 +766,9 @@ proc rootPublicRoutines*(
         if exports[index].cSymbol.len == 0:
           exports[index].cSymbol = definition.cSymbol
         elif exports[index].cSymbol != definition.cSymbol:
-          fail("one semantic routine has multiple backend names: " &
-            definition.nifSymbol)
+          fail(
+            "one semantic routine has multiple backend names: " & definition.nifSymbol
+          )
         if 'x' notin definition.flags:
           changed = content.replaceDefinitionFlags(definition) or changed
     if changed:
@@ -469,8 +776,40 @@ proc rootPublicRoutines*(
 
   result = resolveNativeSymbols(nimcacheDir, exports)
 
-proc writeDarwinExportList*(path, initSymbol: string;
-                            symbols: openArray[NativeExportSymbol]) =
+proc prepareNativeRoutines*(
+    nimcacheDir, sourceRoot, mainSource, cRootSource: string,
+    exportConfig = NativeExportConfig(),
+): NativeCodegenBackend =
+  ## Prepares public routines for a second compiler pass.
+  ##
+  ## Incremental builds root matching ``.c.nif`` definitions in place. Normal
+  ## C builds receive a generated module that takes the address of each public
+  ## routine and exercises required ownership hooks in an uncalled helper.
+  if nimcacheDir.hasIncrementalCArtifacts:
+    discard rootPublicRoutines(nimcacheDir, sourceRoot, mainSource, exportConfig)
+    result = ncbIncremental
+  else:
+    let
+      routines = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig)
+      hooks = nativeHookSymbols(nimcacheDir, sourceRoot)
+    writeCBackendRoot(cRootSource, routines, hooks)
+    result = ncbC
+
+proc nativeExportSymbols*(
+    nimcacheDir, sourceRoot: string, exportConfig = NativeExportConfig()
+): seq[NativeExportSymbol] =
+  ## Resolves the selected routine and ownership-hook names after codegen.
+  var symbols = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig)
+  for hook in nativeHookSymbols(nimcacheDir, sourceRoot):
+    if not hook.forbidden:
+      symbols.add NativeExportSymbol(
+        sourcePath: hook.sourcePath, nifSymbol: hook.nifSymbol
+      )
+  result = resolveNativeSymbols(nimcacheDir, symbols)
+
+proc writeDarwinExportList*(
+    path, initSymbol: string, symbols: openArray[NativeExportSymbol]
+) =
   ## Writes an ld ``-exported_symbols_list`` with a unique runtime initializer.
   var names: seq[string]
   for symbol in symbols:
@@ -483,8 +822,9 @@ proc writeDarwinExportList*(path, initSymbol: string;
       uniqueNames.add name
   writeFile(path, uniqueNames.join("\n") & "\n")
 
-proc writeElfVersionScript*(path, initSymbol: string;
-                            symbols: openArray[NativeExportSymbol]) =
+proc writeElfVersionScript*(
+    path, initSymbol: string, symbols: openArray[NativeExportSymbol]
+) =
   ## Writes a GNU ld version script containing only the selected native API.
   var names: seq[string]
   for symbol in symbols:
@@ -502,8 +842,9 @@ proc writeElfVersionScript*(path, initSymbol: string;
   lines.add "};"
   writeFile(path, lines.join("\n") & "\n")
 
-proc writeNativeExportList*(path, initSymbol: string;
-                            symbols: openArray[NativeExportSymbol]) =
+proc writeNativeExportList*(
+    path, initSymbol: string, symbols: openArray[NativeExportSymbol]
+) =
   ## Writes the host linker's export-control file.
   when defined(macosx):
     writeDarwinExportList(path, initSymbol, symbols)
@@ -512,27 +853,25 @@ proc writeNativeExportList*(path, initSymbol: string;
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)
 
-func readU32(data: string; offset: int): uint32 =
+func readU32(data: string, offset: int): uint32 =
   if offset < 0 or offset + 4 > data.len:
     fail("truncated native object")
-  result = uint32(byte(data[offset])) or
-    uint32(byte(data[offset + 1])) shl 8 or
-    uint32(byte(data[offset + 2])) shl 16 or
-    uint32(byte(data[offset + 3])) shl 24
+  result =
+    uint32(byte(data[offset])) or uint32(byte(data[offset + 1])) shl 8 or
+    uint32(byte(data[offset + 2])) shl 16 or uint32(byte(data[offset + 3])) shl 24
 
-func readU16(data: string; offset: int): uint16 =
+func readU16(data: string, offset: int): uint16 =
   if offset < 0 or offset + 2 > data.len:
     fail("truncated native object")
-  result = uint16(byte(data[offset])) or
-    uint16(byte(data[offset + 1])) shl 8
+  result = uint16(byte(data[offset])) or uint16(byte(data[offset + 1])) shl 8
 
-func readU64(data: string; offset: int): uint64 =
+func readU64(data: string, offset: int): uint64 =
   if offset < 0 or offset + 8 > data.len:
     fail("truncated native object")
   for index in 0 ..< 8:
     result = result or uint64(byte(data[offset + index])) shl (index * 8)
 
-func checkedInt(value: uint64; path: string): int =
+func checkedInt(value: uint64, path: string): int =
   if value > uint64(high(int)):
     fail("ELF offset exceeds host address space in " & path)
   result = int(value)
@@ -540,7 +879,7 @@ func checkedInt(value: uint64; path: string): int =
 func rangeFits(offset, size, limit: int): bool =
   offset >= 0 and size >= 0 and offset <= limit and size <= limit - offset
 
-proc objectString(data: string; offset, limit: int): string =
+proc objectString(data: string, offset, limit: int): string =
   if offset < 0 or offset >= limit or limit > data.len:
     return
   var index = offset
@@ -549,7 +888,7 @@ proc objectString(data: string; offset, limit: int): string =
     inc index
 
 proc patchMachOObject(
-    path: string; symbols: HashSet[string]; found: var HashSet[string]
+    path: string, symbols: HashSet[string], found: var HashSet[string]
 ): bool =
   var data = readFile(path)
   if data.len < machHeader64Size or data.readU32(0) != machMagic64:
@@ -581,8 +920,8 @@ proc patchMachOObject(
 
   if symtabOffset < 0:
     return
-  if symtabOffset + symbolCount * nlist64Size > data.len or
-      stringOffset < 0 or stringOffset + stringSize > data.len:
+  if symtabOffset + symbolCount * nlist64Size > data.len or stringOffset < 0 or
+      stringOffset + stringSize > data.len:
     fail("invalid Mach-O symbol table in " & path)
 
   var changed = false
@@ -590,8 +929,8 @@ proc patchMachOObject(
     let
       entryOffset = symtabOffset + index * nlist64Size
       nameOffset = int(data.readU32(entryOffset))
-      symbolName = data.objectString(stringOffset + nameOffset,
-        stringOffset + stringSize)
+      symbolName =
+        data.objectString(stringOffset + nameOffset, stringOffset + stringSize)
       symbolType = uint8(data[entryOffset + 4])
       isDefinition = (symbolType and nTypeMask) != nTypeUndefined
     if symbolName in symbols and isDefinition:
@@ -605,11 +944,11 @@ proc patchMachOObject(
     writeFile(path, data)
 
 proc patchElfObject(
-    path: string; symbols: HashSet[string]; found: var HashSet[string]
+    path: string, symbols: HashSet[string], found: var HashSet[string]
 ): bool =
   var data = readFile(path)
-  if data.len < 4 or data[0] != '\x7f' or data[1] != 'E' or
-      data[2] != 'L' or data[3] != 'F':
+  if data.len < 4 or data[0] != '\x7f' or data[1] != 'E' or data[2] != 'L' or
+      data[3] != 'F':
     return false
   result = true
   if data.len < elfHeader64Size:
@@ -631,8 +970,7 @@ proc patchElfObject(
   for sectionIndex in 0 ..< sectionCount:
     let sectionHeader = sectionOffset + sectionIndex * sectionEntrySize
     let sectionType = data.readU32(sectionHeader + 4)
-    if sectionType == elfSectionSymbolTable or
-        sectionType == elfSectionDynamicSymbols:
+    if sectionType == elfSectionSymbolTable or sectionType == elfSectionDynamicSymbols:
       let
         symbolOffset = data.readU64(sectionHeader + 24).checkedInt(path)
         symbolSize = data.readU64(sectionHeader + 32).checkedInt(path)
@@ -657,35 +995,61 @@ proc patchElfObject(
           fail("truncated ELF symbol table in " & path)
         let
           nameOffset = int(data.readU32(entryOffset))
-          symbolName = data.objectString(
-            stringOffset + nameOffset, stringOffset + stringSize)
+          symbolName =
+            data.objectString(stringOffset + nameOffset, stringOffset + stringSize)
           symbolInfo = uint8(data[entryOffset + 4])
           symbolOther = uint8(data[entryOffset + 5])
           symbolSection = data.readU16(entryOffset + 6)
           binding = symbolInfo shr 4
-        if symbolName in symbols and symbolSection != elfUndefinedSection:
-          if binding != elfBindingGlobal and binding != elfBindingWeak:
-            fail("cannot promote local ELF symbol: " & symbolName)
-          found.incl symbolName
-          if (symbolOther and elfVisibilityMask) != 0:
-            data[entryOffset + 5] =
-              char(symbolOther and not elfVisibilityMask)
-            changed = true
+        if symbolName in symbols:
+          if symbolSection != elfUndefinedSection:
+            if binding != elfBindingGlobal and binding != elfBindingWeak:
+              fail("cannot promote local ELF symbol: " & symbolName)
+            found.incl symbolName
+          if binding == elfBindingGlobal or binding == elfBindingWeak:
+            if (symbolOther and elfVisibilityMask) != 0:
+              data[entryOffset + 5] = char(symbolOther and not elfVisibilityMask)
+              changed = true
   if changed:
     writeFile(path, data)
 
-proc runProcess(command: string; arguments: openArray[string]; workingDir = "") =
-  var process = startProcess(command, workingDir = workingDir, args = @arguments,
-    options = {poUsePath, poStdErrToStdOut})
+proc runProcess(command: string, arguments: openArray[string], workingDir = "") =
+  var process = startProcess(
+    command,
+    workingDir = workingDir,
+    args = @arguments,
+    options = {poUsePath, poStdErrToStdOut},
+  )
   let output = process.outputStream.readAll()
   let exitCode = process.waitForExit()
   process.close()
   if exitCode != 0:
     fail(command & " failed with exit code " & $exitCode & ":\n" & output)
 
-proc compileElfPicObjects*(nimcacheDir: string;
-                           includePaths: openArray[string]; compiler = "cc") =
-  ## Recompiles incremental-backend C output as ELF position-independent code.
+proc recordedCCompileCommand(path: string): seq[string] =
+  const marker = "/* Command for C compiler:"
+  let
+    content = readFile(path)
+    markerPosition = content.find(marker)
+  if markerPosition < 0:
+    fail("generated C source has no recorded compiler command: " & path)
+  let
+    commandStart = markerPosition + marker.len
+    commandEnd = content.find(" */", commandStart)
+  if commandEnd < 0:
+    fail("generated C source has an incomplete compiler command: " & path)
+  result = parseCmdLine(content[commandStart ..< commandEnd].strip())
+  if result.len < 2:
+    fail("generated C source has an invalid compiler command: " & path)
+
+proc compileElfPicObjects*(nimcacheDir: string) =
+  ## Recompiles generated C using Nim's recorded per-file flags plus ``-fPIC``.
+  ##
+  ## The incremental backend currently does not apply command-line ``passC``
+  ## options to its C compilation graph. Nim records the exact compiler command
+  ## in every generated C file, including module-specific pragma flags, so
+  ## replaying it preserves those flags while making the objects linkable into
+  ## an ELF shared library.
   var sources: seq[string]
   for path in walkFiles(nimcacheDir / "*.c"):
     sources.add path
@@ -693,20 +1057,17 @@ proc compileElfPicObjects*(nimcacheDir: string;
   if sources.len == 0:
     fail("incremental backend emitted no C sources in " & nimcacheDir)
 
-  var includeArguments: seq[string]
-  for path in includePaths:
-    includeArguments.add "-I" & normalizedAbsolutePath(path)
   for source in sources:
-    var arguments = @[
-      "-c", "-w", "-fno-strict-aliasing", "-fPIC", "-pthread",
-    ]
-    arguments.add includeArguments
-    arguments.add ["-o", normalizedAbsolutePath(source & ".o"),
-      normalizedAbsolutePath(source)]
-    runProcess(compiler, arguments)
+    if getFileSize(source) == 0:
+      continue
+    let command = recordedCCompileCommand(source)
+    var arguments = command[1 ..^ 1]
+    arguments.add "-fPIC"
+    runProcess(command[0], arguments)
 
-proc promoteMachOArchive*(inputPath, outputPath: string;
-                          symbols: openArray[NativeExportSymbol]) =
+proc promoteMachOArchive*(
+    inputPath, outputPath: string, symbols: openArray[NativeExportSymbol]
+) =
   ## Clears ``N_PEXT`` for selected definitions and writes a new archive.
   let
     input = normalizedAbsolutePath(inputPath)
@@ -744,9 +1105,10 @@ proc promoteMachOArchive*(inputPath, outputPath: string;
   arguments.add members
   runProcess("ar", arguments)
 
-proc promoteElfArchive*(inputPath, outputPath: string;
-                        symbols: openArray[NativeExportSymbol]) =
-  ## Changes selected ELF definitions from hidden to default visibility.
+proc promoteElfArchive*(
+    inputPath, outputPath: string, symbols: openArray[NativeExportSymbol]
+) =
+  ## Gives selected ELF definitions and references default visibility.
   let
     input = normalizedAbsolutePath(inputPath)
     output = normalizedAbsolutePath(outputPath)
@@ -783,8 +1145,9 @@ proc promoteElfArchive*(inputPath, outputPath: string;
   arguments.add members
   runProcess("ar", arguments)
 
-proc promoteNativeArchive*(inputPath, outputPath: string;
-                           symbols: openArray[NativeExportSymbol]) =
+proc promoteNativeArchive*(
+    inputPath, outputPath: string, symbols: openArray[NativeExportSymbol]
+) =
   ## Promotes selected definitions using the host object format.
   when defined(macosx):
     promoteMachOArchive(inputPath, outputPath, symbols)
@@ -793,53 +1156,94 @@ proc promoteNativeArchive*(inputPath, outputPath: string;
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)
 
-proc linkMachODylib*(archivePath, outputPath, exportListPath,
-                     initSymbol: string; installName = "") =
+proc linkMachODylib*(
+    archivePath, outputPath, exportListPath, initSymbol: string,
+    installName = "",
+    linkerArgs: openArray[string] = [],
+) =
   ## Links every member of a promoted archive into a symbol-filtered dylib.
-  let dylibName = if installName.len > 0:
-    installName
-  else:
-    "@rpath/" & outputPath.extractFilename
+  let dylibName =
+    if installName.len > 0:
+      installName
+    else:
+      "@rpath/" & outputPath.extractFilename
   createDir(outputPath.parentDir)
-  runProcess("clang", [
-    "-dynamiclib",
-    "-Wl,-force_load," & normalizedAbsolutePath(archivePath),
-    "-Wl,-alias,_NimMain,_" & initSymbol,
-    "-Wl,-exported_symbols_list," & normalizedAbsolutePath(exportListPath),
-    "-Wl,-install_name," & dylibName,
-    "-o", normalizedAbsolutePath(outputPath),
-  ])
+  var arguments =
+    @[
+      "-dynamiclib",
+      "-Wl,-force_load," & normalizedAbsolutePath(archivePath),
+      "-Wl,-alias,_NimMain,_" & initSymbol,
+      "-Wl,-exported_symbols_list," & normalizedAbsolutePath(exportListPath),
+      "-Wl,-install_name," & dylibName,
+    ]
+  arguments.add linkerArgs
+  arguments.add ["-o", normalizedAbsolutePath(outputPath)]
+  runProcess("clang", arguments)
 
-proc linkElfSharedLibrary*(archivePath, outputPath, exportListPath,
-                           initSymbol: string; soname = "") =
+proc linkElfSharedLibrary*(
+    archivePath, outputPath, exportListPath, initSymbol: string,
+    soname = "",
+    linkerArgs: openArray[string] = [],
+) =
   ## Links every archive member into a version-script-filtered ELF shared object.
-  let libraryName = if soname.len > 0:
-    soname
-  else:
-    outputPath.extractFilename
+  let libraryName = if soname.len > 0: soname else: outputPath.extractFilename
   createDir(outputPath.parentDir)
-  runProcess("cc", [
-    "-shared",
-    "-Wl,-z,defs",
-    "-Wl,--whole-archive",
-    normalizedAbsolutePath(archivePath),
-    "-Wl,--no-whole-archive",
-    "-Wl,--defsym=" & initSymbol & "=NimMain",
-    "-Wl,--version-script," & normalizedAbsolutePath(exportListPath),
-    "-Wl,-soname," & libraryName,
-    "-pthread",
-    "-ldl",
-    "-o", normalizedAbsolutePath(outputPath),
-  ])
+  let
+    temporary = createTempDir("binny-native-runtime-", "")
+    runtimeScript = temporary / "runtime.ld"
+  defer:
+    removeDir(temporary)
+  writeFile(
+    runtimeScript,
+    """SECTIONS
+{
+  .binny_runtime (NOLOAD) :
+  {
+    PROVIDE(cmdCount = .);
+    LONG(0);
+    . = ALIGN(8);
+    PROVIDE(cmdLine = .);
+    QUAD(0);
+  }
+}
+INSERT AFTER .bss;
+""",
+  )
+  # Nim emits direct references for hidden definitions. Keep those references
+  # locally bound after promoting the selected definitions to default visibility.
+  var arguments =
+    @[
+      "-shared",
+      "-Wl,-z,defs",
+      "-Wl,-Bsymbolic",
+      "-Wl,--whole-archive",
+      normalizedAbsolutePath(archivePath),
+      "-Wl,--no-whole-archive",
+      "-Wl,--defsym=" & initSymbol & "=NimMain",
+      "-Wl,--version-script," & normalizedAbsolutePath(exportListPath),
+      "-Wl,-T," & normalizedAbsolutePath(runtimeScript),
+      "-Wl,-soname," & libraryName,
+      "-pthread",
+      "-ldl",
+      "-lm",
+    ]
+  arguments.add linkerArgs
+  arguments.add ["-o", normalizedAbsolutePath(outputPath)]
+  runProcess("cc", arguments)
 
-proc linkNativeDynlib*(archivePath, outputPath, exportListPath,
-                       initSymbol: string; libraryName = "") =
+proc linkNativeDynlib*(
+    archivePath, outputPath, exportListPath, initSymbol: string,
+    libraryName = "",
+    linkerArgs: openArray[string] = [],
+) =
   ## Links a filtered native dynamic library using the host linker.
   when defined(macosx):
     linkMachODylib(
-      archivePath, outputPath, exportListPath, initSymbol, libraryName)
+      archivePath, outputPath, exportListPath, initSymbol, libraryName, linkerArgs
+    )
   elif defined(linux) or defined(freebsd):
     linkElfSharedLibrary(
-      archivePath, outputPath, exportListPath, initSymbol, libraryName)
+      archivePath, outputPath, exportListPath, initSymbol, libraryName, linkerArgs
+    )
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)

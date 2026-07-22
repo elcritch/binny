@@ -15,15 +15,14 @@ type
 func isNimKeyword(value: string): bool =
   let normalized = value.replace("_", "").toLowerAscii
   case normalized
-  of "addr", "and", "as", "asm", "atomic", "bind", "block", "break",
-      "case", "cast", "concept", "const", "continue", "converter", "defer",
-      "discard", "distinct", "div", "do", "elif", "else", "end", "enum",
-      "except", "export", "finally", "for", "from", "func", "generic", "if",
-      "import", "in", "include", "interface", "is", "isnot", "iterator", "let",
-      "lent", "macro", "method", "mixin", "mod", "nil", "not", "notin", "object",
-      "of", "or", "out", "proc", "ptr", "raise", "ref", "return", "shl", "shr",
-      "static", "template", "try", "tuple", "type", "using", "var", "when", "while",
-      "with", "without", "xor", "yield":
+  of "addr", "and", "as", "asm", "atomic", "bind", "block", "break", "case", "cast",
+      "concept", "const", "continue", "converter", "defer", "discard", "distinct",
+      "div", "do", "elif", "else", "end", "enum", "except", "export", "finally", "for",
+      "from", "func", "generic", "if", "import", "in", "include", "interface", "is",
+      "isnot", "iterator", "let", "lent", "macro", "method", "mixin", "mod", "nil",
+      "not", "notin", "object", "of", "or", "out", "proc", "ptr", "raise", "ref",
+      "return", "shl", "shr", "static", "template", "try", "tuple", "type", "using",
+      "var", "when", "while", "with", "without", "xor", "yield":
     true
   else:
     false
@@ -91,8 +90,7 @@ proc typeNames(api: NativeApi): Table[string, string] =
       var arguments: seq[string]
       for argument in typ.genericArguments:
         arguments.add nimType(argument, result)
-      let rendered = nimIdentifier(typ.name) &
-        "[" & arguments.join(", ") & "]"
+      let rendered = nimIdentifier(typ.name) & "[" & arguments.join(", ") & "]"
       result[typ.nifSymbol] = rendered
       result[typ.typeId] = rendered
     elif typ.kind == ntOpenArray:
@@ -338,7 +336,7 @@ proc generateTypes(api: NativeApi, names: Table[string, string]): string =
       continue
     of ntArray:
       if typ.indexTypeSymbol.len > 0:
-        result.add "array[" & nimIdentifier(typ.indexTypeSymbol) & ", " &
+        result.add "array[" & nimType(typ.indexTypeSymbol, names) & ", " &
           nimType(typ.elementTypeSymbol, names) & "]\n\n"
         continue
       var elementSize = 0'i64
@@ -419,9 +417,7 @@ proc generateFieldChecks(
         result.add generateFieldChecks(typeName, branch.record, indent)
 
 proc generateLayoutChecks(api: NativeApi, names: Table[string, string]): string =
-  let types = api.types.filterIt(
-    not it.isBuiltinType and it.kind != ntOpenArray
-  )
+  let types = api.types.filterIt(not it.isBuiltinType and it.kind != ntOpenArray)
   if types.len == 0:
     return
   result.add "static:\n"
@@ -443,10 +439,12 @@ proc params(procInfo: NativeProc, names: Table[string, string]): string =
   var parts: seq[string] = @[]
   let hasHiddenLengths = procInfo.params.anyIt(it.hiddenLengthCount > 0)
   var mangledTypes: seq[MangledType]
-  let needsMangledTypes = hasHiddenLengths and procInfo.params.anyIt(
-    it.hiddenLengthCount > 0 and
-      (it.typeSymbol notin names or not names[it.typeSymbol].startsWith("openArray["))
-  )
+  let needsMangledTypes =
+    hasHiddenLengths and
+    procInfo.params.anyIt(
+      it.hiddenLengthCount > 0 and
+        (it.typeSymbol notin names or not names[it.typeSymbol].startsWith("openArray["))
+    )
   if needsMangledTypes:
     mangledTypes = mangledParameterTypes(procInfo.cSymbol)
     if mangledTypes.len != procInfo.params.len:
@@ -463,11 +461,12 @@ proc params(procInfo: NativeProc, names: Table[string, string]): string =
           "native ABI parameter has an unsupported hidden length count: " & param.name,
         )
       let semanticType =
-        if param.typeSymbol in names: names[param.typeSymbol]
-        else: ""
+        if param.typeSymbol in names:
+          names[param.typeSymbol]
+        else:
+          ""
       let logicalType =
-        if semanticType.startsWith("openArray[") or
-            semanticType.startsWith("varargs["):
+        if semanticType.startsWith("openArray[") or semanticType.startsWith("varargs["):
           semanticType
         else:
           renderMangledType(mangledTypes[index], names)

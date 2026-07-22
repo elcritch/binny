@@ -4,9 +4,8 @@ import binny/native_dynlib/[artifacts, model]
 import binny/native_dynlib/staticlib
 
 block bif_config_defaults_to_source_directory:
-  let config = initBifNativeBindingsConfig(
-    "src/producer.nim", "build/cache", "libproducer.dylib"
-  )
+  let config =
+    initBifNativeBindingsConfig("src/producer.nim", "build/cache", "libproducer.dylib")
   doAssert config.sourceRoot == "src"
   doAssert config.nimcacheDir == "build/cache"
   doAssert config.libraryName == "libproducer.dylib"
@@ -18,9 +17,8 @@ block bif_config_accepts_source_root:
   doAssert config.sourceRoot == "src"
 
 block bif_config_adds_native_library_suffix:
-  let config = initBifNativeBindingsConfig(
-    "src/producer.nim", "build/cache", "build/libproducer"
-  )
+  let config =
+    initBifNativeBindingsConfig("src/producer.nim", "build/cache", "build/libproducer")
   when defined(windows):
     doAssert config.libraryName == "build/libproducer.dll"
   elif defined(macosx):
@@ -30,7 +28,9 @@ block bif_config_adds_native_library_suffix:
 
 block bif_config_accepts_export_config:
   let
-    exportConfig = initNativeExportConfig([excludeProc("debug*")])
+    exportConfig = initNativeExportConfig(
+      [excludeProc("debug*")], includeProcs = [includeProc("public*")]
+    )
     config = initBifNativeBindingsConfig(
       "src/producer.nim",
       "build/cache",
@@ -38,6 +38,7 @@ block bif_config_accepts_export_config:
       exportConfig = exportConfig,
     )
   doAssert config.exportConfig.excludeProcs == exportConfig.excludeProcs
+  doAssert config.exportConfig.includeProcs == exportConfig.includeProcs
   doAssert config.exportConfig.requireMatches
 
 block native_export_selectors_match_exact_names_and_globs:
@@ -55,26 +56,37 @@ block native_export_selectors_match_exact_names_and_globs:
   doAssert everyProc.matches("any/module.nim", "message")
   doAssert everyProc.matches("any/module.nim", "foo=")
 
+  let included = includeProc("*", source = "bindings/*.nim")
+  doAssert included.matches("bindings/native_bindings.nim", "render")
+  doAssert not included.matches("support/native_bindings.nim", "render")
+
 block native_export_config_loads_json:
-  let (configFile, configPath) = createTempFile(
-    "binny-native-export-", ".json"
-  )
+  let (configFile, configPath) = createTempFile("binny-native-export-", ".json")
   defer:
     removeFile(configPath)
-  configFile.write("""
+  configFile.write(
+    """
 {
+  "includeProcs": [
+    {"source": "bindings/*.nim", "name": "*"},
+    {"source": "../support.nim", "name": "load*"}
+  ],
   "excludeProcs": [
     {"source": "producer*.nim", "name": "ignored*"},
     {"name": "foo="}
   ],
   "requireMatches": false
 }
-""")
+"""
+  )
   configFile.close()
 
   let config = loadNativeExportConfig(configPath)
+  doAssert config.includeProcs.len == 2
   doAssert config.excludeProcs.len == 2
   doAssert not config.requireMatches
+  doAssert config.includeProcs[0].matches("bindings/producer.nim", "render")
+  doAssert config.includeProcs[1].matches("../support.nim", "loadTypeface")
   doAssert config.excludeProcs[0].matches("producer.nim", "ignoredDebug")
   doAssert config.excludeProcs[1].matches("support.nim", "foo=")
 
@@ -84,14 +96,11 @@ block native_export_config_rejects_backticks:
 
 block manifest_binding_api_is_not_available:
   doAssert not compiles(initNativeBindingsConfig("producer.nim", "manifest.nif"))
-  doAssert not compiles(
-    generateNativeBindings("cache", "producer.nim", "manifest.nif")
-  )
+  doAssert not compiles(generateNativeBindings("cache", "producer.nim", "manifest.nif"))
 
 block native_initializer_combines_library_and_bif_identity:
-  doAssert nativeInitSymbol(
-    "/tmp/libfoo-bar.so.3", "/cache/pro47-ngcy1.s.bif"
-  ) == "libfoo_bar_NimMain_pro47_ngcy1"
+  doAssert nativeInitSymbol("/tmp/libfoo-bar.so.3", "/cache/pro47-ngcy1.s.bif") ==
+    "libfoo_bar_NimMain_pro47_ngcy1"
 
 block generated_module_uses_configured_loader_name:
   let api = NativeApi(
@@ -202,7 +211,7 @@ block generated_module_preserves_array_index_types:
           nifSymbol: "CornerRadii.0.sample",
           typeId: "`t16.1.sample",
           kind: ntArray,
-          indexTypeSymbol: "DirectionCorners",
+          indexTypeSymbol: "DirectionCorners.0.sample",
           elementTypeSymbol: "uint16.0.system",
           size: 8,
           alignment: 2,
@@ -284,8 +293,7 @@ block generated_module_preserves_discardable_procs:
       ],
   )
   let generated = generateNativeModule(api)
-  doAssert "proc add*(): int {.importc: \"add\", discardable.}" in
-    generated
+  doAssert "proc add*(): int {.importc: \"add\", discardable.}" in generated
 
 block generated_module_directly_imports_procs:
   let api = NativeApi(
@@ -295,8 +303,7 @@ block generated_module_directly_imports_procs:
   )
   let generated = generateNativeModule(api)
   doAssert "{.push nimcall, dynlib: nativeLibrary.}" in generated
-  doAssert "proc ping*() {.importc: \"ping\".}" in
-    generated
+  doAssert "proc ping*() {.importc: \"ping\".}" in generated
   doAssert "initNativeLibrary" notin generated
   doAssert "proc nativeNimMain() {.cdecl, importc: " &
     "\"libsample_NimMain_pro47ngcy1\", dynlib: nativeLibrary.}" in generated
@@ -452,38 +459,37 @@ block generated_module_escapes_unsafe_identifiers:
   let api = NativeApi(
     libraryName: "libsample.so",
     initSymbol: "NimMain",
-    types: @[
-      NativeType(
-        name: "type",
-        nifSymbol: "type.0.sample",
-        typeId: "`t99.0.sample",
-        kind: ntAlias,
-        elementTypeSymbol: "`t31.0.system",
-        size: 8,
-        alignment: 8,
-      )
-    ],
-    procs: @[
-      NativeProc(
-        name: "foo=",
-        cSymbol: "foo_eq",
-        params: @[
-          NativeParam(
-            name: "item", typeSymbol: "type.0.sample", byVar: true
-          ),
-          NativeParam(name: "value", typeSymbol: "`t31.0.system"),
-        ],
-      ),
-      NativeProc(
-        name: "for",
-        cSymbol: "for",
-        returnTypeSymbol: "`t31.0.system",
-        params: @[
-          NativeParam(name: "item", typeSymbol: "type.0.sample")
-        ],
-      ),
-      NativeProc(name: "not-safe", cSymbol: "not_safe"),
-    ],
+    types:
+      @[
+        NativeType(
+          name: "type",
+          nifSymbol: "type.0.sample",
+          typeId: "`t99.0.sample",
+          kind: ntAlias,
+          elementTypeSymbol: "`t31.0.system",
+          size: 8,
+          alignment: 8,
+        )
+      ],
+    procs:
+      @[
+        NativeProc(
+          name: "foo=",
+          cSymbol: "foo_eq",
+          params:
+            @[
+              NativeParam(name: "item", typeSymbol: "type.0.sample", byVar: true),
+              NativeParam(name: "value", typeSymbol: "`t31.0.system"),
+            ],
+        ),
+        NativeProc(
+          name: "for",
+          cSymbol: "for",
+          returnTypeSymbol: "`t31.0.system",
+          params: @[NativeParam(name: "item", typeSymbol: "type.0.sample")],
+        ),
+        NativeProc(name: "not-safe", cSymbol: "not_safe"),
+      ],
   )
   let generated = generateNativeModule(api)
   doAssert "  `type`* = int" in generated

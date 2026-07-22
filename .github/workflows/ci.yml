@@ -48,6 +48,14 @@ jobs:
           nim e2e
           ./consumer
 
+      - name: Run incremental native dynlib example
+        working-directory: examples/nim_native_dynlib
+        env:
+          BINNY_NATIVE_BACKEND: ic
+        run: |
+          nim e2e
+          ./consumer
+
   native-dynlib:
     runs-on: macos-latest
 
@@ -77,6 +85,14 @@ jobs:
 
       - name: Run native dynlib example
         working-directory: examples/nim_native_dynlib
+        run: |
+          nim e2e
+          ./consumer
+
+      - name: Run incremental native dynlib example
+        working-directory: examples/nim_native_dynlib
+        env:
+          BINNY_NATIVE_BACKEND: ic
         run: |
           nim e2e
           ./consumer

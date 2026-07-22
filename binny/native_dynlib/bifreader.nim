@@ -79,7 +79,7 @@ func typeOrdinal(symbol: string): int =
   if separator < 0 or separator == 2:
     return -1
   for character in symbol[2 ..< separator]:
-    if character notin {'0'..'9'}:
+    if character notin {'0' .. '9'}:
       return -1
   result = parseInt(symbol[2 ..< separator])
 
@@ -146,9 +146,7 @@ proc bifField(node: Cursor): NativeField =
         if not typeId.cursorIsNil:
           result.typeSymbol = typeId.symName
     of Ident, Symbol:
-      let value =
-        if children.kind == Ident: children.strVal
-        else: children.symName
+      let value = if children.kind == Ident: children.strVal else: children.symName
       if sawMarker and not sawFlags:
         sawFlags = true
         result.exported = 'e' in value
@@ -201,8 +199,7 @@ proc bifRecord(node: Cursor): seq[NativeRecordPart] =
         var fields = children.childCursor()
         while fields.hasMore:
           if fields.kind == TagLit:
-            if fields.tagName == "sd" and
-                not fields.findChildTag("field").cursorIsNil:
+            if fields.tagName == "sd" and not fields.findChildTag("field").cursorIsNil:
               recordCase.discriminant = bifField(fields)
               recordCase.discriminant.discriminant = true
             elif fields.tagName in ["of", "else"]:
@@ -315,8 +312,10 @@ proc bifLayout(node: Cursor): AbiTypeEntry =
       result.alignment = actual.alignment
   elif result.kind == "ref" and nestedLayouts.len > 0:
     result.elementTypeSymbol = nestedLayouts[^1].typeSymbol
-  elif result.kind in ["array", "distinct", "genericbody", "genericinvocation",
-      "openarray", "range", "sequence", "set", "string", "var"]:
+  elif result.kind in [
+    "array", "distinct", "genericbody", "genericinvocation", "openarray", "range",
+    "sequence", "set", "string", "var",
+  ]:
     if tailTypes.len > 0:
       result.elementTypeSymbol = tailTypes[^1]
     elif nestedLayouts.len > 0:
@@ -336,13 +335,17 @@ proc bifLayout(node: Cursor): AbiTypeEntry =
         ),
       )
 
-proc mergeLayout(layouts: var Table[string, AbiTypeEntry]; layout: AbiTypeEntry) =
+proc mergeLayout(layouts: var Table[string, AbiTypeEntry], layout: AbiTypeEntry) =
   if layout.typeSymbol.len == 0 or layout.kind.len == 0:
     return
   if layout.typeSymbol notin layouts:
     layouts[layout.typeSymbol] = layout
     return
   var merged = layouts[layout.typeSymbol]
+  if merged.kind in ["genericinstance", "genericinvocation", "genericbody"] and
+      layout.kind in
+      ["object", "enum", "distinct", "array", "sequence", "set", "tuple", "openarray"]:
+    merged.kind = layout.kind
   if merged.size < 0 and layout.size >= 0:
     merged.size = layout.size
   if merged.alignment < 0 and layout.alignment >= 0:
@@ -360,7 +363,7 @@ proc mergeLayout(layouts: var Table[string, AbiTypeEntry]; layout: AbiTypeEntry)
   merged.union = merged.union or layout.union
   layouts[layout.typeSymbol] = merged
 
-proc collectBifLayouts(node: Cursor; layouts: var Table[string, AbiTypeEntry]) =
+proc collectBifLayouts(node: Cursor, layouts: var Table[string, AbiTypeEntry]) =
   if node.kind != TagLit:
     return
   if node.tagName == "td":
@@ -372,7 +375,7 @@ proc collectBifLayouts(node: Cursor; layouts: var Table[string, AbiTypeEntry]) =
     children.skip
 
 proc resolveRecordSelectors(
-    record: var seq[NativeRecordPart]; layouts: Table[string, AbiTypeEntry]
+    record: var seq[NativeRecordPart], layouts: Table[string, AbiTypeEntry]
 ) =
   for part in record.mitems:
     if part.kind == nrCase:
@@ -396,7 +399,7 @@ proc finalizeLayouts(layouts: var Table[string, AbiTypeEntry]) =
         part.field.size = fieldType.size
         part.field.alignment = fieldType.alignment
 
-proc hasDescendantIdent(node: Cursor; name: string): bool =
+proc hasDescendantIdent(node: Cursor, name: string): bool =
   if node.kind != TagLit:
     return false
   var children = node.childCursor()
@@ -408,8 +411,10 @@ proc hasDescendantIdent(node: Cursor; name: string): bool =
     children.skip
 
 proc parseNativeType(
-    declaration: Cursor; nifSymbol: string; typ: var NativeType
+    declaration: Cursor, nifSymbol: string, typ: var NativeType
 ): bool =
+  typ.size = -1
+  typ.alignment = -1
   let sourceType = declaration.findChildTag("type0")
   if sourceType.cursorIsNil:
     return false
@@ -422,6 +427,10 @@ proc parseNativeType(
   let aliasType = sourceType.findChildTag("ht")
   let instanceType = sourceType.findChildTag("at")
   let typeDesc = declaration.findChildTag("td")
+  if not typeDesc.cursorIsNil:
+    let declaredLayout = bifLayout(typeDesc)
+    typ.size = declaredLayout.size
+    typ.alignment = declaredLayout.alignment
   let rangeType =
     if typeDesc.cursorIsNil:
       default(Cursor)
@@ -466,17 +475,17 @@ proc parseNativeType(
   elif not instanceType.cursorIsNil:
     typ.kind = ntAlias
     typ.elementTypeSymbol = typ.typeId
-    let indexTypeNode = instanceType.findChildTag("ident")
+    let indexTypeNode = instanceType.findChildTag("ht")
     if not indexTypeNode.cursorIsNil:
-      let indexType = indexTypeNode.findChildKind(Ident)
+      let indexType = indexTypeNode.findLastChildKind(Symbol)
       if not indexType.cursorIsNil:
-        typ.indexTypeSymbol = indexType.strVal
+        typ.indexTypeSymbol = indexType.symName
   else:
     return false
   result = true
 
 proc parsePreferredTypeAlias(
-    declaration: Cursor; nifSymbol: string
+    declaration: Cursor, nifSymbol: string
 ): PreferredTypeAlias =
   let sourceType = declaration.findChildTag("type0")
   if sourceType.cursorIsNil:
@@ -537,7 +546,22 @@ proc parseParam(declaration: Cursor): NativeParam =
   if result.typeSymbol.len == 0:
     fail("native ABI only supports value parameters: " & result.name)
 
-proc parseNativeProc(declaration: Cursor; abi: AbiProcEntry): NativeProc =
+proc parseParamPosition(declaration: Cursor): int =
+  var
+    children = declaration.childCursor()
+    sawParamMetadata = false
+    integerIndex = 0
+  while children.hasMore:
+    if children.kind == TagLit and children.tagName == "param":
+      sawParamMetadata = true
+    elif sawParamMetadata and children.kind == IntLit:
+      if integerIndex == 1:
+        return int(children.intVal)
+      inc integerIndex
+    children.skip
+  fail("missing parameter position metadata")
+
+proc parseNativeProc(declaration: Cursor, abi: AbiProcEntry): NativeProc =
   result.name = symbolBase(abi.nifSymbol)
   result.nifSymbol = abi.nifSymbol
   result.cSymbol = abi.cSymbol
@@ -556,7 +580,9 @@ proc parseNativeProc(declaration: Cursor; abi: AbiProcEntry): NativeProc =
       result.returnTypeSymbol = children.symName
       result.returnByVar = result.returnTypeSymbol.startsWith("`t23.")
     children.skip
-  proc collectParams(node: Cursor; params: var seq[NativeParam]) =
+  type IndexedParam = tuple[position: int, param: NativeParam]
+
+  proc collectParams(node: Cursor, params: var seq[IndexedParam]) =
     var nested = node.childCursor()
     while nested.hasMore:
       if nested.kind == TagLit:
@@ -569,26 +595,33 @@ proc parseNativeProc(declaration: Cursor; abi: AbiProcEntry): NativeProc =
               break
             fields.skip
           if belongsToProc:
-            params.add parseParam(nested)
+            params.add (nested.parseParamPosition, nested.parseParam)
         else:
           collectParams(nested, params)
       nested.skip
 
-  collectParams(formals, result.params)
+  var params: seq[IndexedParam]
+  collectParams(formals, params)
+  params.sort(
+    proc(left, right: IndexedParam): int =
+      cmp(left.position, right.position)
+  )
+  for item in params:
+    result.params.add item.param
 
-proc unwrapVarReturn(
-    procInfo: var NativeProc; layouts: Table[string, AbiTypeEntry]
-) =
+proc unwrapVarReturn(procInfo: var NativeProc, layouts: Table[string, AbiTypeEntry]) =
   if not procInfo.returnByVar:
     return
   if procInfo.returnTypeSymbol notin layouts:
     fail("native ABI var return type has no layout: " & procInfo.returnTypeSymbol)
   let wrapper = layouts[procInfo.returnTypeSymbol]
   if wrapper.kind != "var" or wrapper.elementTypeSymbol.len == 0:
-    fail("native ABI var return type has an invalid layout: " & procInfo.returnTypeSymbol)
+    fail(
+      "native ABI var return type has an invalid layout: " & procInfo.returnTypeSymbol
+    )
   procInfo.returnTypeSymbol = wrapper.elementTypeSymbol
 
-proc applyLayout(typ: var NativeType; layouts: Table[string, AbiTypeEntry]): bool =
+proc applyLayout(typ: var NativeType, layouts: Table[string, AbiTypeEntry]): bool =
   if typ.typeId notin layouts:
     return false
   let declared = layouts[typ.typeId]
@@ -664,10 +697,10 @@ proc typeFromLayout(layout: AbiTypeEntry): NativeType =
     fail("unsupported native ABI layout kind: " & layout.kind)
 
 proc parseStdOrderedTable(
-    node: Cursor;
-    stdTablesModules: Table[string, bool];
-    layouts: Table[string, AbiTypeEntry];
-    typ: var NativeType;
+    node: Cursor,
+    stdTablesModules: Table[string, bool],
+    layouts: Table[string, AbiTypeEntry],
+    typ: var NativeType,
 ): bool =
   if node.kind != TagLit or node.tagName != "at":
     return false
@@ -712,11 +745,11 @@ proc parseStdOrderedTable(
   result = true
 
 proc collectStdOrderedTables(
-    node: Cursor;
-    stdTablesModules: Table[string, bool];
-    layouts: Table[string, AbiTypeEntry];
-    instances: var Table[string, NativeType];
-    skipTypes: var Table[string, bool];
+    node: Cursor,
+    stdTablesModules: Table[string, bool],
+    layouts: Table[string, AbiTypeEntry],
+    instances: var Table[string, NativeType],
+    skipTypes: var Table[string, bool],
 ) =
   if node.kind != TagLit:
     return
@@ -732,41 +765,39 @@ proc collectStdOrderedTables(
     children.skip
 
 func isMaterializedKind(kind: string): bool =
-  kind in [
-    "object", "enum", "distinct", "array", "sequence", "set", "tuple",
-    "openarray",
-  ]
+  kind in
+    ["object", "enum", "distinct", "array", "sequence", "set", "tuple", "openarray"]
 
 proc addLayoutDependency(
-    layoutSymbol: string;
-    layouts: Table[string, AbiTypeEntry];
-    dependencies: var Table[string, bool]
+  layoutSymbol: string,
+  layouts: Table[string, AbiTypeEntry],
+  dependencies: var Table[string, bool],
 )
 
 proc collectLayoutDependencies(
-    layout: AbiTypeEntry;
-    layouts: Table[string, AbiTypeEntry];
-    dependencies: var Table[string, bool]
+  layout: AbiTypeEntry,
+  layouts: Table[string, AbiTypeEntry],
+  dependencies: var Table[string, bool],
 )
 
 proc collectRecordDependencies(
-    record: seq[NativeRecordPart];
-    layouts: Table[string, AbiTypeEntry];
-    dependencies: var Table[string, bool]
+  record: seq[NativeRecordPart],
+  layouts: Table[string, AbiTypeEntry],
+  dependencies: var Table[string, bool],
 )
 
 proc collectBranchDependencies(
-    branches: seq[NativeBranch];
-    layouts: Table[string, AbiTypeEntry];
-    dependencies: var Table[string, bool]
+    branches: seq[NativeBranch],
+    layouts: Table[string, AbiTypeEntry],
+    dependencies: var Table[string, bool],
 ) =
   for branch in branches:
     collectRecordDependencies(branch.record, layouts, dependencies)
 
 proc collectRecordDependencies(
-    record: seq[NativeRecordPart];
-    layouts: Table[string, AbiTypeEntry];
-    dependencies: var Table[string, bool]
+    record: seq[NativeRecordPart],
+    layouts: Table[string, AbiTypeEntry],
+    dependencies: var Table[string, bool],
 ) =
   for part in record:
     case part.kind
@@ -777,9 +808,9 @@ proc collectRecordDependencies(
       collectBranchDependencies(part.branches, layouts, dependencies)
 
 proc collectLayoutDependencies(
-    layout: AbiTypeEntry;
-    layouts: Table[string, AbiTypeEntry];
-    dependencies: var Table[string, bool]
+    layout: AbiTypeEntry,
+    layouts: Table[string, AbiTypeEntry],
+    dependencies: var Table[string, bool],
 ) =
   if layout.typeSymbol.len == 0 or layout.typeSymbol in dependencies:
     return
@@ -789,52 +820,52 @@ proc collectLayoutDependencies(
   collectRecordDependencies(layout.record, layouts, dependencies)
 
 proc addLayoutDependency(
-    layoutSymbol: string;
-    layouts: Table[string, AbiTypeEntry];
-    dependencies: var Table[string, bool]
+    layoutSymbol: string,
+    layouts: Table[string, AbiTypeEntry],
+    dependencies: var Table[string, bool],
 ) =
   if layoutSymbol.len == 0 or layoutSymbol in dependencies or layoutSymbol notin layouts:
     return
   collectLayoutDependencies(layouts[layoutSymbol], layouts, dependencies)
 
 proc collectReferencedBranchDependencies(
-    branches: seq[NativeBranch];
-    layouts: Table[string, AbiTypeEntry];
-    requiredTypes: var Table[string, bool];
-    skipInternal: Table[string, bool];
+  branches: seq[NativeBranch],
+  layouts: Table[string, AbiTypeEntry],
+  requiredTypes: var Table[string, bool],
+  skipInternal: Table[string, bool],
 )
 
 proc collectReferencedRecordDependencies(
-    record: seq[NativeRecordPart];
-    layouts: Table[string, AbiTypeEntry];
-    requiredTypes: var Table[string, bool];
-    skipInternal: Table[string, bool];
+  record: seq[NativeRecordPart],
+  layouts: Table[string, AbiTypeEntry],
+  requiredTypes: var Table[string, bool],
+  skipInternal: Table[string, bool],
 )
 
 proc collectReferencedLayoutDependencies(
-    layout: AbiTypeEntry;
-    layouts: Table[string, AbiTypeEntry];
-    requiredTypes: var Table[string, bool];
-    skipInternal: Table[string, bool];
+  layout: AbiTypeEntry,
+  layouts: Table[string, AbiTypeEntry],
+  requiredTypes: var Table[string, bool],
+  skipInternal: Table[string, bool],
 )
 
 proc shouldSkipReferencedType(
-    symbol: string; layouts: Table[string, AbiTypeEntry]
+    symbol: string, layouts: Table[string, AbiTypeEntry]
 ): bool =
   if symbol.len == 0 or symbol notin layouts:
     return false
   let layout = layouts[symbol]
   let usableUnknownLayout =
-    layout.kind == "openarray" or
-      layout.kind == "tuple" and layout.record.len > 0
+    layout.kind in ["openarray", "sequence", "set"] or
+    layout.kind in ["object", "tuple"] and layout.record.len > 0
   layout.size < 0 and not usableUnknownLayout or
     layout.kind in ["genericbody", "genericinvocation"]
 
 proc collectReferencedType(
-    symbol: string;
-    layouts: Table[string, AbiTypeEntry];
-    requiredTypes: var Table[string, bool];
-    skipInternal: Table[string, bool];
+    symbol: string,
+    layouts: Table[string, AbiTypeEntry],
+    requiredTypes: var Table[string, bool],
+    skipInternal: Table[string, bool],
 ) =
   if symbol.len == 0 or symbol in skipInternal:
     return
@@ -846,45 +877,55 @@ proc collectReferencedType(
   if shouldSkipReferencedType(symbol, layouts):
     return
   requiredTypes[symbol] = true
-  collectReferencedLayoutDependencies(layouts[symbol], layouts, requiredTypes, skipInternal)
+  collectReferencedLayoutDependencies(
+    layouts[symbol], layouts, requiredTypes, skipInternal
+  )
 
 proc collectReferencedBranchDependencies(
-    branches: seq[NativeBranch];
-    layouts: Table[string, AbiTypeEntry];
-    requiredTypes: var Table[string, bool];
-    skipInternal: Table[string, bool];
+    branches: seq[NativeBranch],
+    layouts: Table[string, AbiTypeEntry],
+    requiredTypes: var Table[string, bool],
+    skipInternal: Table[string, bool],
 ) =
   for branch in branches:
-    collectReferencedRecordDependencies(branch.record, layouts, requiredTypes, skipInternal)
+    collectReferencedRecordDependencies(
+      branch.record, layouts, requiredTypes, skipInternal
+    )
 
 proc collectReferencedRecordDependencies(
-    record: seq[NativeRecordPart];
-    layouts: Table[string, AbiTypeEntry];
-    requiredTypes: var Table[string, bool];
-    skipInternal: Table[string, bool];
+    record: seq[NativeRecordPart],
+    layouts: Table[string, AbiTypeEntry],
+    requiredTypes: var Table[string, bool],
+    skipInternal: Table[string, bool],
 ) =
   for part in record:
     case part.kind
     of nrField:
       collectReferencedType(part.field.typeSymbol, layouts, requiredTypes, skipInternal)
     of nrCase:
-      collectReferencedType(part.discriminant.typeSymbol, layouts, requiredTypes, skipInternal)
-      collectReferencedBranchDependencies(part.branches, layouts, requiredTypes, skipInternal)
+      collectReferencedType(
+        part.discriminant.typeSymbol, layouts, requiredTypes, skipInternal
+      )
+      collectReferencedBranchDependencies(
+        part.branches, layouts, requiredTypes, skipInternal
+      )
 
 proc collectReferencedLayoutDependencies(
-    layout: AbiTypeEntry;
-    layouts: Table[string, AbiTypeEntry];
-    requiredTypes: var Table[string, bool];
-    skipInternal: Table[string, bool];
+    layout: AbiTypeEntry,
+    layouts: Table[string, AbiTypeEntry],
+    requiredTypes: var Table[string, bool],
+    skipInternal: Table[string, bool],
 ) =
   collectReferencedType(layout.baseTypeSymbol, layouts, requiredTypes, skipInternal)
   collectReferencedType(layout.elementTypeSymbol, layouts, requiredTypes, skipInternal)
-  collectReferencedRecordDependencies(layout.record, layouts, requiredTypes, skipInternal)
+  collectReferencedRecordDependencies(
+    layout.record, layouts, requiredTypes, skipInternal
+  )
 
 proc resolvedSemanticTypeSymbol(
-    symbol: string;
-    semanticTypeSymbols: Table[string, string];
-    layouts: Table[string, AbiTypeEntry];
+    symbol: string,
+    semanticTypeSymbols: Table[string, string],
+    layouts: Table[string, AbiTypeEntry],
 ): string =
   if symbol in semanticTypeSymbols:
     return semanticTypeSymbols[symbol]
@@ -896,10 +937,10 @@ proc resolvedSemanticTypeSymbol(
   symbol
 
 proc collectPreferredLayoutNames(
-    aliases: openArray[PreferredTypeAlias];
-    semanticTypeSymbols: Table[string, string];
-    layouts: Table[string, AbiTypeEntry];
-    requiredTypes: Table[string, bool];
+    aliases: openArray[PreferredTypeAlias],
+    semanticTypeSymbols: Table[string, string],
+    layouts: Table[string, AbiTypeEntry],
+    requiredTypes: Table[string, bool],
 ): Table[string, string] =
   var ambiguous: Table[string, bool]
   for alias in aliases:
@@ -912,9 +953,8 @@ proc collectPreferredLayoutNames(
         ambiguous[alias.layoutSymbol] = true
   for alias in aliases:
     if alias.kind.len > 0:
-      let elementSymbol = resolvedSemanticTypeSymbol(
-        alias.elementSymbol, semanticTypeSymbols, layouts
-      )
+      let elementSymbol =
+        resolvedSemanticTypeSymbol(alias.elementSymbol, semanticTypeSymbols, layouts)
       for layout in layouts.values:
         if layout.typeSymbol in requiredTypes and layout.kind == alias.kind and
             layout.elementTypeSymbol == elementSymbol and
@@ -926,7 +966,7 @@ proc collectPreferredLayoutNames(
             ambiguous[layout.typeSymbol] = true
 
 proc addAbiModule(
-    modules: var seq[bif.BifModule]; seenPaths: var Table[string, bool]; path: string
+    modules: var seq[bif.BifModule], seenPaths: var Table[string, bool], path: string
 ) =
   let normalized = normalizedPath(absolutePath(path))
   if normalized notin seenPaths:
@@ -936,7 +976,7 @@ proc addAbiModule(
     modules.add bif.load(normalized)
 
 proc loadBifModules(
-    bifPath: string; description: BifNativeDescription
+    bifPath: string, description: BifNativeDescription
 ): seq[bif.BifModule] =
   let nimcacheDir = bifPath.parentDir
   var seenPaths: Table[string, bool]
@@ -944,7 +984,7 @@ proc loadBifModules(
   for module in description.modules:
     addAbiModule(result, seenPaths, nimcacheDir / (module.identity & ".s.bif"))
 
-proc findSemanticDeclaration(modules: var seq[bif.BifModule]; symbol: string): Cursor =
+proc findSemanticDeclaration(modules: var seq[bif.BifModule], symbol: string): Cursor =
   for module in modules.mitems:
     let declaration = bif.findDeclaration(module, symbol)
     if not declaration.cursorIsNil:
@@ -975,9 +1015,9 @@ func bifIdentity(path: string): string =
     result = name[0 ..< name.len - suffix.len]
 
 proc bifNativeDescription(
-    nimcacheDir, sourceRoot, libraryName, initSymbol: string;
-    routines: openArray[NativeExportSymbol];
-    hooks: openArray[NativeHookSymbol]
+    nimcacheDir, sourceRoot, libraryName, initSymbol: string,
+    routines: openArray[NativeExportSymbol],
+    hooks: openArray[NativeHookSymbol],
 ): BifNativeDescription =
   result.libraryName = libraryName
   result.initSymbol = initSymbol
@@ -1005,15 +1045,13 @@ proc bifNativeDescription(
   finalizeLayouts(layouts)
   for layout in layouts.values:
     result.types.add layout
-  result.types.sort(proc(left, right: AbiTypeEntry): int =
-    cmp(left.typeSymbol, right.typeSymbol)
+  result.types.sort(
+    proc(left, right: AbiTypeEntry): int =
+      cmp(left.typeSymbol, right.typeSymbol)
   )
 
   for symbol in routines:
-    result.procs.add AbiProcEntry(
-      nifSymbol: symbol.nifSymbol,
-      cSymbol: symbol.cSymbol,
-    )
+    result.procs.add AbiProcEntry(nifSymbol: symbol.nifSymbol, cSymbol: symbol.cSymbol)
   for hook in hooks:
     result.hooks.add AbiHookEntry(
       typeSymbol: hook.typeSymbol,
@@ -1024,7 +1062,7 @@ proc bifNativeDescription(
     )
 
 proc buildNativeApi(
-    bifPath: string; sourceDescription: BifNativeDescription
+    bifPath: string, sourceDescription: BifNativeDescription
 ): NativeApi =
   var description = sourceDescription
   result.libraryName = description.libraryName
@@ -1043,8 +1081,7 @@ proc buildNativeApi(
     let semantic = parseNativeProc(declaration, item)
     item.returnTypeSymbol = semantic.returnTypeSymbol
     item.params = semantic.params
-    item.returnLowering =
-      if semantic.returnTypeSymbol.len == 0: nlVoid else: nlDirect
+    item.returnLowering = if semantic.returnTypeSymbol.len == 0: nlVoid else: nlDirect
     for param in item.params.mitems:
       if param.typeSymbol in layouts and layouts[param.typeSymbol].kind == "openarray":
         param.lowering = nlPointer
@@ -1074,48 +1111,61 @@ proc buildNativeApi(
   var unmaterializedTypes: seq[NativeType]
   var preferredTypeAliases: seq[PreferredTypeAlias]
   var applicationModules: Table[string, bool]
+  var seenSemanticTypes: Table[string, bool]
   for identity in description.applicationModules:
     applicationModules[identity] = true
   for moduleIndex, module in modules.mpairs:
     for nifSymbol, visibility, declaration in module.declarations:
       let moduleId = symbolModule(nifSymbol)
-      let inspectDeclaration =
-        visibility == ivExported and moduleId in applicationModules
+      let inspectDeclaration = visibility == ivExported
       if inspectDeclaration:
         if not declaration.findChildTag("type").cursorIsNil and
             not declaration.findChildTag("type0").cursorIsNil:
           collectStdOrderedTables(
-            declaration,
-            stdTablesModules,
-            layouts,
-            importedGenericTypes,
+            declaration, stdTablesModules, layouts, importedGenericTypes,
             skipStdTableObjectTypes,
           )
           var typ: NativeType
           if parseNativeType(declaration, nifSymbol, typ):
+            let typeKey = typ.nifSymbol & "\x1f" & typ.typeId
+            if typeKey in seenSemanticTypes:
+              continue
+            seenSemanticTypes[typeKey] = true
             let hasLayout = applyLayout(typ, layouts)
             if typ.kind != ntAlias and not hasLayout:
               typ.size = -1
               typ.alignment = -1
               unmaterializedTypes.add typ
               continue
-            if not hasLayout:
-              typ.size = -1
-              typ.alignment = -1
             if symbolModule(typ.nifSymbol) in stdTablesModules and
                 symbolBase(typ.nifSymbol) == "OrderedTable":
               continue
-            if typ.nifSymbol in skipStdTableObjectTypes or typ.typeId in skipStdTableObjectTypes:
+            if typ.nifSymbol in skipStdTableObjectTypes or
+                typ.typeId in skipStdTableObjectTypes:
               continue
             result.types.add typ
             # Only root aliases should name equivalent layouts from dependencies.
-            if moduleIndex == 0 and visibility == ivExported and typ.kind == ntAlias:
+            if moduleIndex == 0 and visibility == ivExported:
               let alias = parsePreferredTypeAlias(declaration, nifSymbol)
               if alias.name.len > 0:
                 preferredTypeAliases.add alias
+                preferredTypeIndexes[alias.name] = result.types.high
 
   for typ in importedGenericTypes.values:
     result.types.add typ
+
+  for alias in preferredTypeAliases:
+    if alias.layoutSymbol notin layouts:
+      continue
+    for typ in result.types:
+      if typ.nifSymbol == alias.nifSymbol:
+        var offered = layouts[alias.layoutSymbol]
+        if offered.size < 0 and typ.size >= 0:
+          offered.size = typ.size
+        if offered.alignment < 0 and typ.alignment >= 0:
+          offered.alignment = typ.alignment
+        layouts[alias.layoutSymbol] = offered
+        break
 
   var represented: Table[string, bool]
   for typ in result.types:
@@ -1124,6 +1174,8 @@ proc buildNativeApi(
   var internalLayoutTypes: Table[string, bool]
   for typ in importedGenericTypes.values:
     addLayoutDependency(typ.typeId, layouts, internalLayoutTypes)
+  for typ in importedGenericTypes.values:
+    internalLayoutTypes.del typ.typeId
 
   for item in description.procs:
     let nifSymbol = item.nifSymbol
@@ -1143,9 +1195,7 @@ proc buildNativeApi(
       procInfo: parseNativeProc(
         declaration,
         AbiProcEntry(
-          nifSymbol: item.nifSymbol,
-          cSymbol: item.cSymbol,
-          returnLowering: nlDirect,
+          nifSymbol: item.nifSymbol, cSymbol: item.cSymbol, returnLowering: nlDirect
         ),
       ),
     )
@@ -1156,16 +1206,15 @@ proc buildNativeApi(
     unwrapVarReturn(hook.procInfo, layouts)
 
   var skipInternalTypes = internalLayoutTypes
-  for typ in importedGenericTypes.values:
-    skipInternalTypes[typ.typeId] = true
 
   var requiredTypes: Table[string, bool]
   for typ in result.types:
+    let moduleIdentity = symbolModule(typ.nifSymbol)
     let isSignatureType =
       typ.nifSymbol in signatureTypeSymbols or typ.typeId in signatureTypeSymbols
-    let isMaterializedSemanticType = typ.kind != ntAlias
-    if typ.kind == ntImportedGeneric or isSignatureType or isMaterializedSemanticType:
-      let moduleIdentity = symbolModule(typ.nifSymbol)
+    let isMaterializedSemanticType =
+      typ.kind != ntAlias and moduleIdentity in applicationModules
+    if isSignatureType or isMaterializedSemanticType:
       if moduleIdentity.len > 0 and moduleIdentity in skipSystemModuleTypeSymbols:
         continue
       let symbolSkip =
@@ -1174,19 +1223,33 @@ proc buildNativeApi(
         else:
           initTable[string, bool]()
       collectReferencedType(typ.typeId, layouts, requiredTypes, symbolSkip)
+      if typ.kind == ntArray:
+        collectReferencedType(typ.indexTypeSymbol, layouts, requiredTypes, symbolSkip)
       if typ.kind == ntAlias:
         collectReferencedType(typ.elementTypeSymbol, layouts, requiredTypes, symbolSkip)
 
   for procInfo in result.procs:
-    collectReferencedType(procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternalTypes)
+    collectReferencedType(
+      procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternalTypes
+    )
     for param in procInfo.params:
       collectReferencedType(param.typeSymbol, layouts, requiredTypes, skipInternalTypes)
   for hook in result.hooks:
-    collectReferencedType(hook.procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternalTypes)
+    collectReferencedType(
+      hook.procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternalTypes
+    )
     for param in hook.procInfo.params:
       collectReferencedType(param.typeSymbol, layouts, requiredTypes, skipInternalTypes)
   for symbol in signatureTypeSymbols.keys:
     requiredTypes[symbol] = true
+
+  var previousRequiredCount = -1
+  while previousRequiredCount != requiredTypes.len:
+    previousRequiredCount = requiredTypes.len
+    for typ in result.types:
+      if typ.kind == ntImportedGeneric and typ.typeId in requiredTypes:
+        for argument in typ.genericArguments:
+          collectReferencedType(argument, layouts, requiredTypes, skipInternalTypes)
 
   var semanticTypeSymbols: Table[string, string]
   for typ in result.types:
@@ -1196,10 +1259,7 @@ proc buildNativeApi(
     if alias.layoutSymbol.len > 0:
       semanticTypeSymbols[alias.nifSymbol] = alias.layoutSymbol
   let preferredLayoutNames = collectPreferredLayoutNames(
-    preferredTypeAliases,
-    semanticTypeSymbols,
-    layouts,
-    requiredTypes,
+    preferredTypeAliases, semanticTypeSymbols, layouts, requiredTypes
   )
 
   for typ in unmaterializedTypes:
@@ -1207,24 +1267,34 @@ proc buildNativeApi(
       result.types.add typ
       represented[typ.typeId] = true
 
-  for layout in description.types:
+  for describedLayout in description.types:
+    let layout = layouts[describedLayout.typeSymbol]
     let hasUnresolvedElement =
       layout.elementTypeSymbol in layouts and
       layouts[layout.elementTypeSymbol].kind in ["genericbody", "genericinvocation"]
     let hasMissingTupleFields =
       layout.kind == "tuple" and layout.size > 0 and layout.record.len == 0
-    if layout.typeSymbol notin represented and
-        (layout.size >= 0 or layout.kind == "openarray" or
-          layout.kind == "tuple" and layout.record.len > 0) and
-        layout.kind.isMaterializedKind and
-        layout.typeSymbol in requiredTypes and
+    if layout.typeSymbol notin represented and (
+      layout.size >= 0 or layout.kind in ["openarray", "sequence", "set"] or
+      layout.kind in ["object", "tuple"] and layout.record.len > 0
+    ) and layout.kind.isMaterializedKind and layout.typeSymbol in requiredTypes and
         not hasUnresolvedElement and not hasMissingTupleFields:
       if layout.typeSymbol in preferredLayoutNames:
         let preferredName = preferredLayoutNames[layout.typeSymbol]
         if preferredName in preferredTypeIndexes:
-          result.types[preferredTypeIndexes[preferredName]].equivalentTypeSymbols.add(
-            layout.typeSymbol
-          )
+          let index = preferredTypeIndexes[preferredName]
+          if result.types[index].kind == ntAlias and
+              result.types[index].elementTypeSymbol == result.types[index].typeId:
+            let alias = result.types[index]
+            var resolved = typeFromLayout(layout)
+            resolved.name = preferredName
+            resolved.nifSymbol = alias.nifSymbol
+            resolved.equivalentTypeSymbols = alias.equivalentTypeSymbols
+            if alias.typeId notin resolved.equivalentTypeSymbols:
+              resolved.equivalentTypeSymbols.add alias.typeId
+            result.types[index] = resolved
+          elif layout.typeSymbol notin result.types[index].equivalentTypeSymbols:
+            result.types[index].equivalentTypeSymbols.add layout.typeSymbol
         else:
           var typ = typeFromLayout(layout)
           typ.name = preferredName
@@ -1236,8 +1306,7 @@ proc buildNativeApi(
 
   var publicTypes: seq[NativeType]
   for typ in result.types:
-    if typ.kind == ntImportedGeneric or typ.typeId in requiredTypes or
-        typ.nifSymbol in requiredTypes:
+    if typ.typeId in requiredTypes or typ.nifSymbol in requiredTypes:
       publicTypes.add typ
   result.types = publicTypes
 
@@ -1253,18 +1322,18 @@ proc readModuleSource*(path: string): string =
 proc findSemanticBif*(nimcacheDir, sourcePath: string): string =
   result = findSemanticBifPath(nimcacheDir, sourcePath)
 
-proc readBifNativeApi*(nimcacheDir, sourceRoot, sourcePath,
-    libraryName: string; exportConfig = NativeExportConfig()): NativeApi =
-  ## Reconstructs a native API from semantic BIF and incremental C definitions.
+proc readBifNativeApi*(
+    nimcacheDir, sourceRoot, sourcePath, libraryName: string,
+    exportConfig = NativeExportConfig(),
+): NativeApi =
+  ## Reconstructs a native API from semantic BIF and compiler C artifacts.
   let
     bifPath = findSemanticBif(nimcacheDir, sourcePath)
     initSymbol = nativeInitSymbol(libraryName, bifPath)
     routines = resolveNativeSymbols(
       nimcacheDir, publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig)
     )
-    hooks = resolveNativeHooks(
-      nimcacheDir, nativeHookSymbols(nimcacheDir, sourceRoot)
-    )
+    hooks = resolveNativeHooks(nimcacheDir, nativeHookSymbols(nimcacheDir, sourceRoot))
     description = bifNativeDescription(
       nimcacheDir, sourceRoot, libraryName, initSymbol, routines, hooks
     )
