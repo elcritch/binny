@@ -17,7 +17,7 @@ Why this is useful:
 
 ## Try it
 
-Use a Nim 2.3.1 devel compiler that provides `--genBif`, `nim ic`, and `nifler`:
+Use a Nim 2.3.1 devel compiler that provides `--genBif` and `nifler`:
 
 ```sh
 ~/.local/share/grabnim/nim-devel/bin/nim e2e
@@ -27,6 +27,10 @@ Use a Nim 2.3.1 devel compiler that provides `--genBif`, `nim ic`, and `nifler`:
 That builds the library, generates `generated/producer_abi.nim`, compiles and
 runs the existing consumer, and verifies that the generated move-only type
 cannot be copied. The consumer remains available as `./consumer` afterward.
+The example's `config.nims` uses `binny/native_dynlib/build`; projects only need
+to provide their producer path, library name, compiler flags, and optional
+export filter. The builder uses `nim c` by default. Set `backend = "ic"` to use
+the incremental backend.
 
 ## Exclude public procedures
 
@@ -51,31 +55,32 @@ matching overload.
 With `requireMatches` enabled—the default—a misspelled or stale selector stops
 the build. Exclusions apply to ordinary public procedures; required ownership
 hooks and the library initializer remain present. The example passes this same
-file to both the archive-rooting tool and binding generator.
+file to the builder, which applies it to both archive rooting and binding
+generation.
 
 The workflow uses and builds these files:
 
 ```text
-generated/producer_abi.nim       reconstructed native Nim bindings
-native_dynlib.json               public-procedure exclusion config
-nimcache/libproducer.private.a   original hidden/private symbols
-nimcache/libproducer.a           selected symbols promoted
-nimcache/libproducer.exports     BIF-derived linker export control
-nimcache/libproducer.so          filtered library on Linux and FreeBSD
-nimcache/libproducer.dylib       filtered library on macOS
-consumer                         ordinary Nim consumer executable
+generated/producer_abi.nim         reconstructed native Nim bindings
+native_dynlib.json                 public-procedure exclusion config
+nimcache/c/libproducer.private.a   original hidden/private symbols
+nimcache/c/libproducer.a           selected symbols promoted
+nimcache/c/libproducer.exports     BIF-derived linker export control
+nimcache/c/libproducer.so          filtered library on Linux and FreeBSD
+nimcache/c/libproducer.dylib       filtered library on macOS
+consumer                           ordinary Nim consumer executable
 ```
 
 Inspect the result on Linux or FreeBSD with:
 
 ```sh
-nm -D --defined-only nimcache/libproducer.so
+nm -D --defined-only nimcache/c/libproducer.so
 ```
 
 Or on macOS with:
 
 ```sh
-nm -gU nimcache/libproducer.dylib
+nm -gU nimcache/c/libproducer.dylib
 ```
 
 The list contains the 20 public procedures from `producer.nim` and
@@ -86,18 +91,19 @@ symbols remain hidden.
 
 ## How the build works
 
-The regular C pipeline eliminates unused public procedures before producing an
-object file. The incremental backend gives us a useful interception point:
+Binny supports both the regular C and incremental compiler backends. The
+regular C backend is the default:
 
-1. `nim ic --genBif:on` writes semantic `.s.bif` files and pre-merge `.c.nif`
-   artifacts.
+1. `nim c --genBif:on` (or `nim ic --genBif:on`) writes semantic `.s.bif`
+   files and backend `.c.nif` artifacts.
 2. `tools/native_dynlib` reads each application BIF, applies
    `native_dynlib.json`, and selects the remaining exported routines plus custom
    ownership hooks required by public types.
 3. It matches the semantic symbol in BIF to the same symbol recorded on a
    `.c.nif` definition, obtaining the exact backend C name.
-4. It marks those definitions as liveness roots and lets Nim rerun its normal
-   dependency closure and C emission.
+4. It makes those definitions liveness roots and reruns Nim's normal dependency
+   closure and C emission. With `nim c`, Binny generates a temporary root
+   module; with `nim ic`, it updates the backend roots directly.
 5. On Linux and FreeBSD, the emitted C is recompiled as position-independent
    code before the generated objects are collected into
    `libproducer.private.a`.

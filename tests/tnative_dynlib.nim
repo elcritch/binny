@@ -121,6 +121,15 @@ block generated_module_accepts_library_override:
   let generated = generateNativeModule(api, "/opt/lib/libsample.so")
   doAssert "const nativeLibrary* = \"/opt/lib/libsample.so\"" in generated
 
+block generated_module_allows_strdefine_loader_name:
+  let api = NativeApi(
+    libraryName: "libsample.so",
+    initSymbol: "NimMain",
+    procs: @[NativeProc(name: "ping", cSymbol: "ping")],
+  )
+  let generated = generateNativeModule(api, libraryNameStrdefine = true)
+  doAssert "const nativeLibrary* {.strdefine.} = \"libsample.so\"" in generated
+
 block generated_module_requires_loader_name:
   let api = NativeApi(
     initSymbol: "NimMain", procs: @[NativeProc(name: "ping", cSymbol: "ping")]

@@ -1,4 +1,5 @@
 import std/[os, strutils]
+import binny/native_dynlib
 import binny/native_dynlib/exportconfig
 import binny/native_dynlib/staticlib
 
@@ -8,6 +9,7 @@ usage:
   native_dynlib prepare NIMCACHE SOURCE_ROOT MAIN_SOURCE C_ROOT [--config:CONFIG]
   native_dynlib exports NIMCACHE SOURCE_ROOT MAIN_SOURCE LIBRARY EXPORT_LIST [--config:CONFIG]
   native_dynlib root NIMCACHE MAIN_SOURCE LIBRARY EXPORT_LIST [--config:CONFIG]
+  native_dynlib bindings NIMCACHE SOURCE_ROOT SOURCE LIBRARY OUTPUT [--config:CONFIG] [--library-strdefine]
   native_dynlib pic NIMCACHE
   native_dynlib promote INPUT.a OUTPUT.a EXPORT_LIST
   native_dynlib link INPUT.a OUTPUT_LIBRARY EXPORT_LIST [LINKER_ARG ...]
@@ -112,6 +114,27 @@ try:
     echo "NimMain -> ", initSymbol
     for symbol in symbols:
       echo symbol.nifSymbol, " -> ", symbol.cSymbol
+  of "bindings":
+    if paramCount() notin 6 .. 8:
+      usage()
+    var
+      exportConfig: NativeExportConfig
+      libraryNameStrdefine = false
+    for index in 7 .. paramCount():
+      let argument = paramStr(index)
+      if argument == "--library-strdefine":
+        libraryNameStrdefine = true
+      else:
+        exportConfig = loadConfigArgument(argument)
+    let config = initBifNativeBindingsConfig(
+      paramStr(4),
+      paramStr(2),
+      paramStr(5),
+      paramStr(3),
+      exportConfig,
+      libraryNameStrdefine,
+    )
+    discard config.writeNativeBindings(paramStr(6))
   of "pic":
     if paramCount() != 2:
       usage()

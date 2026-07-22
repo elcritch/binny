@@ -14,6 +14,7 @@ type NativeBindingsConfig* = object
   libraryName*: string
   sourceRoot*: string
   exportConfig*: NativeExportConfig
+  libraryNameStrdefine*: bool
 
 func nativeLibrarySuffix(): string =
   when defined(windows):
@@ -27,6 +28,7 @@ proc initBifNativeBindingsConfig*(
     sourcePath, nimcacheDir, libraryName: string,
     sourceRoot = "",
     exportConfig = NativeExportConfig(),
+    libraryNameStrdefine = false,
 ): NativeBindingsConfig =
   ## Creates configuration for bindings reconstructed from compiler artifacts.
   ## A bare ``libraryName`` receives the host dynamic-library suffix.
@@ -34,6 +36,7 @@ proc initBifNativeBindingsConfig*(
   result.nimcacheDir = nimcacheDir
   result.exportConfig = exportConfig
   result.exportConfig.validateNativeExportConfig()
+  result.libraryNameStrdefine = libraryNameStrdefine
   result.libraryName =
     if libraryName.splitFile.ext.len == 0:
       libraryName & nativeLibrarySuffix()
@@ -55,7 +58,7 @@ proc generateNativeBindings*(config: NativeBindingsConfig): string =
     config.nimcacheDir, config.sourceRoot, config.sourcePath, config.libraryName,
     config.exportConfig,
   )
-  result = generateNativeModule(api)
+  result = generateNativeModule(api, libraryNameStrdefine = config.libraryNameStrdefine)
 
 proc writeNativeBindings*(config: NativeBindingsConfig, outputPath: string): bool =
   ## Writes a generated binding module and returns ``true`` when it changed.

@@ -483,7 +483,9 @@ proc params(procInfo: NativeProc, names: Table[string, string]): string =
         nimType(param.typeSymbol, names)
   result = parts.join("; ")
 
-proc generateNativeModule*(api: NativeApi, libraryOverride = ""): string =
+proc generateNativeModule*(
+    api: NativeApi, libraryOverride = "", libraryNameStrdefine = false
+): string =
   let
     names = typeNames(api)
     libraryName = if libraryOverride.len > 0: libraryOverride else: api.libraryName
@@ -496,7 +498,10 @@ proc generateNativeModule*(api: NativeApi, libraryOverride = ""): string =
       imports.add typ.importModule
   if imports.len > 0:
     result.add "import " & imports.join(", ") & "\n\n"
-  result.add "const nativeLibrary* = " & libraryName.escape & "\n\n"
+  result.add "const nativeLibrary*"
+  if libraryNameStrdefine:
+    result.add " {.strdefine.}"
+  result.add " = " & libraryName.escape & "\n\n"
   result.add generateTypes(api, names)
   result.add generateLayoutChecks(api, names)
   result.add "proc nativeNimMain() {.cdecl, importc: " & api.initSymbol.escape &

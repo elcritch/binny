@@ -9,7 +9,7 @@ Binny turns ordinary public Nim routines (`proc name*`) into a filtered native d
 The native-library workflow is experimental. The no-pragma archive promotion
 supports 64-bit Mach-O on macOS and little-endian ELF64 on Linux and FreeBSD. Windows should be possible, but I don't have a Windows Machine.
 
-It requires a Nim devel compiler with `--genBif`, `nim ic`, and `nifler`.
+It requires a Nim devel compiler with `--genBif` and `nifler`.
 
 ## Why try it?
 
@@ -78,29 +78,33 @@ Then resolve it:
 atlas install
 ```
 
-Define the export filter once, then use it for both library selection and
-BIF-derived consumer bindings:
+Import Binny's NimScript builder from `config.nims`, describe the producer, and
+add a task:
 
 ```nim
-import binny/native_dynlib
+import binny/native_dynlib/build
 
-let exportConfig = loadNativeExportConfig("binny.native.json")
-let config = initBifNativeBindingsConfig(
-  sourcePath = "src/plugin.nim",
-  nimcacheDir = "build/nimcache",
-  libraryName = "build/libplugin",
-  exportConfig = exportConfig,
+var nativeBuild = initNativeDynlibBuildConfig(
+  "src/plugin.nim",
+  "libplugin",
+  buildRoot = "build/native",
+  bindingsPath = "generated/plugin_abi.nim",
+  exportConfigPath = "binny.native.json",
 )
+nativeBuild.nimArgs = @["--mm:orc", "-d:useMalloc"]
 
-discard config.writeNativeBindings("generated/plugin_abi.nim")
+task nativeDynlib, "Build the native library and its Nim bindings":
+  nativeBuild.buildNativeDynlibAndBindings()
 ```
 
-Pass the same JSON file to the archive-rooting command with
-`--config:binny.native.json`. This keeps the dylib export list and generated
-bindings on the same filtered public API.
+Run it with `nim nativeDynlib`. Binny uses the normal `nim c` pipeline by
+default, performs both compiler passes, builds and promotes the archive, links
+and verifies the filtered dynamic library, then generates the consumer module.
+Set `backend = "ic"` in the constructor to use `nim ic` instead.
 
 When `libraryName` has no extension, Binny appends `.dylib` on macOS or `.so`
-on Linux and FreeBSD.
+on Linux and FreeBSD. Call `nativeBuild.stageNativeDynlib("bin")` to copy the
+library and generate a matching binding module in a distribution directory.
 
 ## Other binary tooling
 
