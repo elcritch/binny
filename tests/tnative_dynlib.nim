@@ -159,6 +159,21 @@ block config_accepts_explicit_overrides:
   doAssert config.nimcacheDir == "cache"
   doAssert config.libraryOverride == "/opt/lib/libproducer.so"
 
+block bif_config_defaults_to_source_directory:
+  let config = initBifNativeBindingsConfig(
+    "src/producer.nim", "build/cache", "libproducer.dylib"
+  )
+  doAssert config.bifDerived
+  doAssert config.sourceRoot == "src"
+  doAssert config.nimcacheDir == "build/cache"
+  doAssert config.libraryOverride == "libproducer.dylib"
+
+block bif_config_accepts_source_root:
+  let config = initBifNativeBindingsConfig(
+    "src/plugins/producer.nim", "build/cache", "libproducer.dylib", "src"
+  )
+  doAssert config.sourceRoot == "src"
+
 block individual_path_overload_remains_available:
   doAssert compiles(
     generateNativeBindings("cache", "producer.nim", "libproducer.abi.nif")

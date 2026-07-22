@@ -2,8 +2,6 @@ import std/tables
 import support
 export support
 
-{.pragma: exportabi.}
-
 type
   Vec2* = object
     x*, y*: float32
@@ -72,64 +70,64 @@ proc `=destroy`(moveOnly: MoveOnly) =
 
 proc `=copy`(dest: var MoveOnly, source: MoveOnly) {.error.}
 
-proc newRenderer*(name: string): Renderer {.exportabi.} =
+proc newRenderer*(name: string): Renderer =
   Renderer(name: name, size: Vec2(x: 1, y: 2), child: Child(label: "child"))
 
-proc translate*(renderer: Renderer, delta: Vec2) {.exportabi.} =
+proc translate*(renderer: Renderer, delta: Vec2) =
   renderer.size.x += delta.x
   renderer.size.y += delta.y
 
-proc describe*(renderer: Renderer): string {.exportabi.} =
+proc describe*(renderer: Renderer): string =
   renderer.name & ":" & renderer.child.label
 
-proc message*(): string {.exportabi.} =
+proc message*(): string =
   "hello from the MY AWESOME dynlib"
 
-proc sumNumbers*(numbers: openArray[int]): int {.exportabi.} =
+proc sumNumbers*(numbers: openArray[int]): int =
   for number in numbers:
     result += number
 
-proc sumSpans*(spans: openArray[NumberSpan]): int {.exportabi.} =
+proc sumSpans*(spans: openArray[NumberSpan]): int =
   for span in spans:
     result += span.value
 
-proc sumLabeledSpans*(spans: openArray[(NumberSpan, string)]): int {.exportabi.} =
+proc sumLabeledSpans*(spans: openArray[(NumberSpan, string)]): int =
   for (span, label) in spans:
     result += span.value + label.len
 
-proc doubleNumber*(number: Number): Number {.exportabi.} =
+proc doubleNumber*(number: Number): Number =
   number * 2
 
-proc newRenders*(): Renders {.exportabi.} =
+proc newRenders*(): Renders =
   Renders(layers: initOrderedTable[Number, RenderList]())
 
-proc newTextPayload*(text: string): Payload {.exportabi.} =
+proc newTextPayload*(text: string): Payload =
   Payload(kind: pkText, text: text)
 
-proc payloadDescription*(payload: Payload): string {.exportabi.} =
+proc payloadDescription*(payload: Payload): string =
   case payload.kind
   of pkCode:
     $payload.code
   of pkText:
     payload.text
 
-proc newDerived*(value: int, detail: string): Derived {.exportabi.} =
+proc newDerived*(value: int, detail: string): Derived =
   Derived(baseValue: value, detail: detail)
 
-proc derivedDescription*(value: Derived): string {.exportabi.} =
+proc derivedDescription*(value: Derived): string =
   $value.baseValue & ":" & value.detail
 
-proc newPacked*(small: uint8, large: uint32): Packed {.exportabi.} =
+proc newPacked*(small: uint8, large: uint32): Packed =
   Packed(small: small, large: large)
 
-proc newHooked*(value: int): Hooked {.exportabi.} =
+proc newHooked*(value: int): Hooked =
   Hooked(value: value)
 
-proc hookedCopyCount*(): int {.exportabi.} =
+proc hookedCopyCount*(): int =
   hookedCopies
 
-proc hookedDestroyCount*(): int {.exportabi.} =
+proc hookedDestroyCount*(): int =
   hookedDestroys
 
-proc newMoveOnly*(value: int): MoveOnly {.exportabi.} =
+proc newMoveOnly*(value: int): MoveOnly =
   MoveOnly(value: value)
