@@ -390,11 +390,41 @@ block generated_module_escapes_unsafe_identifiers:
   let api = NativeApi(
     libraryName: "libsample.so",
     initSymbol: "NimMain",
+    types: @[
+      NativeType(
+        name: "type",
+        nifSymbol: "type.0.sample",
+        typeId: "`t99.0.sample",
+        kind: ntAlias,
+        elementTypeSymbol: "`t31.0.system",
+        size: 8,
+        alignment: 8,
+      )
+    ],
     procs: @[
-      NativeProc(name: "for", cSymbol: "for"),
+      NativeProc(
+        name: "foo=",
+        cSymbol: "foo_eq",
+        params: @[
+          NativeParam(
+            name: "item", typeSymbol: "type.0.sample", byVar: true
+          ),
+          NativeParam(name: "value", typeSymbol: "`t31.0.system"),
+        ],
+      ),
+      NativeProc(
+        name: "for",
+        cSymbol: "for",
+        returnTypeSymbol: "`t31.0.system",
+        params: @[
+          NativeParam(name: "item", typeSymbol: "type.0.sample")
+        ],
+      ),
       NativeProc(name: "not-safe", cSymbol: "not_safe"),
     ],
   )
   let generated = generateNativeModule(api)
-  doAssert "proc `for`*()" in generated
+  doAssert "  `type`* = int" in generated
+  doAssert "proc `foo=`*(item: var `type`; value: int)" in generated
+  doAssert "proc `for`*(item: `type`): int" in generated
   doAssert "proc `not-safe`*()" in generated

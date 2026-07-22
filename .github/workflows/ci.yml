@@ -72,6 +72,9 @@ jobs:
       - name: Show compiler version
         run: nim --version
 
+      - name: Test native static library
+        run: nim c -r tests/tnative_staticlib.nim
+
       - name: Run native dynlib example
         working-directory: examples/nim_native_dynlib
         run: |

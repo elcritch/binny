@@ -65,6 +65,9 @@ type
   Tracked* = object
     value*: int
 
+  `type`* = object
+    value*: int
+
 var trackedCopies = 0
 
 proc `=copy`(dest: var Tracked, source: Tracked) =
@@ -87,6 +90,12 @@ proc newTracked*(value: int): Tracked {.noinline.} =
 proc trackedCopyCount*(): int {.noinline.} =
   trackedCopies
 
+proc `foo=`*(item: var `type`, value: int) {.noinline.} =
+  item.value = value
+
+proc `for`*(item: `type`): int {.noinline.} =
+  item.value
+
 proc privateAdd(left, right: int): int {.noinline.} =
   left - right
 """)
@@ -105,7 +114,7 @@ proc privateAdd(left, right: int): int {.noinline.} =
       var exportedNames: seq[string]
       for symbol in exports:
         exportedNames.add symbol.nifSymbol
-      doAssert exports.len == 6, "unexpected exports: " & exportedNames.join(", ")
+      doAssert exports.len == 8, "unexpected exports: " & exportedNames.join(", ")
       doAssert exports[0].nifSymbol.startsWith("publicAdd.")
       doAssert exports[1].nifSymbol.startsWith("publicAnswer.")
       doAssert exports[0].cSymbol.len > 0
@@ -176,7 +185,11 @@ proc privateAdd(left, right: int): int {.noinline.} =
         source, cache, dylib, temporary
       )
       doAssert config.writeNativeBindings(bindings)
-      doAssert "importc: \"" & initSymbol & "\"" in readFile(bindings)
+      let generatedBindings = readFile(bindings)
+      doAssert "importc: \"" & initSymbol & "\"" in generatedBindings
+      doAssert "  `type`* = object" in generatedBindings
+      doAssert "proc `foo=`*(item: var `type`; value: int)" in generatedBindings
+      doAssert "proc `for`*(item: `type`): int" in generatedBindings
       writeFile(consumer, """
 import producer_abi
 
@@ -186,6 +199,11 @@ var copied: Tracked
 copied = original
 doAssert copied.value == 7
 doAssert trackedCopyCount() == 1
+
+var quoted = producer_abi.`type`(value: 1)
+quoted.foo = 42
+doAssert quoted.value == 42
+doAssert `for`(quoted) == 42
 """)
       discard run([
         compiler, "c", "--mm:orc", "-d:useMalloc",

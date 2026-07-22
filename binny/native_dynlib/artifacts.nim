@@ -81,16 +81,18 @@ proc typeNames(api: NativeApi): Table[string, string] =
       result[typ.nifSymbol] = typ.name
       result[typ.typeId] = typ.name
     elif not typ.isBuiltinType:
-      result[typ.nifSymbol] = typ.name
-      result[typ.typeId] = typ.name
+      let name = nimIdentifier(typ.name)
+      result[typ.nifSymbol] = name
+      result[typ.typeId] = name
       for symbol in typ.equivalentTypeSymbols:
-        result[symbol] = typ.name
+        result[symbol] = name
   for typ in api.types:
     if typ.kind == ntImportedGeneric:
       var arguments: seq[string]
       for argument in typ.genericArguments:
         arguments.add nimType(argument, result)
-      let rendered = typ.name & "[" & arguments.join(", ") & "]"
+      let rendered = nimIdentifier(typ.name) &
+        "[" & arguments.join(", ") & "]"
       result[typ.nifSymbol] = rendered
       result[typ.typeId] = rendered
     elif typ.kind == ntOpenArray:
