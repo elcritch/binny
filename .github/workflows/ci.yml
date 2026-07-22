@@ -16,11 +16,19 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Install Nim devel
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: devel
-          repo-token: ${{ github.token }}
+      - name: Install GrabNim
+        run: |
+          curl --fail --location --silent --show-error \
+            https://codeberg.org/janAkali/grabnim/raw/branch/master/misc/install.sh \
+            --output "$RUNNER_TEMP/grabnim-install.sh"
+          sh "$RUNNER_TEMP/grabnim-install.sh"
+          echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/share/grabnim/current/bin" >> "$GITHUB_PATH"
+
+      - name: Install Nim devel nightly
+        env:
+          GRABNIM_GITHUB_TOKEN: ${{ github.token }}
+        run: grabnim devel
 
       - name: Show compiler version
         run: nim --version
@@ -38,11 +46,19 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Install Nim devel
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: devel
-          repo-token: ${{ github.token }}
+      - name: Install GrabNim
+        run: |
+          curl --fail --location --silent --show-error \
+            https://codeberg.org/janAkali/grabnim/raw/branch/master/misc/install.sh \
+            --output "$RUNNER_TEMP/grabnim-install.sh"
+          sh "$RUNNER_TEMP/grabnim-install.sh"
+          echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/share/grabnim/current/bin" >> "$GITHUB_PATH"
+
+      - name: Install Nim devel nightly
+        env:
+          GRABNIM_GITHUB_TOKEN: ${{ github.token }}
+        run: grabnim devel
 
       - name: Show compiler version
         run: nim --version
