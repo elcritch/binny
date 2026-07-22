@@ -131,3 +131,9 @@ proc hookedDestroyCount*(): int =
 
 proc newMoveOnly*(value: int): MoveOnly =
   MoveOnly(value: value)
+
+proc ignoredDebugMessage*(): string {.noinline.} =
+  "not part of the native API"
+
+proc ignoredMetric*(value: int): int {.noinline.} =
+  value + 1

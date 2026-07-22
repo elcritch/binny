@@ -1,4 +1,4 @@
-import std/[assertions, strutils]
+import std/[assertions, os, strutils, tempfiles]
 import binny/native_dynlib
 import binny/native_dynlib/[artifacts, model]
 import binny/native_dynlib/staticlib
@@ -27,6 +27,60 @@ block bif_config_adds_native_library_suffix:
     doAssert config.libraryName == "build/libproducer.dylib"
   else:
     doAssert config.libraryName == "build/libproducer.so"
+
+block bif_config_accepts_export_config:
+  let
+    exportConfig = initNativeExportConfig([excludeProc("debug*")])
+    config = initBifNativeBindingsConfig(
+      "src/producer.nim",
+      "build/cache",
+      "build/libproducer",
+      exportConfig = exportConfig,
+    )
+  doAssert config.exportConfig.excludeProcs == exportConfig.excludeProcs
+  doAssert config.exportConfig.requireMatches
+
+block native_export_selectors_match_exact_names_and_globs:
+  let exact = excludeProc("foo=", source = "producer.nim")
+  doAssert exact.matches("producer.nim", "foo=")
+  doAssert not exact.matches("support.nim", "foo=")
+  doAssert not exact.matches("producer.nim", "foo")
+
+  let glob = excludeProc("ignored*Metric*", source = "src/*/producer*.nim")
+  doAssert glob.matches("src/plugins/producer_test.nim", "ignoredMetric")
+  doAssert glob.matches("src/plugins/producer.nim", "ignoredOldMetricValue")
+  doAssert not glob.matches("src/producer.nim", "ignoredMetric")
+
+  let everyProc = excludeProc("*")
+  doAssert everyProc.matches("any/module.nim", "message")
+  doAssert everyProc.matches("any/module.nim", "foo=")
+
+block native_export_config_loads_json:
+  let (configFile, configPath) = createTempFile(
+    "binny-native-export-", ".json"
+  )
+  defer:
+    removeFile(configPath)
+  configFile.write("""
+{
+  "excludeProcs": [
+    {"source": "producer*.nim", "name": "ignored*"},
+    {"name": "foo="}
+  ],
+  "requireMatches": false
+}
+""")
+  configFile.close()
+
+  let config = loadNativeExportConfig(configPath)
+  doAssert config.excludeProcs.len == 2
+  doAssert not config.requireMatches
+  doAssert config.excludeProcs[0].matches("producer.nim", "ignoredDebug")
+  doAssert config.excludeProcs[1].matches("support.nim", "foo=")
+
+block native_export_config_rejects_backticks:
+  doAssertRaises NativeExportConfigError:
+    discard initNativeExportConfig([excludeProc("`foo=`")])
 
 block manifest_binding_api_is_not_available:
   doAssert not compiles(initNativeBindingsConfig("producer.nim", "manifest.nif"))
@@ -64,6 +118,14 @@ block generated_module_requires_loader_name:
   )
   doAssertRaises NativeArtifactError:
     discard generateNativeModule(api)
+
+block generated_module_allows_an_initializer_only_api:
+  let generated = generateNativeModule(
+    NativeApi(libraryName: "libsample.so", initSymbol: "sample_NimMain_root")
+  )
+  doAssert "proc nativeNimMain()" in generated
+  doAssert "nativeNimMain()" in generated
+  doAssert "{.push nimcall, dynlib: nativeLibrary.}" in generated
 
 block generated_module_preserves_builtin_range_types:
   let api = NativeApi(

@@ -46,6 +46,7 @@ let
   privateArchive = path(nimcacheDir, "libproducer.private.a")
   publicArchive = path(nimcacheDir, "libproducer.a")
   exportList = path(nimcacheDir, "libproducer.exports")
+  exportConfig = path(exampleDir, "native_dynlib.json")
   library = case hostOS
     of "macosx": path(nimcacheDir, "libproducer.dylib")
     of "linux", "freebsd": path(nimcacheDir, "libproducer.so")
@@ -143,6 +144,7 @@ proc buildProducer() =
   compileProducerBackend()
   runCommand([
     toolBinary, "root", producerCache, producerSource, library, exportList,
+    "--config:" & exportConfig,
   ])
   compileProducerBackend()
   if hostOS == "linux" or hostOS == "freebsd":
@@ -162,8 +164,13 @@ proc generateBindings() =
   ])
   runCommand([
     generatorBinary, producerCache, exampleDir, producerSource, bindings,
-    library
+    library, exportConfig,
   ])
+  let generatedBindings = readFile(bindings)
+  if "proc ignoredDebugMessage*" in generatedBindings or
+      "proc ignoredMetric*" in generatedBindings:
+    raise newException(OSError,
+      "excluded public procedures were emitted in generated bindings")
 
 proc buildConsumer() =
   if not fileExists(bindings):

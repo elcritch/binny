@@ -1,5 +1,6 @@
 import std/[algorithm, os, strutils, tables]
 import ./nif/[bif, nifcoreparse, nifqueries]
+import exportconfig
 import model
 import staticlib
 
@@ -1253,13 +1254,13 @@ proc findSemanticBif*(nimcacheDir, sourcePath: string): string =
   result = findSemanticBifPath(nimcacheDir, sourcePath)
 
 proc readBifNativeApi*(nimcacheDir, sourceRoot, sourcePath,
-    libraryName: string): NativeApi =
+    libraryName: string; exportConfig = NativeExportConfig()): NativeApi =
   ## Reconstructs a native API from semantic BIF and incremental C definitions.
   let
     bifPath = findSemanticBif(nimcacheDir, sourcePath)
     initSymbol = nativeInitSymbol(libraryName, bifPath)
     routines = resolveNativeSymbols(
-      nimcacheDir, publicRoutineSymbols(nimcacheDir, sourceRoot)
+      nimcacheDir, publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig)
     )
     hooks = resolveNativeHooks(
       nimcacheDir, nativeHookSymbols(nimcacheDir, sourceRoot)

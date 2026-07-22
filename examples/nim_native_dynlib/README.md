@@ -28,10 +28,36 @@ That builds the library, generates `generated/producer_abi.nim`, compiles and
 runs the existing consumer, and verifies that the generated move-only type
 cannot be copied. The consumer remains available as `./consumer` afterward.
 
-The tasks build these artifacts:
+## Exclude public procedures
+
+`native_dynlib.json` removes selected public procedures before they become
+backend liveness roots:
+
+```json
+{
+  "excludeProcs": [
+    {"source": "producer*.nim", "name": "ignored*"},
+    {"source": "support.nim", "name": "debugDump"}
+  ],
+  "requireMatches": true
+}
+```
+
+Both `source` and `name` accept `*` as a zero-or-more-character wildcard. Source
+paths are relative to the configured source root. Write quoted Nim names
+without backticks, such as `foo=`, `for`, or `[]`. A selector applies to every
+matching overload.
+
+With `requireMatches` enabled—the default—a misspelled or stale selector stops
+the build. Exclusions apply to ordinary public procedures; required ownership
+hooks and the library initializer remain present. The example passes this same
+file to both the archive-rooting tool and binding generator.
+
+The workflow uses and builds these files:
 
 ```text
 generated/producer_abi.nim       reconstructed native Nim bindings
+native_dynlib.json               public-procedure exclusion config
 nimcache/libproducer.private.a   original hidden/private symbols
 nimcache/libproducer.a           selected symbols promoted
 nimcache/libproducer.exports     BIF-derived linker export control
@@ -65,8 +91,9 @@ object file. The incremental backend gives us a useful interception point:
 
 1. `nim ic --genBif:on` writes semantic `.s.bif` files and pre-merge `.c.nif`
    artifacts.
-2. `tools/native_dynlib` reads each application BIF and selects exported runtime
-   routines plus custom ownership hooks required by public types.
+2. `tools/native_dynlib` reads each application BIF, applies
+   `native_dynlib.json`, and selects the remaining exported routines plus custom
+   ownership hooks required by public types.
 3. It matches the semantic symbol in BIF to the same symbol recorded on a
    `.c.nif` definition, obtaining the exact backend C name.
 4. It marks those definitions as liveness roots and lets Nim rerun its normal

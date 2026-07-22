@@ -7,6 +7,7 @@
 
 import std/[algorithm, os, osproc, sets, streams, strutils, tables, tempfiles]
 import nif/[bif, nifcore, nifcoreparse, nifqueries]
+import exportconfig
 
 type
   NativeStaticLibError* = object of CatchableError
@@ -59,6 +60,17 @@ func semanticModule(symbol: string): string =
   let separator = symbol.rfind('.')
   if separator >= 0:
     result = symbol[separator + 1..^1]
+
+func semanticName(symbol: string): string =
+  let moduleSeparator = symbol.rfind('.')
+  if moduleSeparator < 0:
+    return symbol
+  let qualifiedName = symbol[0..<moduleSeparator]
+  let overloadSeparator = qualifiedName.rfind('.')
+  if overloadSeparator < 0:
+    result = qualifiedName
+  else:
+    result = qualifiedName[0..<overloadSeparator]
 
 func bifModuleSuffix(path: string): string =
   let name = path.extractFilename
@@ -200,7 +212,43 @@ proc firstParameterType(declaration: Cursor): string =
         return typeSymbol.symName
     children.skip
 
-proc publicRoutineSymbols*(nimcacheDir, sourceRoot: string): seq[NativeExportSymbol] =
+proc applyExportConfig(
+    symbols: openArray[NativeExportSymbol]; sourceRoot: string;
+    exportConfig: NativeExportConfig
+): seq[NativeExportSymbol] =
+  exportConfig.validateNativeExportConfig()
+  if exportConfig.excludeProcs.len == 0:
+    return @symbols
+
+  let root = normalizedAbsolutePath(sourceRoot)
+  var matched = newSeq[bool](exportConfig.excludeProcs.len)
+  for symbol in symbols:
+    let
+      source = relativePath(symbol.sourcePath, root).replace('\\', '/')
+      name = semanticName(symbol.nifSymbol)
+    var excluded = false
+    for index, selector in exportConfig.excludeProcs:
+      if selector.matches(source, name):
+        matched[index] = true
+        excluded = true
+    if not excluded:
+      result.add symbol
+
+  if exportConfig.requireMatches:
+    var missing: seq[string]
+    for index, selector in exportConfig.excludeProcs:
+      if not matched[index]:
+        let source =
+          if selector.source.len == 0: "*" else: selector.source
+        missing.add source & ":" & selector.name
+    if missing.len > 0:
+      fail("native export exclusions matched no public procedures:\n  " &
+        missing.join("\n  "))
+
+proc publicRoutineSymbols*(
+    nimcacheDir, sourceRoot: string;
+    exportConfig = NativeExportConfig()
+): seq[NativeExportSymbol] =
   ## Returns public, runtime routine declarations owned by application modules.
   ##
   ## ``sourceRoot`` bounds the application: public routines from the compiler
@@ -225,6 +273,7 @@ proc publicRoutineSymbols*(nimcacheDir, sourceRoot: string): seq[NativeExportSym
       if visibility == ivExported and semanticModule(name) == moduleSuffix and
           declaration.isRoutineDeclaration:
         result.add NativeExportSymbol(sourcePath: absoluteSource, nifSymbol: name)
+  result = applyExportConfig(result, sourceRoot, exportConfig)
 
 proc nativeHookSymbols*(nimcacheDir, sourceRoot: string): seq[NativeHookSymbol] =
   ## Returns custom and forbidden ownership hooks belonging to public app types.
@@ -362,12 +411,15 @@ proc resolveNativeHooks*(nimcacheDir: string;
   for index, symbol in resolved:
     result[indexes[index]].cSymbol = symbol.cSymbol
 
-proc rootPublicRoutines*(nimcacheDir, sourceRoot, mainSource: string): seq[NativeExportSymbol] =
+proc rootPublicRoutines*(
+    nimcacheDir, sourceRoot, mainSource: string;
+    exportConfig = NativeExportConfig()
+): seq[NativeExportSymbol] =
   ## Roots public app routines and ownership hooks required by public types.
   ##
   ## Run this after the first ``nim ic`` backend pass. Running ``nim ic`` again
   ## then recomputes DCE and emits the public routines plus their dependencies.
-  var exports = publicRoutineSymbols(nimcacheDir, sourceRoot)
+  var exports = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig)
   for hook in nativeHookSymbols(nimcacheDir, sourceRoot):
     if not hook.forbidden:
       exports.add NativeExportSymbol(

@@ -1,0 +1,9 @@
+{
+  "excludeProcs": [
+    {
+      "source": "producer*.nim",
+      "name": "ignored*"
+    }
+  ],
+  "requireMatches": true
+}

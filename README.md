@@ -19,6 +19,7 @@ It requires a Nim devel compiler with `--genBif`, `nim ic`, and `nifler`.
 - Preserve objects, refs, inheritance, case objects, containers, and custom
   ownership hooks in generated bindings.
 - Export only the BIF-selected procedures and required runtime entry points.
+- Exclude public procedures with exact or `*`-glob source/name selectors.
 - Give each library its own initializer name, such as
   `libproducer_NimMain_pro47ngcy1`.
 - Use the original Nim implementations instead of generating forwarding code.
@@ -77,20 +78,26 @@ Then resolve it:
 atlas install
 ```
 
-After the compiler artifacts and dylib exist, generate BIF-derived consumer
-bindings with:
+Define the export filter once, then use it for both library selection and
+BIF-derived consumer bindings:
 
 ```nim
 import binny/native_dynlib
 
+let exportConfig = loadNativeExportConfig("binny.native.json")
 let config = initBifNativeBindingsConfig(
   sourcePath = "src/plugin.nim",
   nimcacheDir = "build/nimcache",
   libraryName = "build/libplugin",
+  exportConfig = exportConfig,
 )
 
 discard config.writeNativeBindings("generated/plugin_abi.nim")
 ```
+
+Pass the same JSON file to the archive-rooting command with
+`--config:binny.native.json`. This keeps the dylib export list and generated
+bindings on the same filtered public API.
 
 When `libraryName` has no extension, Binny appends `.dylib` on macOS or `.so`
 on Linux and FreeBSD.

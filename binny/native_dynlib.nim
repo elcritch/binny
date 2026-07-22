@@ -3,7 +3,9 @@
 ## The required NIF/BIF reader support is vendored in ``native_dynlib/nif``.
 
 import std/[os, syncio]
-import native_dynlib/[artifacts, bifreader]
+import native_dynlib/[artifacts, bifreader, exportconfig]
+
+export exportconfig
 
 type
   NativeBindingsConfig* = object
@@ -12,6 +14,7 @@ type
     nimcacheDir*: string
     libraryName*: string
     sourceRoot*: string
+    exportConfig*: NativeExportConfig
 
 func nativeLibrarySuffix(): string =
   when defined(windows):
@@ -22,11 +25,14 @@ func nativeLibrarySuffix(): string =
     ".so"
 
 proc initBifNativeBindingsConfig*(sourcePath, nimcacheDir,
-    libraryName: string; sourceRoot = ""): NativeBindingsConfig =
+    libraryName: string; sourceRoot = "";
+    exportConfig = NativeExportConfig()): NativeBindingsConfig =
   ## Creates configuration for bindings reconstructed from BIF and C NIF.
   ## A bare ``libraryName`` receives the host dynamic-library suffix.
   result.sourcePath = sourcePath
   result.nimcacheDir = nimcacheDir
+  result.exportConfig = exportConfig
+  result.exportConfig.validateNativeExportConfig()
   result.libraryName =
     if libraryName.splitFile.ext.len == 0:
       libraryName & nativeLibrarySuffix()
@@ -49,6 +55,7 @@ proc generateNativeBindings*(config: NativeBindingsConfig): string =
     config.sourceRoot,
     config.sourcePath,
     config.libraryName,
+    config.exportConfig,
   )
   result = generateNativeModule(api)
 

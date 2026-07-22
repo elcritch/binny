@@ -96,6 +96,15 @@ proc `foo=`*(item: var `type`, value: int) {.noinline.} =
 proc `for`*(item: `type`): int {.noinline.} =
   item.value
 
+proc ignoredDebug*(): int {.noinline.} =
+  100
+
+proc ignoredMetric*(): int {.noinline.} =
+  200
+
+proc ignoredMetric*(value: int): int {.noinline.} =
+  value + 200
+
 proc privateAdd(left, right: int): int {.noinline.} =
   left - right
 """)
@@ -107,16 +116,30 @@ proc privateAdd(left, right: int): int {.noinline.} =
       ]
       discard run(compileArguments)
 
+      let exportConfig = initNativeExportConfig([
+        excludeProc("publicAnswer", source = "producer.nim"),
+        excludeProc("ignored*", source = "producer*.nim"),
+      ])
+      doAssertRaises NativeStaticLibError:
+        discard rootPublicRoutines(
+          cache,
+          temporary,
+          source,
+          initNativeExportConfig([excludeProc("missing*")]),
+        )
+
       let
-        exports = rootPublicRoutines(cache, temporary, source)
+        exports = rootPublicRoutines(cache, temporary, source, exportConfig)
         bifPath = findSemanticBifPath(cache, source)
         initSymbol = nativeInitSymbol(dylib, bifPath)
       var exportedNames: seq[string]
       for symbol in exports:
         exportedNames.add symbol.nifSymbol
-      doAssert exports.len == 8, "unexpected exports: " & exportedNames.join(", ")
+      doAssert exports.len == 7, "unexpected exports: " & exportedNames.join(", ")
       doAssert exports[0].nifSymbol.startsWith("publicAdd.")
-      doAssert exports[1].nifSymbol.startsWith("publicAnswer.")
+      doAssert exports[1].nifSymbol.startsWith("sumValues.")
+      doAssert "publicAnswer" notin exportedNames.join(",")
+      doAssert "ignored" notin exportedNames.join(",")
       doAssert exports[0].cSymbol.len > 0
       doAssert exports[1].cSymbol.len > 0
       doAssert initSymbol.startsWith("libproducer_NimMain_")
@@ -168,6 +191,9 @@ proc privateAdd(left, right: int): int {.noinline.} =
         doAssert dylibSymbols.listsSymbol(initSymbol)
         doAssert not dylibSymbols.listsSymbol("NimMain")
       doAssert "privateAdd" notin dylibSymbols
+      doAssert "publicAnswer" notin dylibSymbols
+      doAssert "ignoredDebug" notin dylibSymbols
+      doAssert "ignoredMetric" notin dylibSymbols
 
       let library = loadLib(dylib)
       doAssert not library.isNil
@@ -182,7 +208,7 @@ proc privateAdd(left, right: int): int {.noinline.} =
       library.unloadLib()
 
       let config = initBifNativeBindingsConfig(
-        source, cache, dylib, temporary
+        source, cache, dylib, temporary, exportConfig
       )
       doAssert config.writeNativeBindings(bindings)
       let generatedBindings = readFile(bindings)
@@ -190,6 +216,8 @@ proc privateAdd(left, right: int): int {.noinline.} =
       doAssert "  `type`* = object" in generatedBindings
       doAssert "proc `foo=`*(item: var `type`; value: int)" in generatedBindings
       doAssert "proc `for`*(item: `type`): int" in generatedBindings
+      doAssert "proc publicAnswer*" notin generatedBindings
+      doAssert "proc ignored" notin generatedBindings
       writeFile(consumer, """
 import producer_abi
 

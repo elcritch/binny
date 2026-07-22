@@ -485,8 +485,6 @@ proc params(procInfo: NativeProc, names: Table[string, string]): string =
   result = parts.join("; ")
 
 proc generateNativeModule*(api: NativeApi, libraryOverride = ""): string =
-  if api.procs.len == 0:
-    raise newException(NativeArtifactError, "no native ABI exports found")
   let
     names = typeNames(api)
     libraryName = if libraryOverride.len > 0: libraryOverride else: api.libraryName

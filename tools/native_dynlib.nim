@@ -1,10 +1,11 @@
 import std/[os, strutils]
+import binny/native_dynlib/exportconfig
 import binny/native_dynlib/staticlib
 
 proc usage() {.noreturn.} =
   quit """
 usage:
-  native_dynlib root NIMCACHE MAIN_SOURCE LIBRARY EXPORT_LIST
+  native_dynlib root NIMCACHE MAIN_SOURCE LIBRARY EXPORT_LIST [--config:CONFIG]
   native_dynlib pic NIMCACHE NIM_INCLUDE SOURCE_ROOT
   native_dynlib promote INPUT.a OUTPUT.a EXPORT_LIST
   native_dynlib link INPUT.a OUTPUT_LIBRARY EXPORT_LIST
@@ -13,6 +14,12 @@ usage:
 type NativeExportControl = object
   initSymbol: string
   symbols: seq[NativeExportSymbol]
+
+proc loadConfigArgument(value: string): NativeExportConfig =
+  for prefix in ["--config:", "--config="]:
+    if value.startsWith(prefix) and value.len > prefix.len:
+      return loadNativeExportConfig(value[prefix.len..^1])
+  quit "invalid native export config option: " & value
 
 proc addExport(result: var NativeExportControl; name: string) =
   if result.initSymbol.len == 0:
@@ -53,12 +60,15 @@ if paramCount() == 0:
 try:
   case paramStr(1)
   of "root":
-    if paramCount() != 5:
+    if paramCount() notin {5, 6}:
       usage()
     let mainSource = paramStr(3)
     let
+      exportConfig =
+        if paramCount() == 6: loadConfigArgument(paramStr(6))
+        else: NativeExportConfig()
       symbols = rootPublicRoutines(
-        paramStr(2), mainSource.parentDir, mainSource)
+        paramStr(2), mainSource.parentDir, mainSource, exportConfig)
       bifPath = findSemanticBifPath(paramStr(2), mainSource)
       initSymbol = nativeInitSymbol(paramStr(4), bifPath)
     writeNativeExportList(paramStr(5), initSymbol, symbols)
@@ -86,4 +96,6 @@ try:
   else:
     usage()
 except NativeStaticLibError as error:
+  quit error.msg
+except NativeExportConfigError as error:
   quit error.msg
