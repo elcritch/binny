@@ -1,6 +1,6 @@
 import std/[assertions, os, tempfiles]
 
-import binny/bif
+import binny/bif_safe
 
 const SampleSymbol = "sample.exported.symbol"
 

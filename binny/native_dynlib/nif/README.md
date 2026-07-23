@@ -8,7 +8,8 @@ commit `7caaae26` (`bif-query-helpers`).
 The files are kept local so native dynamic-library binding generation does not
 need a separate Nimony checkout.
 
-Binny extends the vendored BIF module with a checked, owned loader for
-long-lived tools. The public `binny/bif` facade exposes that loader together
-with the token cursor and query APIs. The historical zero-copy mmap reader is
-retained only as the explicitly named `loadMappedProcessLifetime` operation.
+The vendored `bif` module retains its original zero-copy reader, whose mapping
+remains resident for the process lifetime. The sibling `bif_safe` module adds
+the checked, owned file reader for long-lived tools. Public callers can choose
+the matching facade: `binny/bif` for mmap loading or `binny/bif_safe` for
+recoverable file loading.
