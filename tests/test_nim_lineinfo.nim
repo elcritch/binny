@@ -1,10 +1,21 @@
-import std/[strformat, strutils, os, osproc, unittest]
-import binny/elfparser
-import binny/dwarf
+import std/unittest
+
+when defined(linux) or defined(freebsd):
+  import std/[strformat, strutils, os, osproc]
+  import binny/elfparser
+  import binny/dwarf
+
+template testOnElfHost(name: string; body: untyped) =
+  when defined(linux) or defined(freebsd):
+    test name:
+      body
+  else:
+    test name:
+      skip()
 
 suite "elf line info":
 
-  test "parse simple test program":
+  testOnElfHost "parse simple test program":
     # Handle both running from project root and tests directory
     let exe = "./tests/simple_test_program"
     discard execCmd("nim c -f --debugger:native " & exe)
@@ -46,7 +57,7 @@ suite "elf line info":
       #TODO: fixme!!!
       check line > 0 and line < 1000
 
-  test "parse simple test program with opts":
+  testOnElfHost "parse simple test program with opts":
     # This test uses optimization flags that cause Nim to generate C code.
     # The DWARF line info points to generated C files, not original Nim source.
     # Line numbers may differ from the original Nim file.
@@ -86,4 +97,3 @@ suite "elf line info":
       # Line numbers are from the generated C file, so we just check they're reasonable
       #TODO: fixme!!!
       check line > 0 and line < 1000
-

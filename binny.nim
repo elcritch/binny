@@ -1,3 +1,3 @@
-import binny/sframe
+import binny/[bif, sframe]
 
-export sframe
+export bif, sframe
