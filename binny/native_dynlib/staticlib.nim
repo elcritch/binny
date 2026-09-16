@@ -1343,8 +1343,13 @@ proc linkWindowsDll*(
   let
     runtimeSource = temporary / "runtime.c"
     runtimeObject = temporary / "runtime.o"
+    exportDefinition = temporary / "native_exports.def"
   writeFile(runtimeSource, "int cmdCount;\nchar **cmdLine;\n")
   runProcess("gcc", ["-c", runtimeSource, "-o", runtimeObject])
+  # GNU ld recognizes PE module-definition files by their ``.def`` suffix.
+  # The public export-list path intentionally uses ``.exports`` on every
+  # platform, so give the Windows linker a temporary DEF-named copy.
+  copyFile(normalizedAbsolutePath(exportListPath), exportDefinition)
   createDir(outputPath.parentDir)
   var arguments =
     @[
@@ -1353,7 +1358,7 @@ proc linkWindowsDll*(
       normalizedAbsolutePath(archivePath),
       "-Wl,--no-whole-archive",
       runtimeObject,
-      normalizedAbsolutePath(exportListPath),
+      exportDefinition,
     ]
   arguments.add linkerArgs
   arguments.add ["-o", normalizedAbsolutePath(outputPath)]
