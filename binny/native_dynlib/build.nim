@@ -321,7 +321,7 @@ proc verifyExports(config: NativeDynlibBuildConfig) =
     var inExportNames = false
     for line in output.splitLines():
       let value = line.strip()
-      if value == "[Ordinal/Name Pointer] Table":
+      if value.startsWith("[Ordinal/Name Pointer] Table"):
         inExportNames = true
       elif inExportNames:
         if value.len == 0:
