@@ -13,6 +13,12 @@ type
     source*: string
     name*: string
 
+  NativeTypeImport* = object
+    ## Reuses a type declared by an imported Nim module. ``name`` is the
+    ## unqualified ABI type name and ``module`` is its Nim import path.
+    name*: string
+    module*: string
+
   NativeExportConfig* = object
     ## When non-empty, only matching public procedures become exports.
     includeProcs*: seq[NativeProcSelector]
@@ -20,6 +26,8 @@ type
     excludeProcs*: seq[NativeProcSelector]
     ## Raise an error when an inclusion or exclusion matches no public procedure.
     requireMatches*: bool
+    ## Types that generated bindings should import instead of redeclaring.
+    typeImports*: seq[NativeTypeImport]
 
 proc fail(message: string) {.noinline, noreturn.} =
   raise newException(NativeExportConfigError, message)
@@ -34,6 +42,10 @@ func includeProc*(name: string, source = ""): NativeProcSelector =
   ## Write quoted names without backticks, for example ``foo=`` or ``for``.
   NativeProcSelector(source: source.replace('\\', '/'), name: name)
 
+func importType*(name, module: string): NativeTypeImport =
+  ## Selects a generated type to reuse from an imported Nim module.
+  NativeTypeImport(name: name, module: module.replace('\\', '/'))
+
 proc validateSelector(selector: NativeProcSelector, description: string) =
   if selector.name.len == 0:
     fail(description & " has an empty procedure name")
@@ -42,22 +54,41 @@ proc validateSelector(selector: NativeProcSelector, description: string) =
   if selector.source.isAbsolute:
     fail(description & " source must be relative: " & selector.source)
 
+proc validateTypeImport(typeImport: NativeTypeImport, description: string) =
+  if typeImport.name.len == 0:
+    fail(description & " has an empty type name")
+  if '`' in typeImport.name or '.' in typeImport.name or '/' in typeImport.name:
+    fail(description & " names must be unqualified and omit backticks: " & typeImport.name)
+  if typeImport.module.len == 0:
+    fail(description & " has an empty module name")
+  if typeImport.module.isAbsolute:
+    fail(description & " module must be relative: " & typeImport.module)
+  for character in typeImport.module:
+    if character notin {
+      'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_', '/', '.', '-'
+    }:
+      fail(description & " module contains an invalid character: " & typeImport.module)
+
 proc validateNativeExportConfig*(config: NativeExportConfig) =
   ## Validates selector spellings before applying an export configuration.
   for selector in config.excludeProcs:
     selector.validateSelector("native export exclusion")
   for selector in config.includeProcs:
     selector.validateSelector("native export inclusion")
+  for index, typeImport in config.typeImports:
+    typeImport.validateTypeImport("native type import[" & $index & "]")
 
 proc initNativeExportConfig*(
     excludeProcs: openArray[NativeProcSelector] = [],
     requireMatches = true,
     includeProcs: openArray[NativeProcSelector] = [],
+    typeImports: openArray[NativeTypeImport] = [],
 ): NativeExportConfig =
   ## Creates a validated native export configuration.
   result.excludeProcs = @excludeProcs
   result.includeProcs = @includeProcs
   result.requireMatches = requireMatches
+  result.typeImports = @typeImports
   result.validateNativeExportConfig()
 
 func globMatches(value, pattern: string): bool =
@@ -121,8 +152,19 @@ proc parseSelector(node: JsonNode, field: string, index: int): NativeProcSelecto
     name: node["name"].getStr,
   )
 
+proc parseTypeImport(node: JsonNode, index: int): NativeTypeImport =
+  let description = "typeImports[" & $index & "]"
+  node.requireObject(description)
+  node.rejectUnknownFields(["name", "module"], description)
+  if not node.hasKey("name") or node["name"].kind != JString:
+    fail(description & ".name must be a string")
+  if not node.hasKey("module") or node["module"].kind != JString:
+    fail(description & ".module must be a string")
+  result = importType(node["name"].getStr, node["module"].getStr)
+  result.validateTypeImport(description)
+
 proc loadNativeExportConfig*(path: string): NativeExportConfig =
-  ## Loads procedure selectors and ``requireMatches`` from a JSON file.
+  ## Loads procedure selectors, imported types, and ``requireMatches`` from JSON.
   let root =
     try:
       parseFile(path)
@@ -131,7 +173,8 @@ proc loadNativeExportConfig*(path: string): NativeExportConfig =
 
   root.requireObject("native export config")
   root.rejectUnknownFields(
-    ["includeProcs", "excludeProcs", "requireMatches"], "native export config"
+    ["includeProcs", "excludeProcs", "requireMatches", "typeImports"],
+    "native export config",
   )
 
   var includeSelectors: seq[NativeProcSelector]
@@ -156,4 +199,14 @@ proc loadNativeExportConfig*(path: string): NativeExportConfig =
       fail("native export config requireMatches must be a boolean")
     requireMatches = root["requireMatches"].getBool
 
-  result = initNativeExportConfig(selectors, requireMatches, includeSelectors)
+  var typeImports: seq[NativeTypeImport]
+  if root.hasKey("typeImports"):
+    let items = root["typeImports"]
+    if items.kind != JArray:
+      fail("native export config typeImports must be an array")
+    for item in items.items:
+      typeImports.add parseTypeImport(item, typeImports.len)
+
+  result = initNativeExportConfig(
+    selectors, requireMatches, includeSelectors, typeImports
+  )

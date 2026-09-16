@@ -36,6 +36,9 @@ jobs:
           "$nim_root/bin/nim" c -d:release --out:"$nim_root/bin/nifmake" \
             "$nim_root/dist/nimony/src/nifmake/nifmake.nim"
 
+      - name: Install native binding test dependencies
+        run: atlas install --feature:test
+
       - name: Show compiler version
         run: nim --version
 
@@ -44,6 +47,9 @@ jobs:
 
       - name: Test native binding generation
         run: nim c -r tests/tnative_dynlib.nim
+
+      - name: Test imported native types
+        run: nim c -r tests/tnative_dynlib_imported_types.nim
 
       - name: Test anonymous generic and named ref bindings
         run: nim c -r tests/tanonymous_generics.nim

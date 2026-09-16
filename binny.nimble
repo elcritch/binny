@@ -7,3 +7,6 @@ feature "reference":
   requires "libbacktrace"
   # requires "https://sourceware.org/git/binutils-gdb.git"
   # requires "https://github.com/gimli-rs/gimli.git"
+
+feature "test":
+  requires "bumpy >= 1.1.3"
