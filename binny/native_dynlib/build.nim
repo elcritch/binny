@@ -326,9 +326,9 @@ proc verifyExports(config: NativeDynlibBuildConfig) =
       elif inExportNames:
         if value.len == 0:
           break
-        let bracket = value.find(']')
-        if bracket >= 0 and bracket + 1 < value.len:
-          actual.add value[bracket + 1 ..^ 1].strip()
+        let fields = value.splitWhitespace()
+        if value.startsWith("[") and fields.len > 0:
+          actual.add fields[^1]
   else:
     for line in output.splitLines():
       let fields = line.splitWhitespace()
