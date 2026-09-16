@@ -1050,12 +1050,6 @@ proc runProcess(command: string, arguments: openArray[string], workingDir = "") 
   if exitCode != 0:
     fail(command & " failed with exit code " & $exitCode & ":\n" & output)
 
-proc outputListsSymbol(output, symbol: string): bool =
-  for line in output.splitLines:
-    let fields = line.splitWhitespace
-    if fields.len > 0 and fields[^1] == symbol:
-      return true
-
 proc recordedCCompileCommand(path: string): seq[string] =
   const marker = "/* Command for C compiler:"
   let
@@ -1230,26 +1224,11 @@ proc promoteCoffArchive*(
     inputPath, outputPath: string, symbols: openArray[NativeExportSymbol]
 ) =
   ## COFF external definitions need no visibility rewrite; preserve the archive.
+  ## The final PE export check validates the selected symbols after linking.
+  discard symbols
   let
     input = normalizedAbsolutePath(inputPath)
     output = normalizedAbsolutePath(outputPath)
-  var process = startProcess(
-    "nm",
-    args = @["-g", "--defined-only", input],
-    options = {poUsePath, poStdErrToStdOut},
-  )
-  let nmOutput = process.outputStream.readAll()
-  let exitCode = process.waitForExit()
-  process.close()
-  if exitCode != 0:
-    fail("nm failed with exit code " & $exitCode & ":\n" & nmOutput)
-  var missing: seq[string]
-  for symbol in symbols:
-    if not nmOutput.outputListsSymbol(symbol.cSymbol):
-      missing.add symbol.cSymbol
-  if missing.len > 0:
-    missing.sort()
-    fail("archive has no external definitions for:\n  " & missing.join("\n  "))
   createDir(output.parentDir)
   if fileExists(output):
     removeFile(output)
