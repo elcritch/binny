@@ -53,6 +53,8 @@ proc verifyDeadCodeElimination() =
         @["/usr/bin/nm", privateArchive]
       of "linux", "freebsd":
         @["nm", privateArchive]
+      of "windows":
+        @["nm", privateArchive]
       else:
         raise newException(
           ValueError,
@@ -137,6 +139,18 @@ task build, "Build the promoted library and generated consumer":
   buildProducer()
   generateBindings()
   buildConsumer()
+
+task buildProducer, "Build the promoted native library":
+  buildProducer()
+
+task generateBindings, "Generate bindings for the promoted native library":
+  generateBindings()
+
+task buildConsumer, "Build the generated native-library consumer":
+  buildConsumer()
+
+task checkMoveOnly, "Verify generated move-only bindings reject copies":
+  checkMoveOnlyBinding()
 
 task nativeDynlibTest, "Build and run the BIF-derived native dynlib example":
   buildTask()

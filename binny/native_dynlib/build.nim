@@ -34,12 +34,10 @@ proc fail(message: string) {.noreturn.} =
 
 func nativeLibrarySuffix(): string =
   case hostOS
-  of "macosx":
-    ".dylib"
-  of "linux", "freebsd":
-    ".so"
-  else:
-    ""
+  of "macosx": ".dylib"
+  of "linux", "freebsd": ".so"
+  of "windows": ".dll"
+  else: ""
 
 proc absoluteProjectPath(path: string): string =
   if path.isAbsolute():
@@ -62,7 +60,10 @@ proc initNativeDynlibBuildConfig*(
   ## ``buildRoot`` receives a backend-specific subdirectory. A bare
   ## ``libraryName`` receives the platform dynamic-library suffix.
   result.sourcePath =
-    if sourcePath.len > 0: absoluteProjectPath(sourcePath) else: ""
+    if sourcePath.len > 0:
+      absoluteProjectPath(sourcePath)
+    else:
+      ""
   result.sourceRoot =
     if sourceRoot.len > 0:
       absoluteProjectPath(sourceRoot)
@@ -79,9 +80,15 @@ proc initNativeDynlibBuildConfig*(
     else:
       libraryName
   result.bindingsPath =
-    if bindingsPath.len > 0: absoluteProjectPath(bindingsPath) else: ""
+    if bindingsPath.len > 0:
+      absoluteProjectPath(bindingsPath)
+    else:
+      ""
   result.exportConfigPath =
-    if exportConfigPath.len > 0: absoluteProjectPath(exportConfigPath) else: ""
+    if exportConfigPath.len > 0:
+      absoluteProjectPath(exportConfigPath)
+    else:
+      ""
   result.backend =
     if backend.len > 0:
       backend.strip().toLowerAscii()
@@ -181,36 +188,29 @@ proc compileProducer(
 proc buildTool(config: NativeDynlibBuildConfig) =
   if not fileExists(toolSource()):
     fail("Binny native dynlib tool is missing: " & toolSource())
-  config.runNim(
-    [
+  var arguments =
+    @[
       "c",
       "-d:release",
       "--hints:off",
       "--path:" & binnyProjectDir,
       "--nimcache:" & config.toolCache,
       "--out:" & config.toolBinary,
-      toolSource(),
     ]
-  )
+  arguments.add toolSource()
+  config.runNim(arguments)
 
-proc toolArguments(
-    config: NativeDynlibBuildConfig, command: string
-): seq[string] =
+proc toolArguments(config: NativeDynlibBuildConfig, command: string): seq[string] =
   result = @[config.toolBinary, command]
 
-proc addExportConfig(
-    arguments: var seq[string], config: NativeDynlibBuildConfig
-) =
+proc addExportConfig(arguments: var seq[string], config: NativeDynlibBuildConfig) =
   if config.exportConfigPath.len > 0:
     arguments.add "--config:" & config.exportConfigPath
 
 proc prepareRoutines(config: NativeDynlibBuildConfig) =
   var arguments = config.toolArguments("prepare")
   arguments.add [
-    config.producerCache,
-    config.sourceRoot,
-    config.sourcePath,
-    config.cRootSource,
+    config.producerCache, config.sourceRoot, config.sourcePath, config.cRootSource
   ]
   arguments.addExportConfig(config)
   runCommand(arguments)
@@ -218,11 +218,8 @@ proc prepareRoutines(config: NativeDynlibBuildConfig) =
 proc writeExportList(config: NativeDynlibBuildConfig) =
   var arguments = config.toolArguments("exports")
   arguments.add [
-    config.producerCache,
-    config.sourceRoot,
-    config.sourcePath,
-    config.nativeLibraryPath,
-    config.nativeExportListPath,
+    config.producerCache, config.sourceRoot, config.sourcePath,
+    config.nativeLibraryPath, config.nativeExportListPath,
   ]
   arguments.addExportConfig(config)
   runCommand(arguments)
@@ -259,7 +256,7 @@ proc archiveObjects(config: NativeDynlibBuildConfig) =
     case hostOS
     of "macosx":
       @["/usr/bin/libtool", "-static", "-o", archive]
-    of "linux", "freebsd":
+    of "linux", "freebsd", "windows":
       @["ar", "-rcs", archive]
     else:
       @[]
@@ -270,15 +267,13 @@ proc promoteAndLink(config: NativeDynlibBuildConfig) =
   runCommand(
     config.toolArguments("promote") &
       @[
-        config.nativePrivateArchivePath,
-        config.nativePublicArchivePath,
+        config.nativePrivateArchivePath, config.nativePublicArchivePath,
         config.nativeExportListPath,
       ]
   )
   var arguments = config.toolArguments("link")
   arguments.add [
-    config.nativePublicArchivePath,
-    config.nativeLibraryPath,
+    config.nativePublicArchivePath, config.nativeLibraryPath,
     config.nativeExportListPath,
   ]
   arguments.add config.linkerArgs
@@ -301,6 +296,9 @@ proc expectedExports(config: NativeDynlibBuildConfig): seq[string] =
         let name = value[0 ..< value.high].strip()
         if name.len > 0:
           result.add name
+    of "windows":
+      if value.len > 0 and value notin ["EXPORTS"] and not value.startsWith("LIBRARY "):
+        result.add value.split('=', 1)[0].strip()
     else:
       discard
 
@@ -311,16 +309,31 @@ proc verifyExports(config: NativeDynlibBuildConfig) =
       @["/usr/bin/nm", "-gU", config.nativeLibraryPath]
     of "linux", "freebsd":
       @["nm", "-D", "--defined-only", config.nativeLibraryPath]
+    of "windows":
+      @["objdump", "-p", config.nativeLibraryPath]
     else:
       @[]
   let (output, exitCode) = gorgeEx(quoteShellCommand(command))
   if exitCode != 0:
     fail("nm failed for the generated native library:\n" & output)
   var actual: seq[string]
-  for line in output.splitLines():
-    let fields = line.splitWhitespace()
-    if fields.len > 0:
-      actual.add fields[^1]
+  when defined(windows):
+    var inExportNames = false
+    for line in output.splitLines():
+      let value = line.strip()
+      if value.startsWith("[Ordinal/Name Pointer] Table"):
+        inExportNames = true
+      elif inExportNames:
+        if value.len == 0:
+          break
+        let fields = value.splitWhitespace()
+        if value.startsWith("[") and fields.len > 0:
+          actual.add fields[^1]
+  else:
+    for line in output.splitLines():
+      let fields = line.splitWhitespace()
+      if fields.len > 0:
+        actual.add fields[^1]
   actual.sort()
   var expected = config.expectedExports()
   expected.sort()
@@ -345,9 +358,7 @@ proc buildNativeDynlib*(config: NativeDynlibBuildConfig) =
   config.verifyExports()
 
 proc generateNativeDynlibBindings*(
-    config: NativeDynlibBuildConfig,
-    outputPath = "",
-    libraryPath = "",
+    config: NativeDynlibBuildConfig, outputPath = "", libraryPath = ""
 ) =
   ## Generates bindings for a completed native dynlib.
   config.validate()
@@ -359,11 +370,7 @@ proc generateNativeDynlibBindings*(
   config.buildTool()
   var arguments = config.toolArguments("bindings")
   arguments.add [
-    config.producerCache,
-    config.sourceRoot,
-    config.sourcePath,
-    library,
-    output,
+    config.producerCache, config.sourceRoot, config.sourcePath, library, output
   ]
   arguments.addExportConfig(config)
   if config.libraryNameStrdefine:

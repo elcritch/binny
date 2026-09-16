@@ -72,11 +72,64 @@ func isBuiltinType(typ: NativeType): bool =
   (typ.kind != ntAlias and builtinTypeId(typ.typeId).len > 0) or
     (typ.kind == ntRange and typ.name in ["Natural", "Positive"])
 
+func simpleBuiltinType(symbol: string): string =
+  case symbol
+  of "bool", "char", "string", "cstring", "pointer", "int", "int8", "int16", "int32",
+      "int64", "uint", "uint8", "uint16", "uint32", "uint64", "float", "float32",
+      "float64", "cchar", "cschar", "cshort", "cint", "clong", "clonglong", "cuchar",
+      "cushort", "cuint", "culong", "culonglong", "cfloat", "cdouble", "csize_t":
+    result = symbol
+
+func isAnonymousGenericType(typ: NativeType): bool =
+  typ.nifSymbol.len > 0 and typ.nifSymbol == typ.typeId and
+    typ.kind in {ntArray, ntSequence, ntSet}
+
+func knownTypeExpression(symbol: string, names: Table[string, string]): string =
+  if symbol.len == 0:
+    return
+  if symbol in names:
+    return names[symbol]
+  result = builtinTypeId(symbol)
+  if result.len == 0:
+    result = simpleBuiltinType(symbol)
+
+proc typeSize(api: NativeApi, symbol: string): int64 =
+  for candidate in api.types:
+    if (candidate.nifSymbol == symbol or candidate.typeId == symbol) and
+        candidate.size > 0:
+      return candidate.size
+  case builtinTypeId(symbol)
+  of "bool", "char", "int8", "uint8":
+    result = 1
+  of "int16", "uint16":
+    result = 2
+  of "int32", "uint32", "float32":
+    result = 4
+  of "int", "uint", "int64", "uint64", "float", "float64", "pointer":
+    result = 8
+
+proc arrayLength(api: NativeApi, typ: NativeType): int64 =
+  if typ.arrayLength >= 0:
+    return typ.arrayLength
+  if typ.indexTypeSymbol.len > 0:
+    for candidate in api.types:
+      if (
+        candidate.nifSymbol == typ.indexTypeSymbol or
+        candidate.typeId == typ.indexTypeSymbol
+      ) and candidate.kind == ntEnum:
+        return candidate.enumValues.len.int64
+  let elementSize = api.typeSize(typ.elementTypeSymbol)
+  if elementSize <= 0 or typ.size < 0 or typ.size mod elementSize != 0:
+    return -1
+  typ.size div elementSize
+
 proc nimType(symbol: string, names: Table[string, string]): string
 
 proc typeNames(api: NativeApi): Table[string, string] =
   for typ in api.types:
-    if typ.kind == ntRange and typ.name in ["Natural", "Positive"]:
+    if typ.isAnonymousGenericType:
+      continue
+    elif typ.kind == ntRange and typ.name in ["Natural", "Positive"]:
       result[typ.nifSymbol] = typ.name
       result[typ.typeId] = typ.name
     elif not typ.isBuiltinType:
@@ -85,6 +138,38 @@ proc typeNames(api: NativeApi): Table[string, string] =
       result[typ.typeId] = name
       for symbol in typ.equivalentTypeSymbols:
         result[symbol] = name
+
+  var changed = true
+  while changed:
+    changed = false
+    for typ in api.types:
+      if not typ.isAnonymousGenericType or typ.typeId in result:
+        continue
+      let element = knownTypeExpression(typ.elementTypeSymbol, result)
+      if element.len == 0:
+        continue
+      var rendered: string
+      case typ.kind
+      of ntSequence:
+        rendered = "seq[" & element & "]"
+      of ntSet:
+        rendered = "set[" & element & "]"
+      of ntArray:
+        if typ.indexTypeSymbol.len > 0:
+          let index = knownTypeExpression(typ.indexTypeSymbol, result)
+          if index.len > 0:
+            rendered = "array[" & index & ", " & element & "]"
+        if rendered.len == 0:
+          let length = api.arrayLength(typ)
+          if length >= 0:
+            rendered = "array[" & $length & ", " & element & "]"
+      else:
+        discard
+      if rendered.len > 0:
+        result[typ.nifSymbol] = rendered
+        result[typ.typeId] = rendered
+        changed = true
+
   for typ in api.types:
     if typ.kind == ntImportedGeneric:
       var arguments: seq[string]
@@ -106,6 +191,9 @@ proc nimType(symbol: string, names: Table[string, string]): string =
   let builtin = builtinTypeId(symbol)
   if builtin.len > 0:
     return builtin
+  let simpleBuiltin = simpleBuiltinType(symbol)
+  if simpleBuiltin.len > 0:
+    return simpleBuiltin
   let dot = symbol.find('.')
   let name =
     if dot < 0:
@@ -306,7 +394,8 @@ proc generateTuple(
 
 proc generateTypes(api: NativeApi, names: Table[string, string]): string =
   let types = api.types.filterIt(
-    not it.isBuiltinType and it.kind notin {ntImportedGeneric, ntOpenArray}
+    not it.isBuiltinType and it.kind notin {ntImportedGeneric, ntOpenArray} and
+      not it.isAnonymousGenericType
   )
   if types.len == 0:
     return
@@ -336,33 +425,18 @@ proc generateTypes(api: NativeApi, names: Table[string, string]): string =
       continue
     of ntArray:
       if typ.indexTypeSymbol.len > 0:
-        result.add "array[" & nimType(typ.indexTypeSymbol, names) & ", " &
-          nimType(typ.elementTypeSymbol, names) & "]\n\n"
-        continue
-      var elementSize = 0'i64
-      for candidate in api.types:
-        if candidate.nifSymbol == typ.elementTypeSymbol or
-            candidate.typeId == typ.elementTypeSymbol:
-          elementSize = candidate.size
-          break
-      if elementSize <= 0:
-        case builtinTypeId(typ.elementTypeSymbol)
-        of "bool", "char", "int8", "uint8":
-          elementSize = 1
-        of "int16", "uint16":
-          elementSize = 2
-        of "int32", "uint32", "float32":
-          elementSize = 4
-        of "int", "uint", "int64", "uint64", "float", "float64", "pointer":
-          elementSize = 8
-        else:
-          discard
-      if elementSize <= 0 or typ.size < 0:
+        let index = knownTypeExpression(typ.indexTypeSymbol, names)
+        if index.len > 0:
+          result.add "array[" & index & ", " & nimType(typ.elementTypeSymbol, names) &
+            "]\n\n"
+          continue
+      let length = api.arrayLength(typ)
+      if length < 0:
         raise newException(
           NativeArtifactError, "unsupported native ABI array layout: " & typ.nifSymbol
         )
-      result.add "array[" & $(typ.size div elementSize) & ", " &
-        nimType(typ.elementTypeSymbol, names) & "]\n\n"
+      result.add "array[" & $length & ", " & nimType(typ.elementTypeSymbol, names) &
+        "]\n\n"
       continue
     of ntSequence:
       result.add "seq[" & nimType(typ.elementTypeSymbol, names) & "]\n\n"
@@ -423,7 +497,9 @@ proc generateLayoutChecks(api: NativeApi, names: Table[string, string]): string 
   result.add "static:\n"
   for typ in types:
     let typeName =
-      if typ.kind == ntImportedGeneric:
+      if typ.isAnonymousGenericType:
+        nimType(typ.typeId, names)
+      elif typ.kind == ntImportedGeneric:
         nimType(typ.typeId, names)
       else:
         nimIdentifier(typ.name)

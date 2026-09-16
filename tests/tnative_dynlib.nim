@@ -130,6 +130,24 @@ block generated_module_allows_strdefine_loader_name:
   let generated = generateNativeModule(api, libraryNameStrdefine = true)
   doAssert "const nativeLibrary* {.strdefine.} = \"libsample.so\"" in generated
 
+block windows_module_definition_exports_initializer_alias_and_public_symbols:
+  let (exportFile, exportPath) = createTempFile("binny-native-exports-", ".def")
+  exportFile.close()
+  defer:
+    removeFile(exportPath)
+  writeWindowsModuleDefinition(
+    exportPath,
+    "sample.dll",
+    "sample_NimMain_root",
+    [
+      NativeExportSymbol(cSymbol: "zeta"),
+      NativeExportSymbol(cSymbol: "alpha"),
+      NativeExportSymbol(cSymbol: "alpha"),
+    ],
+  )
+  doAssert readFile(exportPath) ==
+    "LIBRARY sample.dll\nEXPORTS\n" & "  sample_NimMain_root=NimMain\n  alpha\n  zeta\n"
+
 block generated_module_requires_loader_name:
   let api = NativeApi(
     initSymbol: "NimMain", procs: @[NativeProc(name: "ping", cSymbol: "ping")]

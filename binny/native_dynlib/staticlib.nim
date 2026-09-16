@@ -166,7 +166,9 @@ proc normalizedAbsolutePath(path: string): string =
 
 proc pathIsWithin(path, root: string): bool =
   let relative = relativePath(path, root)
-  result = relative != ".." and not relative.startsWith(".." & $DirSep)
+  result =
+    not relative.isAbsolute and relative != ".." and
+    not relative.startsWith(".." & $DirSep)
 
 proc readModuleSource(module: var BifModule): string =
   var cursor = module.buf.beginRead()
@@ -842,6 +844,24 @@ proc writeElfVersionScript*(
   lines.add "};"
   writeFile(path, lines.join("\n") & "\n")
 
+proc writeWindowsModuleDefinition*(
+    path, libraryName, initSymbol: string, symbols: openArray[NativeExportSymbol]
+) =
+  ## Writes a PE/COFF module-definition file with a unique runtime initializer.
+  var names: seq[string]
+  for symbol in symbols:
+    if symbol.cSymbol != initSymbol:
+      names.add symbol.cSymbol
+  names.sort()
+  var lines = @["LIBRARY " & libraryName.extractFilename, "EXPORTS"]
+  lines.add "  " & initSymbol & "=NimMain"
+  var previous = ""
+  for name in names:
+    if name != previous:
+      lines.add "  " & name
+      previous = name
+  writeFile(path, lines.join("\n") & "\n")
+
 proc writeNativeExportList*(
     path, initSymbol: string, symbols: openArray[NativeExportSymbol]
 ) =
@@ -850,6 +870,10 @@ proc writeNativeExportList*(
     writeDarwinExportList(path, initSymbol, symbols)
   elif defined(linux) or defined(freebsd):
     writeElfVersionScript(path, initSymbol, symbols)
+  elif defined(windows):
+    writeWindowsModuleDefinition(
+      path, path.splitFile.name & ".dll", initSymbol, symbols
+    )
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)
 
@@ -1038,18 +1062,65 @@ proc recordedCCompileCommand(path: string): seq[string] =
     commandEnd = content.find(" */", commandStart)
   if commandEnd < 0:
     fail("generated C source has an incomplete compiler command: " & path)
-  result = parseCmdLine(content[commandStart ..< commandEnd].strip())
+  let commandText = content[commandStart ..< commandEnd].strip()
+  if commandText.startsWith("assembled by the link stage"):
+    # The incremental backend intentionally leaves the command assembly to
+    # Nim's link stage. The actual per-module passC directives are in the
+    # adjacent ``.cflags`` sidecar, so this comment is a sentinel rather than
+    # an executable command.
+    return
+  result = parseCmdLine(commandText)
   if result.len < 2:
     fail("generated C source has an invalid compiler command: " & path)
+
+proc recordedCCompileFlags(path: string): seq[string] =
+  let flagsPath = path & ".cflags"
+  if not fileExists(flagsPath):
+    return
+  for line in lines(flagsPath):
+    let separator = line.find('\t')
+    if separator < 0:
+      continue
+    let directive = line[0 ..< separator]
+    if directive in ["passc", "localpassc"] and separator + 1 < line.len:
+      result.add parseCmdLine(line[separator + 1 ..^ 1])
+
+proc incrementalCCompileCommand(nimcacheDir, source: string): seq[string] =
+  ## Reconstruct the small part of Nim's C command that the IC link stage
+  ## normally assembles. ``ic_build_args.txt`` is emitted with every IC
+  ## build and gives us the compiler's search paths; the sidecar supplies
+  ## module-specific ``passC`` directives that are not present in the C
+  ## placeholder comment.
+  let buildArgsPath = nimcacheDir / "ic_build_args.txt"
+  if not fileExists(buildArgsPath):
+    fail("incremental C source has no build arguments: " & buildArgsPath)
+
+  var includePaths: seq[string]
+  for line in lines(buildArgsPath):
+    let argument = line.strip()
+    if argument.startsWith("--path:"):
+      let includePath = argument["--path:".len ..^ 1]
+      if includePath.len > 0 and dirExists(includePath) and
+          includePath notin includePaths:
+        includePaths.add includePath
+  if includePaths.len == 0:
+    fail("incremental C source has no compiler search paths: " & buildArgsPath)
+
+  result = @["cc", "-c", "-w", "-fno-strict-aliasing", "-fPIC", "-pthread"]
+  result.add recordedCCompileFlags(source)
+  for includePath in includePaths:
+    result.add "-I" & normalizedAbsolutePath(includePath)
+  result.add [
+    "-o", normalizedAbsolutePath(source & ".o"), normalizedAbsolutePath(source)
+  ]
 
 proc compileElfPicObjects*(nimcacheDir: string) =
   ## Recompiles generated C using Nim's recorded per-file flags plus ``-fPIC``.
   ##
-  ## The incremental backend currently does not apply command-line ``passC``
-  ## options to its C compilation graph. Nim records the exact compiler command
-  ## in every generated C file, including module-specific pragma flags, so
-  ## replaying it preserves those flags while making the objects linkable into
-  ## an ELF shared library.
+  ## Normal C-backend files carry an exact compiler command in their header.
+  ## Incremental-backend files instead say that the command is assembled by
+  ## Nim's link stage; for those, reconstruct the command from the IC build
+  ## arguments and the module's ``.cflags`` sidecar.
   var sources: seq[string]
   for path in walkFiles(nimcacheDir / "*.c"):
     sources.add path
@@ -1060,10 +1131,14 @@ proc compileElfPicObjects*(nimcacheDir: string) =
   for source in sources:
     if getFileSize(source) == 0:
       continue
-    let command = recordedCCompileCommand(source)
-    var arguments = command[1 ..^ 1]
-    arguments.add "-fPIC"
-    runProcess(command[0], arguments)
+    let recordedCommand = recordedCCompileCommand(source)
+    if recordedCommand.len == 0:
+      let command = incrementalCCompileCommand(nimcacheDir, source)
+      runProcess(command[0], command[1 ..^ 1])
+    else:
+      var arguments = recordedCommand[1 ..^ 1]
+      arguments.add "-fPIC"
+      runProcess(recordedCommand[0], arguments)
 
 proc promoteMachOArchive*(
     inputPath, outputPath: string, symbols: openArray[NativeExportSymbol]
@@ -1145,6 +1220,20 @@ proc promoteElfArchive*(
   arguments.add members
   runProcess("ar", arguments)
 
+proc promoteCoffArchive*(
+    inputPath, outputPath: string, symbols: openArray[NativeExportSymbol]
+) =
+  ## COFF external definitions need no visibility rewrite; preserve the archive.
+  ## The final PE export check validates the selected symbols after linking.
+  discard symbols
+  let
+    input = normalizedAbsolutePath(inputPath)
+    output = normalizedAbsolutePath(outputPath)
+  createDir(output.parentDir)
+  if fileExists(output):
+    removeFile(output)
+  copyFile(input, output)
+
 proc promoteNativeArchive*(
     inputPath, outputPath: string, symbols: openArray[NativeExportSymbol]
 ) =
@@ -1153,6 +1242,8 @@ proc promoteNativeArchive*(
     promoteMachOArchive(inputPath, outputPath, symbols)
   elif defined(linux) or defined(freebsd):
     promoteElfArchive(inputPath, outputPath, symbols)
+  elif defined(windows):
+    promoteCoffArchive(inputPath, outputPath, symbols)
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)
 
@@ -1167,11 +1258,20 @@ proc linkMachODylib*(
       installName
     else:
       "@rpath/" & outputPath.extractFilename
+  let runtimeDir = createTempDir("binny-native-runtime-", "")
+  defer:
+    removeDir(runtimeDir)
+  let
+    runtimeSource = runtimeDir / "runtime.c"
+    runtimeObject = runtimeDir / "runtime.o"
+  writeFile(runtimeSource, "int cmdCount;\nchar **cmdLine;\n")
+  runProcess("clang", ["-c", "-fPIC", runtimeSource, "-o", runtimeObject])
   createDir(outputPath.parentDir)
   var arguments =
     @[
       "-dynamiclib",
       "-Wl,-force_load," & normalizedAbsolutePath(archivePath),
+      runtimeObject,
       "-Wl,-alias,_NimMain,_" & initSymbol,
       "-Wl,-exported_symbols_list," & normalizedAbsolutePath(exportListPath),
       "-Wl,-install_name," & dylibName,
@@ -1231,6 +1331,39 @@ INSERT AFTER .bss;
   arguments.add ["-o", normalizedAbsolutePath(outputPath)]
   runProcess("cc", arguments)
 
+proc linkWindowsDll*(
+    archivePath, outputPath, exportListPath, initSymbol: string,
+    linkerArgs: openArray[string] = [],
+) =
+  ## Links every archive member into a module-definition-filtered PE DLL.
+  discard initSymbol
+  let temporary = createTempDir("binny-native-runtime-", "")
+  defer:
+    removeDir(temporary)
+  let
+    runtimeSource = temporary / "runtime.c"
+    runtimeObject = temporary / "runtime.o"
+    exportDefinition = temporary / "native_exports.def"
+  writeFile(runtimeSource, "int cmdCount;\nchar **cmdLine;\n")
+  runProcess("gcc", ["-c", runtimeSource, "-o", runtimeObject])
+  # GNU ld recognizes PE module-definition files by their ``.def`` suffix.
+  # The public export-list path intentionally uses ``.exports`` on every
+  # platform, so give the Windows linker a temporary DEF-named copy.
+  copyFile(normalizedAbsolutePath(exportListPath), exportDefinition)
+  createDir(outputPath.parentDir)
+  var arguments =
+    @[
+      "-shared",
+      "-Wl,--whole-archive",
+      normalizedAbsolutePath(archivePath),
+      "-Wl,--no-whole-archive",
+      runtimeObject,
+      exportDefinition,
+    ]
+  arguments.add linkerArgs
+  arguments.add ["-o", normalizedAbsolutePath(outputPath)]
+  runProcess("gcc", arguments)
+
 proc linkNativeDynlib*(
     archivePath, outputPath, exportListPath, initSymbol: string,
     libraryName = "",
@@ -1245,5 +1378,7 @@ proc linkNativeDynlib*(
     linkElfSharedLibrary(
       archivePath, outputPath, exportListPath, initSymbol, libraryName, linkerArgs
     )
+  elif defined(windows):
+    linkWindowsDll(archivePath, outputPath, exportListPath, initSymbol, linkerArgs)
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)
