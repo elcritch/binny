@@ -140,6 +140,15 @@ task build, "Build the promoted library and generated consumer":
   generateBindings()
   buildConsumer()
 
+task buildProducer, "Build the promoted native library":
+  buildProducer()
+
+task generateBindings, "Generate bindings for the promoted native library":
+  generateBindings()
+
+task buildConsumer, "Build the generated native-library consumer":
+  buildConsumer()
+
 task checkMoveOnly, "Verify generated move-only bindings reject copies":
   checkMoveOnlyBinding()
 

@@ -51,9 +51,17 @@ jobs:
       - name: Test native static library
         run: nim c -r tests/tnative_staticlib.nim
 
-      - name: Build native dynlib example
+      - name: Build native dynlib producer
         working-directory: examples/nim_native_dynlib
-        run: nim build
+        run: nim buildProducer
+
+      - name: Generate native dynlib bindings
+        working-directory: examples/nim_native_dynlib
+        run: nim generateBindings
+
+      - name: Build native dynlib consumer
+        working-directory: examples/nim_native_dynlib
+        run: nim buildConsumer
 
       - name: Run native dynlib example
         working-directory: examples/nim_native_dynlib
@@ -63,11 +71,23 @@ jobs:
         working-directory: examples/nim_native_dynlib
         run: nim checkMoveOnly
 
-      - name: Build incremental native dynlib example
+      - name: Build incremental native dynlib producer
         working-directory: examples/nim_native_dynlib
         env:
           BINNY_NATIVE_BACKEND: ic
-        run: nim build
+        run: nim buildProducer
+
+      - name: Generate incremental native dynlib bindings
+        working-directory: examples/nim_native_dynlib
+        env:
+          BINNY_NATIVE_BACKEND: ic
+        run: nim generateBindings
+
+      - name: Build incremental native dynlib consumer
+        working-directory: examples/nim_native_dynlib
+        env:
+          BINNY_NATIVE_BACKEND: ic
+        run: nim buildConsumer
 
       - name: Run incremental native dynlib example
         working-directory: examples/nim_native_dynlib
@@ -152,9 +172,17 @@ jobs:
       - name: Test native static library
         run: nim c -r tests/tnative_staticlib.nim
 
-      - name: Build native dynlib example
+      - name: Build native dynlib producer
         working-directory: examples/nim_native_dynlib
-        run: nim build
+        run: nim buildProducer
+
+      - name: Generate native dynlib bindings
+        working-directory: examples/nim_native_dynlib
+        run: nim generateBindings
+
+      - name: Build native dynlib consumer
+        working-directory: examples/nim_native_dynlib
+        run: nim buildConsumer
 
       - name: Run native dynlib example
         working-directory: examples/nim_native_dynlib
@@ -164,11 +192,23 @@ jobs:
         working-directory: examples/nim_native_dynlib
         run: nim checkMoveOnly
 
-      - name: Build incremental native dynlib example
+      - name: Build incremental native dynlib producer
         working-directory: examples/nim_native_dynlib
         env:
           BINNY_NATIVE_BACKEND: ic
-        run: nim build
+        run: nim buildProducer
+
+      - name: Generate incremental native dynlib bindings
+        working-directory: examples/nim_native_dynlib
+        env:
+          BINNY_NATIVE_BACKEND: ic
+        run: nim generateBindings
+
+      - name: Build incremental native dynlib consumer
+        working-directory: examples/nim_native_dynlib
+        env:
+          BINNY_NATIVE_BACKEND: ic
+        run: nim buildConsumer
 
       - name: Run incremental native dynlib example
         working-directory: examples/nim_native_dynlib
