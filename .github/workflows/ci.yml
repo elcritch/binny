@@ -31,10 +31,8 @@ jobs:
         run: |
           grabnim devel
           nim_root="$(grabnim path devel | tr -d '\r\"')"
-          if [[ ! -x "$nim_root/bin/nifler" && ! -x "$nim_root/bin/nifler.exe" ]]; then
-            "$nim_root/bin/nim" c -d:release --out:"$nim_root/bin/nifler" \
-              "$nim_root/dist/nimony/src/nifler/nifler.nim"
-          fi
+          "$nim_root/bin/nim" c -d:release --out:"$nim_root/bin/nifler" \
+            "$nim_root/dist/nimony/src/nifler/nifler.nim"
 
       - name: Show compiler version
         run: nim --version
@@ -89,26 +87,29 @@ jobs:
           echo "$HOME/.local/share/grabnim/current/bin" >> "$GITHUB_PATH"
 
       - name: Install Nim devel nightly
+        if: runner.os != 'Windows'
         env:
           GRABNIM_GITHUB_TOKEN: ${{ github.token }}
         run: |
           grabnim devel
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            grabnim setup
-          fi
           nim_root="$(grabnim path devel | tr -d '\r\"')"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            nim_root="$(cygpath -u "$nim_root")"
-          fi
-          if [[ ! -x "$nim_root/bin/nifler" && ! -x "$nim_root/bin/nifler.exe" ]]; then
-            "$nim_root/bin/nim" c -d:release --out:"$nim_root/bin/nifler" \
-              "$nim_root/dist/nimony/src/nifler/nifler.nim"
-          fi
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            cygpath -w "$nim_root/bin" >> "$GITHUB_PATH"
-          else
-            echo "$nim_root/bin" >> "$GITHUB_PATH"
-          fi
+          "$nim_root/bin/nim" c -d:release --out:"$nim_root/bin/nifler" \
+            "$nim_root/dist/nimony/src/nifler/nifler.nim"
+          echo "$nim_root/bin" >> "$GITHUB_PATH"
+
+      - name: Install Nim devel nightly (Windows)
+        if: runner.os == 'Windows'
+        env:
+          GRABNIM_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          winpty -Xallow-non-tty grabnim devel
+          nim_root="$(grabnim path devel | tr -d '\r\"')"
+          nim_root="$(cygpath -u "$nim_root")"
+          export PATH="/c/msys64/mingw64/bin:$nim_root/bin:$PATH"
+          "$nim_root/bin/nim.exe" c -d:release --out:"$nim_root/bin/nifler.exe" \
+            "$nim_root/dist/nimony/src/nifler/nifler.nim"
+          cygpath -w "$nim_root/bin" >> "$GITHUB_PATH"
+          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
 
       - name: Show compiler version
         run: nim --version
