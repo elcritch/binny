@@ -51,19 +51,31 @@ jobs:
       - name: Test native static library
         run: nim c -r tests/tnative_staticlib.nim
 
+      - name: Build native dynlib example
+        working-directory: examples/nim_native_dynlib
+        run: nim build
+
       - name: Run native dynlib example
         working-directory: examples/nim_native_dynlib
-        run: |
-          nim e2e
-          ./consumer
+        run: ./consumer
 
-      - name: Run incremental native dynlib example
+      - name: Verify move-only native binding
+        working-directory: examples/nim_native_dynlib
+        run: nim checkMoveOnly
+
+      - name: Build incremental native dynlib example
         working-directory: examples/nim_native_dynlib
         env:
           BINNY_NATIVE_BACKEND: ic
-        run: |
-          nim e2e
-          ./consumer
+        run: nim build
+
+      - name: Run incremental native dynlib example
+        working-directory: examples/nim_native_dynlib
+        run: ./consumer
+
+      - name: Verify incremental move-only native binding
+        working-directory: examples/nim_native_dynlib
+        run: nim checkMoveOnly
 
   native-dynlib:
     strategy:
@@ -140,16 +152,28 @@ jobs:
       - name: Test native static library
         run: nim c -r tests/tnative_staticlib.nim
 
+      - name: Build native dynlib example
+        working-directory: examples/nim_native_dynlib
+        run: nim build
+
       - name: Run native dynlib example
         working-directory: examples/nim_native_dynlib
-        run: |
-          nim e2e
-          ./consumer
+        run: ./consumer
 
-      - name: Run incremental native dynlib example
+      - name: Verify move-only native binding
+        working-directory: examples/nim_native_dynlib
+        run: nim checkMoveOnly
+
+      - name: Build incremental native dynlib example
         working-directory: examples/nim_native_dynlib
         env:
           BINNY_NATIVE_BACKEND: ic
-        run: |
-          nim e2e
-          ./consumer
+        run: nim build
+
+      - name: Run incremental native dynlib example
+        working-directory: examples/nim_native_dynlib
+        run: ./consumer
+
+      - name: Verify incremental move-only native binding
+        working-directory: examples/nim_native_dynlib
+        run: nim checkMoveOnly

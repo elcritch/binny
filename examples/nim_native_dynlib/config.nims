@@ -140,6 +140,9 @@ task build, "Build the promoted library and generated consumer":
   generateBindings()
   buildConsumer()
 
+task checkMoveOnly, "Verify generated move-only bindings reject copies":
+  checkMoveOnlyBinding()
+
 task nativeDynlibTest, "Build and run the BIF-derived native dynlib example":
   buildTask()
   runConsumer()
