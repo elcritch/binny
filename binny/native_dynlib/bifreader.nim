@@ -3,8 +3,7 @@ import ./nif/[bif, nifcoreparse, nifqueries]
 import exportconfig
 import model
 import staticlib
-when defined(binnyCompilerTypes):
-  import astdef, idents
+import "$nim" / compiler / [astdef, idents]
 
 type
   NativeBifError* = object of ValueError
@@ -86,47 +85,6 @@ func typeOrdinal(symbol: string): int =
     if character notin {'0' .. '9'}:
       return -1
   result = parseInt(symbol[2 ..< separator])
-
-func bifLayoutKind(symbol: string): string =
-  # The number after ``t`` is Nim's ``TTypeKind`` ordinal in semantic BIF.
-  case symbol.typeOrdinal
-  of 1: "bool"
-  of 2: "char"
-  of 9: "genericinvocation"
-  of 10: "genericbody"
-  of 11: "genericinstance"
-  of 13: "distinct"
-  of 14: "enum"
-  of 16: "array"
-  of 17: "object"
-  of 18: "tuple"
-  of 19: "set"
-  of 20: "range"
-  of 21: "pointer"
-  of 22: "ref"
-  of 23: "var"
-  of 24: "sequence"
-  of 25: "proc"
-  of 26: "pointer"
-  of 27: "openarray"
-  of 28: "string"
-  of 29: "cstring"
-  of 49: "varargs"
-  of 50: "uncheckedarray"
-  of 31: "int"
-  of 32: "int8"
-  of 33: "int16"
-  of 34: "int32"
-  of 35: "int64"
-  of 36: "float"
-  of 37: "float32"
-  of 38: "float64"
-  of 40: "uint"
-  of 41: "uint8"
-  of 42: "uint16"
-  of 43: "uint32"
-  of 44: "uint64"
-  else: ""
 
 func fieldName(symbol: string): string =
   result = symbolBase(symbol)
@@ -282,681 +240,541 @@ proc bifRangeLength(node: Cursor): int64 =
   else:
     result = -1
 
-proc legacyBifLayout(node: Cursor): AbiTypeEntry =
-  var children = node.childCursor()
-  if not children.hasMore or children.kind != SymbolDef:
-    return
-  result.typeSymbol = children.symName
-  result.kind = result.typeSymbol.bifLayoutKind
-  result.size = -1
-  result.alignment = -1
-  result.arrayLength = -1
-  children.skip
+type CompilerTypeContext = object
+  types: Table[string, PType]
+  parsed: Table[string, bool]
+  typeNames: Table[pointer, string]
+  symbols: Table[string, PSym]
+  moduleIds: Table[string, int32]
+  nextModuleId: int32
+  records: Table[string, seq[NativeRecordPart]]
+  enumValues: Table[string, seq[NativeEnumValue]]
+  rangeLengths: Table[string, int64]
 
-  if children.hasMore:
-    children.skip # definition visibility
-  var flags = ""
-  if children.hasMore:
-    if children.kind in {Ident, Symbol}:
-      flags = if children.kind == Ident: children.strVal else: children.symName
-    children.skip
-  result.inheritable = 'i' in flags
-  result.packed = 'p' in flags
-  result.union = 'q' in flags
-  if children.hasMore:
-    children.skip # calling convention
-  if children.hasMore and children.kind == IntLit:
-    result.size = children.intVal
-    children.skip
-  if children.hasMore and children.kind == IntLit:
-    result.alignment = children.intVal
-    children.skip
+proc initCompilerTypeContext(): CompilerTypeContext =
+  result.types = initTable[string, PType]()
+  result.parsed = initTable[string, bool]()
+  result.typeNames = initTable[pointer, string]()
+  result.symbols = initTable[string, PSym]()
+  result.moduleIds = initTable[string, int32]()
+  result.records = initTable[string, seq[NativeRecordPart]]()
+  result.enumValues = initTable[string, seq[NativeEnumValue]]()
+  result.rangeLengths = initTable[string, int64]()
+  result.nextModuleId = 1
 
-  var tailTypes: seq[string]
-  var genericArguments: seq[string]
-  var nestedLayouts: seq[AbiTypeEntry]
-  var sawMetadataString = false
-  while children.hasMore:
-    case children.kind
-    of StrLit:
-      sawMetadataString = true
-    of Symbol:
-      if sawMetadataString and children.symName.startsWith("`t"):
-        tailTypes.add children.symName
-    of TagLit:
-      case children.tagName
-      of "reclist":
-        result.record = bifRecord(children)
-      of "enumty":
-        result.enumValues = bifEnum(children)
-      of "range":
-        result.arrayLength = bifRangeLength(children)
-      of "genericargs":
-        var arguments = children.childCursor()
-        while arguments.hasMore:
-          case arguments.kind
-          of Symbol:
-            genericArguments.add arguments.symName
-          of TagLit:
-            if arguments.tagName == "td":
-              let nested = legacyBifLayout(arguments)
-              if nested.typeSymbol.len > 0:
-                genericArguments.add nested.typeSymbol
-                nestedLayouts.add nested
-          else:
-            discard
-          arguments.skip
-      of "td":
-        let nested = legacyBifLayout(children)
-        if nested.typeSymbol.len > 0:
-          nestedLayouts.add nested
+proc compilerModuleId(context: var CompilerTypeContext, suffix: string): int32 =
+  if suffix == "@sys":
+    return -1
+  if suffix in context.moduleIds:
+    return context.moduleIds[suffix]
+  result = context.nextModuleId
+  inc context.nextModuleId
+  context.moduleIds[suffix] = result
+
+proc compilerTypeItemId(context: var CompilerTypeContext, symbol: string): ItemId =
+  let firstDot = symbol.find('.', 2)
+  if firstDot < 0:
+    return itemId(-1, 0)
+  let secondDot = symbol.find('.', firstDot + 1)
+  if secondDot < 0:
+    return itemId(-1, 0)
+  let item = parseInt(symbol[firstDot + 1 ..< secondDot])
+  let suffix = symbol[secondDot + 1 .. ^1]
+  itemId(context.compilerModuleId(suffix), int32(item))
+
+proc compilerTypeKind(symbol: string): TTypeKind =
+  let ordinal = symbol.typeOrdinal
+  if ordinal < 0 or ordinal > ord(high(TTypeKind)):
+    fail("invalid Nim compiler type kind in BIF symbol: " & symbol)
+  TTypeKind(ordinal)
+
+proc compilerType(context: var CompilerTypeContext, symbol: string): PType =
+  if symbol.len == 0 or not symbol.startsWith("`t"):
+    return nil
+  if symbol in context.types:
+    return context.types[symbol]
+  let kind = compilerTypeKind(symbol)
+  let id = context.compilerTypeItemId(symbol)
+  result = PType(
+    itemId: id,
+    kind: kind,
+    state: Partial,
+    bindingId: id,
+    callConvImpl: ccNimCall,
+    flagsImpl: {},
+    sonsImpl: @[],
+    sizeImpl: -1,
+    alignImpl: -1,
+    paddingAtEndImpl: 0,
+  )
+  context.types[symbol] = result
+  context.typeNames[cast[pointer](result)] = symbol
+
+proc compilerTypeSymbol(context: CompilerTypeContext, typ: PType): string =
+  if typ != nil:
+    result = context.typeNames.getOrDefault(cast[pointer](typ))
+
+proc compilerFlags(value: string): TTypeFlags =
+  ## This is the compact flag alphabet emitted by Nim's BIF writer. Keeping
+  ## the compiler enum as the destination means the layout decisions below
+  ## use the compiler's actual type flags instead of inspecting characters
+  ## opportunistically in an otherwise untyped string.
+  var index = 0
+  while index < value.len:
+    case value[index]
+    of 'a':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfAcyclic
+        inc index
       else:
-        discard
+        result.incl tfHasAsgn
+    of 'b':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfByRef
+        inc index
+      else:
+        result.incl tfByCopy
+    of 'c':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfConceptMatchedTypeSym
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '1':
+        result.incl tfCovariant
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '2':
+        result.incl tfContravariant
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '3':
+        result.incl tfCheckedForDestructor
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '4':
+        result.incl tfCompleteStruct
+        inc index
+      else:
+        result.incl tfCapturesEnv
+    of 'd':
+      result.incl tfBorrowDot
+    of 'e':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfExplicit
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '1':
+        result.incl tfExplicitCallConv
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '2':
+        result.incl tfEffectSystemWorkaround
+        inc index
+      else:
+        result.incl tfEnumHasHoles
+    of 'f':
+      result.incl tfFinal
+    of 'g':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfGenericTypeParam
+        inc index
+      else:
+        result.incl tfFromGeneric
+    of 'h':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfHasGCedMem
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '1':
+        result.incl tfHasStatic
+        inc index
+      else:
+        result.incl tfHasOwned
+    of 'i':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfIterator
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '1':
+        result.incl tfImplicitTypeParam
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '2':
+        result.incl tfInferrableStatic
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '3':
+        result.incl tfIncompleteStruct
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '4':
+        result.incl tfIsConstructor
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '5':
+        result.incl tfIsOutParam
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '6':
+        result.incl tfImplicitStatic
+        inc index
+      else:
+        result.incl tfInheritable
+    of 'm':
+      result.incl tfHasMeta
+    of 'n':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfNotNil
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '1':
+        result.incl tfNeedsFullInit
+        inc index
+      else:
+        result.incl tfNoSideEffect
+    of 'o':
+      result.incl tfRefsAnonObj
+    of 'p':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfPacked
+        inc index
+      else:
+        result.incl tfPartial
+    of 'r':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfRetType
+        inc index
+      elif index + 1 < value.len and value[index + 1] == '1':
+        result.incl tfRequiresInit
+        inc index
+      else:
+        result.incl tfResolved
+    of 's':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfSendable
+        inc index
+      else:
+        result.incl tfShallow
+    of 't':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfTriggersCompileTime
+        inc index
+      else:
+        result.incl tfThread
+    of 'u':
+      result.incl tfUnresolved
+    of 'v':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfVarIsPtr
+        inc index
+      else:
+        result.incl tfVarargs
+    of 'w':
+      if index + 1 < value.len and value[index + 1] == '0':
+        result.incl tfWeakCovariant
+        inc index
+      else:
+        result.incl tfWildcard
     else:
       discard
+    inc index
+
+proc loadCompilerFlags(node: var Cursor): TTypeFlags =
+  if node.kind == DotToken:
+    skip node
+  else:
+    if node.kind != Ident:
+      fail("Nim compiler type flags expected in BIF")
+    result = compilerFlags(node.strVal)
+    skip node
+
+proc loadCompilerCallConv(node: var Cursor): TCallingConvention =
+  if node.kind == DotToken:
+    skip node
+    return ccNimCall
+  if node.kind != Ident:
+    fail("Nim compiler calling convention expected in BIF")
+  case node.strVal
+  of "nimcall":
+    result = ccNimCall
+  of "stdcall":
+    result = ccStdCall
+  of "cdecl":
+    result = ccCDecl
+  of "safecall":
+    result = ccSafeCall
+  of "syscall":
+    result = ccSysCall
+  of "inline":
+    result = ccInline
+  of "noinline":
+    result = ccNoInline
+  of "fastcall":
+    result = ccFastCall
+  of "thiscall":
+    result = ccThisCall
+  of "closure":
+    result = ccClosure
+  of "noconv":
+    result = ccNoConvention
+  of "member":
+    result = ccMember
+  else:
+    fail("unknown Nim compiler calling convention in BIF: " & node.strVal)
+  skip node
+
+proc loadCompilerInt(node: var Cursor): int64 =
+  if node.kind != IntLit:
+    fail("Nim compiler integer field expected in BIF")
+  result = node.intVal
+  skip node
+
+proc compilerSymStub(context: var CompilerTypeContext, symbol: string): PSym =
+  if symbol.len == 0:
+    return nil
+  if symbol in context.symbols:
+    return context.symbols[symbol]
+  result =
+    PSym(kindImpl: skStub, state: Complete, name: PIdent(s: symbolBase(symbol)))
+  context.symbols[symbol] = result
+
+proc scanCompilerTypeDefs(context: var CompilerTypeContext, node: Cursor)
+
+proc loadCompilerTypeDef(context: var CompilerTypeContext, node: var Cursor): PType
+
+proc loadCompilerTypeRef(context: var CompilerTypeContext, node: var Cursor): PType =
+  case node.kind
+  of DotToken:
+    skip node
+  of Symbol:
+    result = context.compilerType(node.symName)
+    skip node
+  of TagLit:
+    if node.tagName != "td":
+      fail("Nim compiler type definition expected in BIF, got " & node.tagName)
+    result = context.loadCompilerTypeDef(node)
+  else:
+    fail("Nim compiler type reference expected in BIF")
+
+proc scanCompilerTypeDefs(context: var CompilerTypeContext, node: Cursor) =
+  if node.kind != TagLit:
+    return
+  if node.tagName == "td":
+    var typeNode = node
+    discard context.loadCompilerTypeDef(typeNode)
+    return
+  var children = node.childCursor()
+  while children.hasMore:
+    if children.kind == TagLit:
+      context.scanCompilerTypeDefs(children)
     children.skip
 
-  if result.kind == "genericinstance" and nestedLayouts.len > 0:
-    let actual = nestedLayouts[^1]
-    result.kind = actual.kind
-    result.baseTypeSymbol = actual.baseTypeSymbol
-    result.indexTypeSymbol = actual.indexTypeSymbol
-    result.elementTypeSymbol = actual.elementTypeSymbol
-    result.arrayLength = actual.arrayLength
-    result.enumValues = actual.enumValues
-    result.record = actual.record
-    result.inheritable = actual.inheritable
-    result.packed = actual.packed
-    result.union = actual.union
-    if result.size < 0:
-      result.size = actual.size
-    if result.alignment < 0:
-      result.alignment = actual.alignment
-  elif result.kind == "ref" and nestedLayouts.len > 0:
-    result.elementTypeSymbol = nestedLayouts[^1].typeSymbol
-  elif result.kind == "array":
-    let arguments = if genericArguments.len > 0: genericArguments else: tailTypes
-    if arguments.len >= 2:
-      result.indexTypeSymbol = arguments[^2]
-      result.elementTypeSymbol = arguments[^1]
-    elif arguments.len > 0:
-      result.elementTypeSymbol = arguments[^1]
-    elif nestedLayouts.len > 0:
-      result.elementTypeSymbol = nestedLayouts[^1].typeSymbol
-    if result.indexTypeSymbol.len == 0:
-      for nested in nestedLayouts:
-        if nested.kind == "range":
-          result.indexTypeSymbol = nested.typeSymbol
-          break
-    if result.arrayLength < 0 and result.indexTypeSymbol.len > 0:
-      for nested in nestedLayouts:
-        if nested.typeSymbol == result.indexTypeSymbol and nested.kind == "range":
-          result.arrayLength = nested.arrayLength
-          break
-  elif result.kind in [
-    "distinct", "genericbody", "genericinvocation", "openarray", "range", "sequence",
-    "set", "string", "uncheckedarray", "var", "varargs",
-  ]:
-    let arguments = if genericArguments.len > 0: genericArguments else: tailTypes
-    if arguments.len > 0:
-      result.elementTypeSymbol = arguments[^1]
-    elif nestedLayouts.len > 0:
-      result.elementTypeSymbol = nestedLayouts[^1].typeSymbol
-  elif result.kind == "object" and tailTypes.len > 0:
-    result.baseTypeSymbol = tailTypes[^1]
-  elif result.kind == "tuple" and result.record.len == 0:
-    for index, typeSymbol in tailTypes:
-      result.record.add NativeRecordPart(
-        kind: nrField,
-        field: NativeField(
-          name: "Field" & $index,
-          typeSymbol: typeSymbol,
-          offset: -1,
-          size: -1,
-          alignment: -1,
-        ),
-      )
-
-when defined(binnyCompilerTypes):
-  type CompilerTypeContext = object
-    types: Table[string, PType]
-    parsed: Table[string, bool]
-    typeNames: Table[pointer, string]
-    symbols: Table[string, PSym]
-    moduleIds: Table[string, int32]
-    nextModuleId: int32
-    records: Table[string, seq[NativeRecordPart]]
-    enumValues: Table[string, seq[NativeEnumValue]]
-    rangeLengths: Table[string, int64]
-
-  proc initCompilerTypeContext(): CompilerTypeContext =
-    result.types = initTable[string, PType]()
-    result.parsed = initTable[string, bool]()
-    result.typeNames = initTable[pointer, string]()
-    result.symbols = initTable[string, PSym]()
-    result.moduleIds = initTable[string, int32]()
-    result.records = initTable[string, seq[NativeRecordPart]]()
-    result.enumValues = initTable[string, seq[NativeEnumValue]]()
-    result.rangeLengths = initTable[string, int64]()
-    result.nextModuleId = 1
-
-  proc compilerModuleId(context: var CompilerTypeContext, suffix: string): int32 =
-    if suffix == "@sys":
-      return -1
-    if suffix in context.moduleIds:
-      return context.moduleIds[suffix]
-    result = context.nextModuleId
-    inc context.nextModuleId
-    context.moduleIds[suffix] = result
-
-  proc compilerTypeItemId(context: var CompilerTypeContext, symbol: string): ItemId =
-    let firstDot = symbol.find('.', 2)
-    if firstDot < 0:
-      return itemId(-1, 0)
-    let secondDot = symbol.find('.', firstDot + 1)
-    if secondDot < 0:
-      return itemId(-1, 0)
-    let item = parseInt(symbol[firstDot + 1 ..< secondDot])
-    let suffix = symbol[secondDot + 1 .. ^1]
-    itemId(context.compilerModuleId(suffix), int32(item))
-
-  proc compilerTypeKind(symbol: string): TTypeKind =
-    let ordinal = symbol.typeOrdinal
-    if ordinal < 0 or ordinal > ord(high(TTypeKind)):
-      fail("invalid Nim compiler type kind in BIF symbol: " & symbol)
-    TTypeKind(ordinal)
-
-  proc compilerType(context: var CompilerTypeContext, symbol: string): PType =
-    if symbol.len == 0 or not symbol.startsWith("`t"):
-      return nil
-    if symbol in context.types:
-      return context.types[symbol]
-    let kind = compilerTypeKind(symbol)
-    let id = context.compilerTypeItemId(symbol)
-    result = PType(
-      itemId: id,
-      kind: kind,
-      state: Partial,
-      bindingId: id,
-      callConvImpl: ccNimCall,
-      flagsImpl: {},
-      sonsImpl: @[],
-      sizeImpl: -1,
-      alignImpl: -1,
-      paddingAtEndImpl: 0,
-    )
-    context.types[symbol] = result
-    context.typeNames[cast[pointer](result)] = symbol
-
-  proc compilerTypeSymbol(context: CompilerTypeContext, typ: PType): string =
-    if typ != nil:
-      result = context.typeNames.getOrDefault(cast[pointer](typ))
-
-  proc compilerFlags(value: string): TTypeFlags =
-    ## This is the compact flag alphabet emitted by Nim's BIF writer. Keeping
-    ## the compiler enum as the destination means the layout decisions below
-    ## use the compiler's actual type flags instead of inspecting characters
-    ## opportunistically in an otherwise untyped string.
-    var index = 0
-    while index < value.len:
-      case value[index]
-      of 'a':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfAcyclic
-          inc index
-        else:
-          result.incl tfHasAsgn
-      of 'b':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfByRef
-          inc index
-        else:
-          result.incl tfByCopy
-      of 'c':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfConceptMatchedTypeSym
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '1':
-          result.incl tfCovariant
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '2':
-          result.incl tfContravariant
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '3':
-          result.incl tfCheckedForDestructor
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '4':
-          result.incl tfCompleteStruct
-          inc index
-        else:
-          result.incl tfCapturesEnv
-      of 'd':
-        result.incl tfBorrowDot
-      of 'e':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfExplicit
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '1':
-          result.incl tfExplicitCallConv
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '2':
-          result.incl tfEffectSystemWorkaround
-          inc index
-        else:
-          result.incl tfEnumHasHoles
-      of 'f':
-        result.incl tfFinal
-      of 'g':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfGenericTypeParam
-          inc index
-        else:
-          result.incl tfFromGeneric
-      of 'h':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfHasGCedMem
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '1':
-          result.incl tfHasStatic
-          inc index
-        else:
-          result.incl tfHasOwned
-      of 'i':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfIterator
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '1':
-          result.incl tfImplicitTypeParam
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '2':
-          result.incl tfInferrableStatic
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '3':
-          result.incl tfIncompleteStruct
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '4':
-          result.incl tfIsConstructor
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '5':
-          result.incl tfIsOutParam
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '6':
-          result.incl tfImplicitStatic
-          inc index
-        else:
-          result.incl tfInheritable
-      of 'm':
-        result.incl tfHasMeta
-      of 'n':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfNotNil
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '1':
-          result.incl tfNeedsFullInit
-          inc index
-        else:
-          result.incl tfNoSideEffect
-      of 'o':
-        result.incl tfRefsAnonObj
-      of 'p':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfPacked
-          inc index
-        else:
-          result.incl tfPartial
-      of 'r':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfRetType
-          inc index
-        elif index + 1 < value.len and value[index + 1] == '1':
-          result.incl tfRequiresInit
-          inc index
-        else:
-          result.incl tfResolved
-      of 's':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfSendable
-          inc index
-        else:
-          result.incl tfShallow
-      of 't':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfTriggersCompileTime
-          inc index
-        else:
-          result.incl tfThread
-      of 'u':
-        result.incl tfUnresolved
-      of 'v':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfVarIsPtr
-          inc index
-        else:
-          result.incl tfVarargs
-      of 'w':
-        if index + 1 < value.len and value[index + 1] == '0':
-          result.incl tfWeakCovariant
-          inc index
-        else:
-          result.incl tfWildcard
-      else:
-        discard
-      inc index
-
-  proc loadCompilerFlags(node: var Cursor): TTypeFlags =
-    if node.kind == DotToken:
+proc loadCompilerBindingId(
+    context: var CompilerTypeContext, node: var Cursor, current: ItemId
+): ItemId =
+  if node.kind == DotToken:
+    skip node
+    return current
+  if node.kind != TagLit or node.tagName != "bid":
+    fail("Nim compiler binding id expected in BIF")
+  node.into:
+    let item = int32(loadCompilerInt(node))
+    var module = current.module
+    if node.hasMore and node.kind == StrLit:
+      module = context.compilerModuleId(node.strVal)
       skip node
-    else:
-      if node.kind != Ident:
-        fail("Nim compiler type flags expected in BIF")
-      result = compilerFlags(node.strVal)
-      skip node
+    result = itemId(module, item)
 
-  proc loadCompilerCallConv(node: var Cursor): TCallingConvention =
-    if node.kind == DotToken:
-      skip node
-      return ccNimCall
-    if node.kind != Ident:
-      fail("Nim compiler calling convention expected in BIF")
-    case node.strVal
-    of "nimcall":
-      result = ccNimCall
-    of "stdcall":
-      result = ccStdCall
-    of "cdecl":
-      result = ccCDecl
-    of "safecall":
-      result = ccSafeCall
-    of "syscall":
-      result = ccSysCall
-    of "inline":
-      result = ccInline
-    of "noinline":
-      result = ccNoInline
-    of "fastcall":
-      result = ccFastCall
-    of "thiscall":
-      result = ccThisCall
-    of "closure":
-      result = ccClosure
-    of "noconv":
-      result = ccNoConvention
-    of "member":
-      result = ccMember
-    else:
-      fail("unknown Nim compiler calling convention in BIF: " & node.strVal)
+proc loadCompilerSymbol(context: var CompilerTypeContext, node: var Cursor): PSym =
+  case node.kind
+  of DotToken:
+    skip node
+  of Symbol, SymbolDef:
+    result = context.compilerSymStub(node.symName)
+    skip node
+  of TagLit:
+    let symbolNode = node.findChildKind(SymbolDef)
+    let symbol = if symbolNode.cursorIsNil: "" else: symbolNode.symName
+    context.scanCompilerTypeDefs(node)
+    skip node
+    result = context.compilerSymStub(symbol)
+  else:
+    fail("Nim compiler symbol reference expected in BIF")
+
+proc loadCompilerLoc(node: var Cursor) =
+  for _ in 0 ..< 4:
+    if not node.hasMore:
+      fail("truncated Nim compiler type location in BIF")
     skip node
 
-  proc loadCompilerInt(node: var Cursor): int64 =
-    if node.kind != IntLit:
-      fail("Nim compiler integer field expected in BIF")
-    result = node.intVal
+proc loadCompilerTypeDef(context: var CompilerTypeContext, node: var Cursor): PType =
+  if node.kind != TagLit or node.tagName != "td":
+    fail("Nim compiler type definition expected in BIF")
+  let nameNode = node.findChildKind(SymbolDef)
+  if nameNode.cursorIsNil:
+    fail("Nim compiler type definition has no symbol in BIF")
+  let name = nameNode.symName
+  result = context.compilerType(name)
+  if name in context.parsed:
     skip node
+    return
+  context.parsed[name] = true
+  result.state = Complete
 
-  proc compilerSymStub(context: var CompilerTypeContext, symbol: string): PSym =
-    if symbol.len == 0:
-      return nil
-    if symbol in context.symbols:
-      return context.symbols[symbol]
-    result =
-      PSym(kindImpl: skStub, state: Complete, name: PIdent(s: symbolBase(symbol)))
-    context.symbols[symbol] = result
+  node.into:
+    if node.kind != SymbolDef:
+      fail("Nim compiler type definition has an invalid name in BIF")
+    skip node
+    if node.kind != DotToken:
+      fail("Nim compiler type definition has an invalid visibility in BIF")
+    skip node
+    result.flagsImpl = loadCompilerFlags(node)
+    result.callConvImpl = loadCompilerCallConv(node)
+    result.sizeImpl = loadCompilerInt(node)
+    result.alignImpl = int16(loadCompilerInt(node))
+    result.paddingAtEndImpl = int16(loadCompilerInt(node))
+    result.bindingId = context.loadCompilerBindingId(node, result.itemId)
+    result.typeInstImpl = context.loadCompilerTypeRef(node)
 
-  proc scanCompilerTypeDefs(context: var CompilerTypeContext, node: Cursor)
-
-  proc loadCompilerTypeDef(context: var CompilerTypeContext, node: var Cursor): PType
-
-  proc loadCompilerTypeRef(context: var CompilerTypeContext, node: var Cursor): PType =
-    case node.kind
-    of DotToken:
-      skip node
-    of Symbol:
-      result = context.compilerType(node.symName)
-      skip node
-    of TagLit:
-      if node.tagName != "td":
-        fail("Nim compiler type definition expected in BIF, got " & node.tagName)
-      result = context.loadCompilerTypeDef(node)
-    else:
-      fail("Nim compiler type reference expected in BIF")
-
-  proc scanCompilerTypeDefs(context: var CompilerTypeContext, node: Cursor) =
-    if node.kind != TagLit:
-      return
-    if node.tagName == "td":
-      var typeNode = node
-      discard context.loadCompilerTypeDef(typeNode)
-      return
-    var children = node.childCursor()
-    while children.hasMore:
-      if children.kind == TagLit:
-        context.scanCompilerTypeDefs(children)
-      children.skip
-
-  proc loadCompilerBindingId(
-      context: var CompilerTypeContext, node: var Cursor, current: ItemId
-  ): ItemId =
     if node.kind == DotToken:
       skip node
-      return current
-    if node.kind != TagLit or node.tagName != "bid":
-      fail("Nim compiler binding id expected in BIF")
-    node.into:
-      let item = int32(loadCompilerInt(node))
-      var module = current.module
-      if node.hasMore and node.kind == StrLit:
-        module = context.compilerModuleId(node.strVal)
-        skip node
-      result = itemId(module, item)
-
-  proc loadCompilerSymbol(context: var CompilerTypeContext, node: var Cursor): PSym =
-    case node.kind
-    of DotToken:
-      skip node
-    of Symbol, SymbolDef:
-      result = context.compilerSymStub(node.symName)
-      skip node
-    of TagLit:
-      let symbolNode = node.findChildKind(SymbolDef)
-      let symbol = if symbolNode.cursorIsNil: "" else: symbolNode.symName
-      context.scanCompilerTypeDefs(node)
-      skip node
-      result = context.compilerSymStub(symbol)
     else:
-      fail("Nim compiler symbol reference expected in BIF")
-
-  proc loadCompilerLoc(node: var Cursor) =
-    for _ in 0 ..< 4:
-      if not node.hasMore:
-        fail("truncated Nim compiler type location in BIF")
-      skip node
-
-  proc loadCompilerTypeDef(context: var CompilerTypeContext, node: var Cursor): PType =
-    if node.kind != TagLit or node.tagName != "td":
-      fail("Nim compiler type definition expected in BIF")
-    let nameNode = node.findChildKind(SymbolDef)
-    if nameNode.cursorIsNil:
-      fail("Nim compiler type definition has no symbol in BIF")
-    let name = nameNode.symName
-    result = context.compilerType(name)
-    if name in context.parsed:
-      skip node
-      return
-    context.parsed[name] = true
-    result.state = Complete
-
-    node.into:
-      if node.kind != SymbolDef:
-        fail("Nim compiler type definition has an invalid name in BIF")
-      skip node
-      if node.kind != DotToken:
-        fail("Nim compiler type definition has an invalid visibility in BIF")
-      skip node
-      result.flagsImpl = loadCompilerFlags(node)
-      result.callConvImpl = loadCompilerCallConv(node)
-      result.sizeImpl = loadCompilerInt(node)
-      result.alignImpl = int16(loadCompilerInt(node))
-      result.paddingAtEndImpl = int16(loadCompilerInt(node))
-      result.bindingId = context.loadCompilerBindingId(node, result.itemId)
-      result.typeInstImpl = context.loadCompilerTypeRef(node)
-
-      if node.kind == DotToken:
-        skip node
-      else:
-        let nodeValue = node
-        context.scanCompilerTypeDefs(nodeValue)
-        case nodeValue.kind
-        of TagLit:
-          case nodeValue.tagName
-          of "reclist":
-            context.records[name] = bifRecord(nodeValue)
-          of "enumty":
-            context.enumValues[name] = bifEnum(nodeValue)
-          of "range":
-            context.rangeLengths[name] = bifRangeLength(nodeValue)
-          else:
-            discard
+      let nodeValue = node
+      context.scanCompilerTypeDefs(nodeValue)
+      case nodeValue.kind
+      of TagLit:
+        case nodeValue.tagName
+        of "reclist":
+          context.records[name] = bifRecord(nodeValue)
+        of "enumty":
+          context.enumValues[name] = bifEnum(nodeValue)
+        of "range":
+          context.rangeLengths[name] = bifRangeLength(nodeValue)
         else:
           discard
-        skip node
+      else:
+        discard
+      skip node
 
-      result.ownerFieldImpl = context.loadCompilerSymbol(node)
-      result.symImpl = context.loadCompilerSymbol(node)
-      loadCompilerLoc(node)
-      while node.hasMore:
-        result.sonsImpl.add context.loadCompilerTypeRef(node)
+    result.ownerFieldImpl = context.loadCompilerSymbol(node)
+    result.symImpl = context.loadCompilerSymbol(node)
+    loadCompilerLoc(node)
+    while node.hasMore:
+      result.sonsImpl.add context.loadCompilerTypeRef(node)
 
-  proc compilerLayoutKind(kind: TTypeKind): string =
-    case kind
-    of tyBool: "bool"
-    of tyChar: "char"
-    of tyGenericInvocation: "genericinvocation"
-    of tyGenericBody: "genericbody"
-    of tyGenericInst: "genericinstance"
-    of tyDistinct: "distinct"
-    of tyEnum: "enum"
-    of tyArray: "array"
-    of tyObject: "object"
-    of tyTuple: "tuple"
-    of tySet: "set"
-    of tyRange: "range"
-    of tyPtr: "pointer"
-    of tyRef: "ref"
-    of tyVar: "var"
-    of tySequence: "sequence"
-    of tyProc: "proc"
-    of tyPointer: "pointer"
-    of tyOpenArray: "openarray"
-    of tyString: "string"
-    of tyCstring: "cstring"
-    of tyVarargs: "varargs"
-    of tyUncheckedArray: "uncheckedarray"
-    of tyInt: "int"
-    of tyInt8: "int8"
-    of tyInt16: "int16"
-    of tyInt32: "int32"
-    of tyInt64: "int64"
-    of tyFloat: "float"
-    of tyFloat32: "float32"
-    of tyFloat64: "float64"
-    of tyUInt: "uint"
-    of tyUInt8: "uint8"
-    of tyUInt16: "uint16"
-    of tyUInt32: "uint32"
-    of tyUInt64: "uint64"
-    else: ""
+proc compilerLayoutKind(kind: TTypeKind): string =
+  case kind
+  of tyBool: "bool"
+  of tyChar: "char"
+  of tyGenericInvocation: "genericinvocation"
+  of tyGenericBody: "genericbody"
+  of tyGenericInst: "genericinstance"
+  of tyDistinct: "distinct"
+  of tyEnum: "enum"
+  of tyArray: "array"
+  of tyObject: "object"
+  of tyTuple: "tuple"
+  of tySet: "set"
+  of tyRange: "range"
+  of tyPtr: "pointer"
+  of tyRef: "ref"
+  of tyVar: "var"
+  of tySequence: "sequence"
+  of tyProc: "proc"
+  of tyPointer: "pointer"
+  of tyOpenArray: "openarray"
+  of tyString: "string"
+  of tyCstring: "cstring"
+  of tyVarargs: "varargs"
+  of tyUncheckedArray: "uncheckedarray"
+  of tyInt: "int"
+  of tyInt8: "int8"
+  of tyInt16: "int16"
+  of tyInt32: "int32"
+  of tyInt64: "int64"
+  of tyFloat: "float"
+  of tyFloat32: "float32"
+  of tyFloat64: "float64"
+  of tyUInt: "uint"
+  of tyUInt8: "uint8"
+  of tyUInt16: "uint16"
+  of tyUInt32: "uint32"
+  of tyUInt64: "uint64"
+  else: ""
 
-  proc compilerAbiLayout(
-      context: CompilerTypeContext, symbol: string, typ: PType
-  ): AbiTypeEntry =
-    result.typeSymbol = symbol
-    result.kind = compilerLayoutKind(typ.kind)
-    result.size = int64(typ.sizeImpl)
-    result.alignment = int64(typ.alignImpl)
-    result.arrayLength = -1
-    result.inheritable = tfInheritable in typ.flagsImpl
-    result.packed = tfPacked in typ.flagsImpl
-    result.union = tfUnion in typ.flagsImpl
-    result.record = context.records.getOrDefault(symbol)
-    result.enumValues = context.enumValues.getOrDefault(symbol)
-    if symbol in context.rangeLengths:
-      result.arrayLength = context.rangeLengths[symbol]
+proc compilerAbiLayout(
+    context: CompilerTypeContext, symbol: string, typ: PType
+): AbiTypeEntry =
+  result.typeSymbol = symbol
+  result.kind = compilerLayoutKind(typ.kind)
+  result.size = int64(typ.sizeImpl)
+  result.alignment = int64(typ.alignImpl)
+  result.arrayLength = -1
+  result.inheritable = tfInheritable in typ.flagsImpl
+  result.packed = tfPacked in typ.flagsImpl
+  result.union = tfUnion in typ.flagsImpl
+  result.record = context.records.getOrDefault(symbol)
+  result.enumValues = context.enumValues.getOrDefault(symbol)
+  if symbol in context.rangeLengths:
+    result.arrayLength = context.rangeLengths[symbol]
 
-    case typ.kind
-    of tyGenericInst:
-      if typ.sonsImpl.len > 0:
-        let actual = typ.sonsImpl[^1]
-        if actual != nil:
-          let actualLayout =
-            context.compilerAbiLayout(context.compilerTypeSymbol(actual), actual)
-          result.kind = actualLayout.kind
-          result.baseTypeSymbol = actualLayout.baseTypeSymbol
-          result.indexTypeSymbol = actualLayout.indexTypeSymbol
-          result.elementTypeSymbol = actualLayout.elementTypeSymbol
-          if result.size < 0:
-            result.size = actualLayout.size
-          if result.alignment < 0:
-            result.alignment = actualLayout.alignment
-          if result.arrayLength < 0:
-            result.arrayLength = actualLayout.arrayLength
-          if result.record.len == 0:
-            result.record = actualLayout.record
-          if result.enumValues.len == 0:
-            result.enumValues = actualLayout.enumValues
-    of tyRef:
-      # ``ast.base`` uses ``sonsImpl[0]`` for pointer-like types.
-      if typ.sonsImpl.len > 0:
-        result.elementTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[0])
-    of tyArray:
-      # The compiler's ``indexType`` is son 0 and ``elementType`` is the last
-      # son. Do not use the last two serialized type tokens: an array can carry
-      # additional compiler bookkeeping sons.
-      if typ.sonsImpl.len > 0:
-        result.indexTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[0])
-      if typ.sonsImpl.len > 1:
-        result.elementTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[^1])
-      if result.arrayLength < 0 and result.indexTypeSymbol in context.rangeLengths:
-        result.arrayLength = context.rangeLengths[result.indexTypeSymbol]
-    of tyObject:
-      if typ.sonsImpl.len > 0:
-        result.baseTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[0])
-    of tyTuple:
-      if result.record.len == 0:
-        for index, child in typ.sonsImpl:
-          result.record.add NativeRecordPart(
-            kind: nrField,
-            field: NativeField(
-              name: "Field" & $index,
-              typeSymbol: context.compilerTypeSymbol(child),
-              offset: -1,
-              size: -1,
-              alignment: -1,
-            ),
-          )
-    of tyDistinct, tyGenericBody, tyGenericInvocation, tyOpenArray, tyRange, tySequence,
-        tySet, tyString, tyUncheckedArray, tyVar, tyVarargs:
-      # These compiler container/modifier types expose their payload as the
-      # final son, matching ``ast.elementType``/``typeBodyImpl``.
-      if typ.sonsImpl.len > 0:
-        result.elementTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[^1])
-    else:
-      discard
+  case typ.kind
+  of tyGenericInst:
+    if typ.sonsImpl.len > 0:
+      let actual = typ.sonsImpl[^1]
+      if actual != nil:
+        let actualLayout =
+          context.compilerAbiLayout(context.compilerTypeSymbol(actual), actual)
+        result.kind = actualLayout.kind
+        result.baseTypeSymbol = actualLayout.baseTypeSymbol
+        result.indexTypeSymbol = actualLayout.indexTypeSymbol
+        result.elementTypeSymbol = actualLayout.elementTypeSymbol
+        if result.size < 0:
+          result.size = actualLayout.size
+        if result.alignment < 0:
+          result.alignment = actualLayout.alignment
+        if result.arrayLength < 0:
+          result.arrayLength = actualLayout.arrayLength
+        if result.record.len == 0:
+          result.record = actualLayout.record
+        if result.enumValues.len == 0:
+          result.enumValues = actualLayout.enumValues
+  of tyRef:
+    # ``ast.base`` uses ``sonsImpl[0]`` for pointer-like types.
+    if typ.sonsImpl.len > 0:
+      result.elementTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[0])
+  of tyArray:
+    # The compiler's ``indexType`` is son 0 and ``elementType`` is the last
+    # son. Do not use the last two serialized type tokens: an array can carry
+    # additional compiler bookkeeping sons.
+    if typ.sonsImpl.len > 0:
+      result.indexTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[0])
+    if typ.sonsImpl.len > 1:
+      result.elementTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[^1])
+    if result.arrayLength < 0 and result.indexTypeSymbol in context.rangeLengths:
+      result.arrayLength = context.rangeLengths[result.indexTypeSymbol]
+  of tyObject:
+    if typ.sonsImpl.len > 0:
+      result.baseTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[0])
+  of tyTuple:
+    if result.record.len == 0:
+      for index, child in typ.sonsImpl:
+        result.record.add NativeRecordPart(
+          kind: nrField,
+          field: NativeField(
+            name: "Field" & $index,
+            typeSymbol: context.compilerTypeSymbol(child),
+            offset: -1,
+            size: -1,
+            alignment: -1,
+          ),
+        )
+  of tyDistinct, tyGenericBody, tyGenericInvocation, tyOpenArray, tyRange, tySequence,
+      tySet, tyString, tyUncheckedArray, tyVar, tyVarargs:
+    # These compiler container/modifier types expose their payload as the
+    # final son, matching ``ast.elementType``/``typeBodyImpl``.
+    if typ.sonsImpl.len > 0:
+      result.elementTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[^1])
+  else:
+    discard
 
-  proc compilerBifLayout(node: Cursor): AbiTypeEntry =
-    if node.kind != TagLit or node.tagName != "td":
-      return
-    var context = initCompilerTypeContext()
-    var typeNode = node
-    let typ = context.loadCompilerTypeDef(typeNode)
-    if typ != nil:
-      result = context.compilerAbiLayout(node.findChildKind(SymbolDef).symName, typ)
+proc compilerBifLayout(node: Cursor): AbiTypeEntry =
+  if node.kind != TagLit or node.tagName != "td":
+    return
+  var context = initCompilerTypeContext()
+  var typeNode = node
+  let typ = context.loadCompilerTypeDef(typeNode)
+  if typ != nil:
+    result = context.compilerAbiLayout(node.findChildKind(SymbolDef).symName, typ)
 
-  proc bifLayout(node: Cursor): AbiTypeEntry =
-    compilerBifLayout(node)
-
-else:
-  proc bifLayout(node: Cursor): AbiTypeEntry =
-    legacyBifLayout(node)
+proc bifLayout(node: Cursor): AbiTypeEntry =
+  compilerBifLayout(node)
 
 proc mergeLayout(layouts: var Table[string, AbiTypeEntry], layout: AbiTypeEntry) =
   if layout.typeSymbol.len == 0 or layout.kind.len == 0:

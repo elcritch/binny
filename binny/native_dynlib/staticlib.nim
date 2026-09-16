@@ -1218,10 +1218,19 @@ proc linkMachODylib*(
       installName
     else:
       "@rpath/" & outputPath.extractFilename
+  let runtimeDir = createTempDir("binny-native-runtime-", "")
+  defer:
+    removeDir(runtimeDir)
+  let
+    runtimeSource = runtimeDir / "runtime.c"
+    runtimeObject = runtimeDir / "runtime.o"
+  writeFile(runtimeSource, "int cmdCount;\nchar **cmdLine;\n")
+  runProcess("clang", ["-c", "-fPIC", runtimeSource, "-o", runtimeObject])
   createDir(outputPath.parentDir)
   var arguments = @[
     "-dynamiclib",
     "-Wl,-force_load," & normalizedAbsolutePath(archivePath),
+    runtimeObject,
     "-Wl,-alias,_NimMain,_" & initSymbol,
     "-Wl,-exported_symbols_list," & normalizedAbsolutePath(exportListPath),
     "-Wl,-install_name," & dylibName,

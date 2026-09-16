@@ -25,10 +25,10 @@ jobs:
           echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/share/grabnim/current/bin" >> "$GITHUB_PATH"
 
-      - name: Install Nim devel nightly
+      - name: Install Nim devel from source
         env:
           GRABNIM_GITHUB_TOKEN: ${{ github.token }}
-        run: grabnim devel
+        run: grabnim compile devel
 
       - name: Show compiler version
         run: nim --version
@@ -72,10 +72,10 @@ jobs:
           echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/share/grabnim/current/bin" >> "$GITHUB_PATH"
 
-      - name: Install Nim devel nightly
+      - name: Install Nim devel from source
         env:
           GRABNIM_GITHUB_TOKEN: ${{ github.token }}
-        run: grabnim devel
+        run: grabnim compile devel
 
       - name: Show compiler version
         run: nim --version

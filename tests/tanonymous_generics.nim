@@ -53,6 +53,18 @@ type
     next: Node
     children: seq[Node]
 
+  Box[T] = object
+    value: T
+
+  Pair[K, V] = object
+    key: K
+    value: V
+
+  RecursiveBox[T] = ref object
+    value: T
+    next: RecursiveBox[T]
+    children: seq[RecursiveBox[T]]
+
 proc sumSequence*(values: seq[int]): int {.noinline.} =
   for value in values:
     result += value
@@ -75,6 +87,18 @@ proc sumNestedArray*(values: array[4, seq[int]]): int {.noinline.} =
       result += value[0]
 
 proc identityNode*(value: Node): Node {.noinline.} =
+  value
+
+proc sumBox*(value: Box[int]): int {.noinline.} =
+  value.value
+
+proc sumPair*(value: Pair[int, bool]): int {.noinline.} =
+  if value.value: value.key else: 0
+
+proc sumNestedBox*(value: Box[seq[array[4, int]]]): int {.noinline.} =
+  if value.value.len > 0: value.value[0][0] else: 0
+
+proc identityRecursiveBox*(value: RecursiveBox[int]): RecursiveBox[int] {.noinline.} =
   value
 """,
     )
@@ -110,6 +134,13 @@ proc identityNode*(value: Node): Node {.noinline.} =
     doAssert "proc sumNestedArray*(values: array[4, seq[int]]): int" in generatedBindings
     doAssert "proc identityNode*(value: NativeAbi" in generatedBindings
     doAssert "children: seq[NativeAbi" in generatedBindings
+    doAssert "proc sumBox*(value: NativeAbi" in generatedBindings
+    doAssert "proc sumPair*(value: NativeAbi" in generatedBindings
+    doAssert "proc sumNestedBox*(value: NativeAbi" in generatedBindings
+    doAssert "proc identityRecursiveBox*(value: NativeAbi" in generatedBindings
+    doAssert "key: int" in generatedBindings
+    doAssert "value: bool" in generatedBindings
+    doAssert "next: NativeAbi" in generatedBindings
     doAssert "    x = 0" in generatedBindings
     doAssert "    y = 1" in generatedBindings
     doAssert "    z = 2" in generatedBindings
