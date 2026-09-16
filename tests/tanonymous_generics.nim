@@ -49,6 +49,10 @@ type
   Axis = enum
     x, y, z, w
 
+  Node = ref object
+    next: Node
+    children: seq[Node]
+
 proc sumSequence*(values: seq[int]): int {.noinline.} =
   for value in values:
     result += value
@@ -69,6 +73,9 @@ proc sumNestedArray*(values: array[4, seq[int]]): int {.noinline.} =
   for value in values:
     if value.len > 0:
       result += value[0]
+
+proc identityNode*(value: Node): Node {.noinline.} =
+  value
 """,
     )
     createDir(cache)
@@ -88,7 +95,10 @@ proc sumNestedArray*(values: array[4, seq[int]]): int {.noinline.} =
     )
 
     let bifPath = findSemanticBifPath(cache, source)
-    doAssert "genericargs" in readFile(bifPath)
+    # This branch deliberately consumes plain devel BIF output. The compiler
+    # type graph supplies the generic arguments through TType.sonsImpl, so no
+    # producer-side genericargs extension is needed.
+    doAssert "genericargs" notin readFile(bifPath)
     let config = initBifNativeBindingsConfig(source, cache, dylib, temporary)
     doAssert config.writeNativeBindings(bindings)
     let generatedBindings = readFile(bindings)
@@ -98,6 +108,8 @@ proc sumNestedArray*(values: array[4, seq[int]]): int {.noinline.} =
     doAssert "proc sumNestedSequence*(values: seq[array[4, int]]): int" in
       generatedBindings
     doAssert "proc sumNestedArray*(values: array[4, seq[int]]): int" in generatedBindings
+    doAssert "proc identityNode*(value: NativeAbi" in generatedBindings
+    doAssert "children: seq[NativeAbi" in generatedBindings
     doAssert "    x = 0" in generatedBindings
     doAssert "    y = 1" in generatedBindings
     doAssert "    z = 2" in generatedBindings

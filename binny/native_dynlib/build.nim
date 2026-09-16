@@ -160,6 +160,25 @@ func cRootSource(config: NativeDynlibBuildConfig): string =
 func toolSource(): string =
   binnyProjectDir / "tools/native_dynlib.nim"
 
+proc nimSourceRoot(compiler: string): string =
+  ## Returns the Nim source checkout that owns ``compiler``, when available.
+  ## Installed Nim distributions do not ship ``compiler/astdef.nim``; those
+  ## builds use bifreader's portable metadata reader instead.
+  var executable = compiler
+  if not fileExists(executable):
+    executable = findExe(executable)
+  if executable.len == 0:
+    return
+  executable = absolutePath(executable)
+  let root = executable.parentDir.parentDir
+  if fileExists(root / "compiler" / "astdef.nim"):
+    result = root
+
+proc compilerTypeOptions(config: NativeDynlibBuildConfig): seq[string] =
+  let sourceRoot = nimSourceRoot(config.compiler)
+  if sourceRoot.len > 0:
+    result = @["-d:binnyCompilerTypes", "--path:" & (sourceRoot / "compiler")]
+
 proc compileProducer(
     config: NativeDynlibBuildConfig, sourcePath: string, force = false
 ) =
@@ -181,17 +200,17 @@ proc compileProducer(
 proc buildTool(config: NativeDynlibBuildConfig) =
   if not fileExists(toolSource()):
     fail("Binny native dynlib tool is missing: " & toolSource())
-  config.runNim(
-    [
-      "c",
-      "-d:release",
-      "--hints:off",
-      "--path:" & binnyProjectDir,
-      "--nimcache:" & config.toolCache,
-      "--out:" & config.toolBinary,
-      toolSource(),
-    ]
-  )
+  var arguments = @[
+    "c",
+    "-d:release",
+    "--hints:off",
+    "--path:" & binnyProjectDir,
+    "--nimcache:" & config.toolCache,
+    "--out:" & config.toolBinary,
+  ]
+  arguments.add config.compilerTypeOptions
+  arguments.add toolSource()
+  config.runNim(arguments)
 
 proc toolArguments(
     config: NativeDynlibBuildConfig, command: string
