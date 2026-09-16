@@ -53,6 +53,13 @@ type
     next: Node
     children: seq[Node]
 
+  PublicNode* = ref object
+    next*: PublicNode
+    children*: seq[PublicNode]
+
+  PublicTree* = object
+    root*: PublicNode
+
   Box[T] = object
     value: T
 
@@ -87,6 +94,15 @@ proc sumNestedArray*(values: array[4, seq[int]]): int {.noinline.} =
       result += value[0]
 
 proc identityNode*(value: Node): Node {.noinline.} =
+  value
+
+proc identityPublicNode*(value: PublicNode): PublicNode {.noinline.} =
+  value
+
+proc publicChildren*(value: PublicNode): seq[PublicNode] {.noinline.} =
+  value.children
+
+proc identityPublicTree*(value: PublicTree): PublicTree {.noinline.} =
   value
 
 proc sumBox*(value: Box[int]): int {.noinline.} =
@@ -141,6 +157,13 @@ proc identityRecursiveBox*(value: RecursiveBox[int]): RecursiveBox[int] {.noinli
     doAssert "key: int" in generatedBindings
     doAssert "value: bool" in generatedBindings
     doAssert "next: NativeAbi" in generatedBindings
+    doAssert "proc identityPublicNode*(value: PublicNode): PublicNode" in
+      generatedBindings
+    doAssert "proc publicChildren*(value: PublicNode): seq[PublicNode]" in
+      generatedBindings
+    doAssert "next*: PublicNode" in generatedBindings
+    doAssert "children*: seq[PublicNode]" in generatedBindings
+    doAssert "root*: PublicNode" in generatedBindings
     doAssert "    x = 0" in generatedBindings
     doAssert "    y = 1" in generatedBindings
     doAssert "    z = 2" in generatedBindings
@@ -152,7 +175,22 @@ proc identityRecursiveBox*(value: RecursiveBox[int]): RecursiveBox[int] {.noinli
       consumer = temporary / "consumer.nim"
       consumerCache = cache / "consumer"
       consumerBinary = temporary / "consumer".addFileExt(ExeExt)
-    writeFile(consumer, "import producer_abi\n")
+    writeFile(
+      consumer,
+      """
+import producer_abi
+
+proc checkPublicRefs(node: PublicNode) {.used.} =
+  let same: PublicNode = identityPublicNode(node)
+  let children: seq[PublicNode] = publicChildren(same)
+  let tree = identityPublicTree(PublicTree(root: same))
+  let root: PublicNode = tree.root
+  let next: PublicNode = root.next
+  let nested: seq[PublicNode] = next.children
+  discard children
+  discard nested
+""",
+    )
     discard run(
       [
         compiler,

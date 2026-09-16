@@ -1773,13 +1773,17 @@ proc buildNativeApi(
     if typ.typeId in requiredTypes or typ.nifSymbol in requiredTypes:
       publicTypes.add typ
   result.types = publicTypes
-  # A ref-object signature uses the compiler's separate ``tyRef`` layout
-  # symbol, while the generated declaration is the object payload. Alias the
-  # former to the latter so recursive fields and procedure signatures can
-  # refer to one Nim type without introducing a ref wrapper.
+  # Anonymous ref objects need the compiler's ``tyRef`` symbol mapped to
+  # their payload declaration. Keep named ref objects as the canonical type;
+  # mapping their ref symbol to a second declaration would replace that name.
+  var named_ref_types: Table[string, bool]
+  for typ in result.types:
+    if typ.kind == ntRefObject:
+      named_ref_types[typ.typeId] = true
   for refLayout in description.types:
     let layout = layouts[refLayout.typeSymbol]
-    if layout.kind != "ref" or layout.elementTypeSymbol notin layouts or
+    if layout.typeSymbol in named_ref_types or layout.kind != "ref" or
+        layout.elementTypeSymbol notin layouts or
         layouts[layout.elementTypeSymbol].kind != "object":
       continue
     for typ in result.types.mitems:

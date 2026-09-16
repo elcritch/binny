@@ -11,11 +11,12 @@ supports 64-bit Mach-O on macOS and little-endian ELF64 on Linux and FreeBSD. Wi
 
 It requires a Nim devel compiler with `--genBif` and `nifler`.
 
-Binny imports the compiler type definitions from the Nim source checkout used
+Binny imports the compiler type definitions from the Nim installation used
 to build it. This lets the BIF reader materialize serialized definitions as
 Nim `PType` nodes and use the compiler's `sonsImpl` rules for arrays,
-containers, and generic instances. Use a Nim devel source checkout rather than
-an installed compiler package when building Binny.
+containers, and generic instances. The installation must include the
+`compiler/` sources. Nim devel binary nightlies include these sources and
+`nifler`; install one with `grabnim devel`, or use a Nim devel source checkout.
 
 ## Why try it?
 
