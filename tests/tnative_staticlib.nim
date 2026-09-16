@@ -22,8 +22,9 @@ proc run(arguments: openArray[string]): string =
 proc supportsStaticLibExperiment(compiler: string): bool =
   let help = execCmdEx(compiler.quoteShell & " --fullhelp")
   result =
-    (defined(macosx) or defined(linux) or defined(freebsd)) and help.exitCode == 0 and
-    "--genBif:on|off" in help.output and fileExists(compiler.parentDir / "nifler")
+    (defined(macosx) or defined(linux) or defined(freebsd) or defined(windows)) and
+    help.exitCode == 0 and "--genBif:on|off" in help.output and
+    fileExists(compiler.parentDir / "nifler")
 
 proc elfSymbolHasVisibility(output, symbol, visibility: string): bool =
   for line in output.splitLines:
@@ -37,7 +38,7 @@ proc listsSymbol(output, symbol: string): bool =
     if fields.len > 0 and fields[^1] == symbol:
       return true
 
-when defined(macosx) or defined(linux) or defined(freebsd):
+when defined(macosx) or defined(linux) or defined(freebsd) or defined(windows):
   let compiler = getCurrentCompilerExe()
   if compiler.supportsStaticLibExperiment:
     block public_bif_procs_become_dylib_exports:
@@ -52,6 +53,8 @@ when defined(macosx) or defined(linux) or defined(freebsd):
         dylib =
           when defined(macosx):
             temporary / "libproducer.dylib"
+          elif defined(windows):
+            temporary / "libproducer.dll"
           else:
             temporary / "libproducer.so"
         bindings = temporary / "producer_abi.nim"
@@ -205,7 +208,7 @@ proc privateAdd(left, right: int): int {.noinline.} =
         doAssert "ignoredMetric" notin privateSymbols
         doAssert dylibSymbols.listsSymbol("_" & initSymbol)
         doAssert not dylibSymbols.listsSymbol("_NimMain")
-      else:
+      elif defined(linux) or defined(freebsd):
         let
           privateSymbols = run(["readelf", "-Ws", privateArchive])
           publicSymbols = run(["readelf", "-Ws", publicArchive])
@@ -217,6 +220,17 @@ proc privateAdd(left, right: int): int {.noinline.} =
         doAssert "privateAdd" notin privateSymbols
         doAssert "ignoredDebug" notin privateSymbols
         doAssert "ignoredMetric" notin privateSymbols
+        doAssert dylibSymbols.listsSymbol(initSymbol)
+        doAssert not dylibSymbols.listsSymbol("NimMain")
+      else:
+        let
+          privateSymbols = run(["nm", "-g", "--defined-only", privateArchive])
+          publicSymbols = run(["nm", "-g", "--defined-only", publicArchive])
+          dylibSymbols = run(["objdump", "-p", dylib])
+        for symbol in exports:
+          doAssert privateSymbols.listsSymbol(symbol.cSymbol)
+          doAssert publicSymbols.listsSymbol(symbol.cSymbol)
+          doAssert symbol.cSymbol in dylibSymbols
         doAssert dylibSymbols.listsSymbol(initSymbol)
         doAssert not dylibSymbols.listsSymbol("NimMain")
       doAssert "privateAdd" notin dylibSymbols

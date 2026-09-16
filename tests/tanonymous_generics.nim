@@ -22,10 +22,11 @@ proc run(arguments: openArray[string]): string =
 proc supportsBif(compiler: string): bool =
   let help = execCmdEx(compiler.quoteShell & " --fullhelp")
   result =
-    (defined(macosx) or defined(linux) or defined(freebsd)) and help.exitCode == 0 and
-    "--genBif:on|off" in help.output and fileExists(compiler.parentDir / "nifler")
+    (defined(macosx) or defined(linux) or defined(freebsd) or defined(windows)) and
+    help.exitCode == 0 and "--genBif:on|off" in help.output and
+    fileExists(compiler.parentDir / "nifler")
 
-when defined(macosx) or defined(linux) or defined(freebsd):
+when defined(macosx) or defined(linux) or defined(freebsd) or defined(windows):
   let compiler = getCurrentCompilerExe()
   if compiler.supportsBif:
     let
@@ -36,6 +37,8 @@ when defined(macosx) or defined(linux) or defined(freebsd):
       dylib =
         when defined(macosx):
           temporary / "libproducer.dylib"
+        elif defined(windows):
+          temporary / "libproducer.dll"
         else:
           temporary / "libproducer.so"
       bindings = temporary / "producer_abi.nim"

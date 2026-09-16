@@ -53,6 +53,8 @@ proc verifyDeadCodeElimination() =
         @["/usr/bin/nm", privateArchive]
       of "linux", "freebsd":
         @["nm", privateArchive]
+      of "windows":
+        @["nm", privateArchive]
       else:
         raise newException(
           ValueError,

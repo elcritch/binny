@@ -28,7 +28,13 @@ jobs:
       - name: Install Nim devel nightly
         env:
           GRABNIM_GITHUB_TOKEN: ${{ github.token }}
-        run: grabnim devel
+        run: |
+          grabnim devel
+          nim_root="$(grabnim path devel | tr -d '\r\"')"
+          if [[ ! -x "$nim_root/bin/nifler" && ! -x "$nim_root/bin/nifler.exe" ]]; then
+            "$nim_root/bin/nim" c -d:release --out:"$nim_root/bin/nifler" \
+              "$nim_root/dist/nimony/src/nifler/nifler.nim"
+          fi
 
       - name: Show compiler version
         run: nim --version
@@ -60,7 +66,14 @@ jobs:
           ./consumer
 
   native-dynlib:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Check out repository
@@ -78,7 +91,24 @@ jobs:
       - name: Install Nim devel nightly
         env:
           GRABNIM_GITHUB_TOKEN: ${{ github.token }}
-        run: grabnim devel
+        run: |
+          grabnim devel
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            grabnim setup
+          fi
+          nim_root="$(grabnim path devel | tr -d '\r\"')"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            nim_root="$(cygpath -u "$nim_root")"
+          fi
+          if [[ ! -x "$nim_root/bin/nifler" && ! -x "$nim_root/bin/nifler.exe" ]]; then
+            "$nim_root/bin/nim" c -d:release --out:"$nim_root/bin/nifler" \
+              "$nim_root/dist/nimony/src/nifler/nifler.nim"
+          fi
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cygpath -w "$nim_root/bin" >> "$GITHUB_PATH"
+          else
+            echo "$nim_root/bin" >> "$GITHUB_PATH"
+          fi
 
       - name: Show compiler version
         run: nim --version

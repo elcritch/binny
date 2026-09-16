@@ -7,7 +7,8 @@ Build native Nim dynamic libraries and strongly typed Nim bindings from compiler
 Binny turns ordinary public Nim routines (`proc name*`) into a filtered native dynamic-library API. It reads semantic BIF to identify the public surface, matches those declarations to their exact backend symbols, and reconstructs the Nim types and ownership hooks needed by consumers.
 
 The native-library workflow is experimental. The no-pragma archive promotion
-supports 64-bit Mach-O on macOS and little-endian ELF64 on Linux and FreeBSD. Windows should be possible, but I don't have a Windows Machine.
+supports 64-bit Mach-O on macOS, little-endian ELF64 on Linux and FreeBSD, and
+64-bit PE/COFF on Windows with MinGW.
 
 It requires a Nim devel compiler with `--genBif` and `nifler`.
 
@@ -109,8 +110,9 @@ default, performs both compiler passes, builds and promotes the archive, links
 and verifies the filtered dynamic library, then generates the consumer module.
 Set `backend = "ic"` in the constructor to use `nim ic` instead.
 
-When `libraryName` has no extension, Binny appends `.dylib` on macOS or `.so`
-on Linux and FreeBSD. Call `nativeBuild.stageNativeDynlib("bin")` to copy the
+When `libraryName` has no extension, Binny appends `.dylib` on macOS, `.so`
+on Linux and FreeBSD, or `.dll` on Windows. Call
+`nativeBuild.stageNativeDynlib("bin")` to copy the
 library and generate a matching binding module in a distribution directory.
 
 ## Other binary tooling
@@ -138,4 +140,4 @@ nim test
 
 The CI uses Nim devel to build the aggregate module, test native binding
 generation, and run the native dynamic-library end-to-end workflow on both
-Linux and macOS.
+Linux, macOS, and Windows.

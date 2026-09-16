@@ -842,6 +842,24 @@ proc writeElfVersionScript*(
   lines.add "};"
   writeFile(path, lines.join("\n") & "\n")
 
+proc writeWindowsModuleDefinition*(
+    path, libraryName, initSymbol: string, symbols: openArray[NativeExportSymbol]
+) =
+  ## Writes a PE/COFF module-definition file with a unique runtime initializer.
+  var names: seq[string]
+  for symbol in symbols:
+    if symbol.cSymbol != initSymbol:
+      names.add symbol.cSymbol
+  names.sort()
+  var lines = @["LIBRARY " & libraryName.extractFilename, "EXPORTS"]
+  lines.add "  " & initSymbol & "=NimMain"
+  var previous = ""
+  for name in names:
+    if name != previous:
+      lines.add "  " & name
+      previous = name
+  writeFile(path, lines.join("\n") & "\n")
+
 proc writeNativeExportList*(
     path, initSymbol: string, symbols: openArray[NativeExportSymbol]
 ) =
@@ -850,6 +868,10 @@ proc writeNativeExportList*(
     writeDarwinExportList(path, initSymbol, symbols)
   elif defined(linux) or defined(freebsd):
     writeElfVersionScript(path, initSymbol, symbols)
+  elif defined(windows):
+    writeWindowsModuleDefinition(
+      path, path.splitFile.name & ".dll", initSymbol, symbols
+    )
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)
 
@@ -1026,6 +1048,12 @@ proc runProcess(command: string, arguments: openArray[string], workingDir = "") 
   if exitCode != 0:
     fail(command & " failed with exit code " & $exitCode & ":\n" & output)
 
+proc outputListsSymbol(output, symbol: string): bool =
+  for line in output.splitLines:
+    let fields = line.splitWhitespace
+    if fields.len > 0 and fields[^1] == symbol:
+      return true
+
 proc recordedCCompileCommand(path: string): seq[string] =
   const marker = "/* Command for C compiler:"
   let
@@ -1196,6 +1224,35 @@ proc promoteElfArchive*(
   arguments.add members
   runProcess("ar", arguments)
 
+proc promoteCoffArchive*(
+    inputPath, outputPath: string, symbols: openArray[NativeExportSymbol]
+) =
+  ## COFF external definitions need no visibility rewrite; preserve the archive.
+  let
+    input = normalizedAbsolutePath(inputPath)
+    output = normalizedAbsolutePath(outputPath)
+  var process = startProcess(
+    "nm",
+    args = @["-g", "--defined-only", input],
+    options = {poUsePath, poStdErrToStdOut},
+  )
+  let nmOutput = process.outputStream.readAll()
+  let exitCode = process.waitForExit()
+  process.close()
+  if exitCode != 0:
+    fail("nm failed with exit code " & $exitCode & ":\n" & nmOutput)
+  var missing: seq[string]
+  for symbol in symbols:
+    if not nmOutput.outputListsSymbol(symbol.cSymbol):
+      missing.add symbol.cSymbol
+  if missing.len > 0:
+    missing.sort()
+    fail("archive has no external definitions for:\n  " & missing.join("\n  "))
+  createDir(output.parentDir)
+  if fileExists(output):
+    removeFile(output)
+  copyFile(input, output)
+
 proc promoteNativeArchive*(
     inputPath, outputPath: string, symbols: openArray[NativeExportSymbol]
 ) =
@@ -1204,6 +1261,8 @@ proc promoteNativeArchive*(
     promoteMachOArchive(inputPath, outputPath, symbols)
   elif defined(linux) or defined(freebsd):
     promoteElfArchive(inputPath, outputPath, symbols)
+  elif defined(windows):
+    promoteCoffArchive(inputPath, outputPath, symbols)
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)
 
@@ -1227,14 +1286,15 @@ proc linkMachODylib*(
   writeFile(runtimeSource, "int cmdCount;\nchar **cmdLine;\n")
   runProcess("clang", ["-c", "-fPIC", runtimeSource, "-o", runtimeObject])
   createDir(outputPath.parentDir)
-  var arguments = @[
-    "-dynamiclib",
-    "-Wl,-force_load," & normalizedAbsolutePath(archivePath),
-    runtimeObject,
-    "-Wl,-alias,_NimMain,_" & initSymbol,
-    "-Wl,-exported_symbols_list," & normalizedAbsolutePath(exportListPath),
-    "-Wl,-install_name," & dylibName,
-  ]
+  var arguments =
+    @[
+      "-dynamiclib",
+      "-Wl,-force_load," & normalizedAbsolutePath(archivePath),
+      runtimeObject,
+      "-Wl,-alias,_NimMain,_" & initSymbol,
+      "-Wl,-exported_symbols_list," & normalizedAbsolutePath(exportListPath),
+      "-Wl,-install_name," & dylibName,
+    ]
   arguments.add linkerArgs
   arguments.add ["-o", normalizedAbsolutePath(outputPath)]
   runProcess("clang", arguments)
@@ -1270,24 +1330,53 @@ INSERT AFTER .bss;
   )
   # Nim emits direct references for hidden definitions. Keep those references
   # locally bound after promoting the selected definitions to default visibility.
-  var arguments = @[
-    "-shared",
-    "-Wl,-z,defs",
-    "-Wl,-Bsymbolic",
-    "-Wl,--whole-archive",
-    normalizedAbsolutePath(archivePath),
-    "-Wl,--no-whole-archive",
-    "-Wl,--defsym=" & initSymbol & "=NimMain",
-    "-Wl,--version-script," & normalizedAbsolutePath(exportListPath),
-    "-Wl,-T," & normalizedAbsolutePath(runtimeScript),
-    "-Wl,-soname," & libraryName,
-    "-pthread",
-    "-ldl",
-    "-lm",
-  ]
+  var arguments =
+    @[
+      "-shared",
+      "-Wl,-z,defs",
+      "-Wl,-Bsymbolic",
+      "-Wl,--whole-archive",
+      normalizedAbsolutePath(archivePath),
+      "-Wl,--no-whole-archive",
+      "-Wl,--defsym=" & initSymbol & "=NimMain",
+      "-Wl,--version-script," & normalizedAbsolutePath(exportListPath),
+      "-Wl,-T," & normalizedAbsolutePath(runtimeScript),
+      "-Wl,-soname," & libraryName,
+      "-pthread",
+      "-ldl",
+      "-lm",
+    ]
   arguments.add linkerArgs
   arguments.add ["-o", normalizedAbsolutePath(outputPath)]
   runProcess("cc", arguments)
+
+proc linkWindowsDll*(
+    archivePath, outputPath, exportListPath, initSymbol: string,
+    linkerArgs: openArray[string] = [],
+) =
+  ## Links every archive member into a module-definition-filtered PE DLL.
+  discard initSymbol
+  let temporary = createTempDir("binny-native-runtime-", "")
+  defer:
+    removeDir(temporary)
+  let
+    runtimeSource = temporary / "runtime.c"
+    runtimeObject = temporary / "runtime.o"
+  writeFile(runtimeSource, "int cmdCount;\nchar **cmdLine;\n")
+  runProcess("gcc", ["-c", runtimeSource, "-o", runtimeObject])
+  createDir(outputPath.parentDir)
+  var arguments =
+    @[
+      "-shared",
+      "-Wl,--whole-archive",
+      normalizedAbsolutePath(archivePath),
+      "-Wl,--no-whole-archive",
+      runtimeObject,
+      normalizedAbsolutePath(exportListPath),
+    ]
+  arguments.add linkerArgs
+  arguments.add ["-o", normalizedAbsolutePath(outputPath)]
+  runProcess("gcc", arguments)
 
 proc linkNativeDynlib*(
     archivePath, outputPath, exportListPath, initSymbol: string,
@@ -1303,5 +1392,7 @@ proc linkNativeDynlib*(
     linkElfSharedLibrary(
       archivePath, outputPath, exportListPath, initSymbol, libraryName, linkerArgs
     )
+  elif defined(windows):
+    linkWindowsDll(archivePath, outputPath, exportListPath, initSymbol, linkerArgs)
   else:
     fail("native dynamic libraries are unsupported on " & hostOS)

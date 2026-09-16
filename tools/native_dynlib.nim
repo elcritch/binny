@@ -53,6 +53,11 @@ proc readExportList(path: string): NativeExportControl =
         let name = value[0 ..< value.high].strip
         if name.len > 0:
           result.addExport(name)
+  elif defined(windows):
+    for line in path.readFile.splitLines:
+      let value = line.strip
+      if value.len > 0 and value != "EXPORTS" and not value.startsWith("LIBRARY "):
+        result.addExport(value.split('=', 1)[0].strip)
   else:
     quit "native dynamic libraries are unsupported on " & hostOS
   if result.initSymbol.len == 0:
