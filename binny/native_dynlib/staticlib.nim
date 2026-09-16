@@ -1038,18 +1038,65 @@ proc recordedCCompileCommand(path: string): seq[string] =
     commandEnd = content.find(" */", commandStart)
   if commandEnd < 0:
     fail("generated C source has an incomplete compiler command: " & path)
-  result = parseCmdLine(content[commandStart ..< commandEnd].strip())
+  let commandText = content[commandStart ..< commandEnd].strip()
+  if commandText.startsWith("assembled by the link stage"):
+    # The incremental backend intentionally leaves the command assembly to
+    # Nim's link stage. The actual per-module passC directives are in the
+    # adjacent ``.cflags`` sidecar, so this comment is a sentinel rather than
+    # an executable command.
+    return
+  result = parseCmdLine(commandText)
   if result.len < 2:
     fail("generated C source has an invalid compiler command: " & path)
+
+proc recordedCCompileFlags(path: string): seq[string] =
+  let flagsPath = path & ".cflags"
+  if not fileExists(flagsPath):
+    return
+  for line in lines(flagsPath):
+    let separator = line.find('\t')
+    if separator < 0:
+      continue
+    let directive = line[0 ..< separator]
+    if directive in ["passc", "localpassc"] and separator + 1 < line.len:
+      result.add parseCmdLine(line[separator + 1 ..^ 1])
+
+proc incrementalCCompileCommand(nimcacheDir, source: string): seq[string] =
+  ## Reconstruct the small part of Nim's C command that the IC link stage
+  ## normally assembles. ``ic_build_args.txt`` is emitted with every IC
+  ## build and gives us the compiler's search paths; the sidecar supplies
+  ## module-specific ``passC`` directives that are not present in the C
+  ## placeholder comment.
+  let buildArgsPath = nimcacheDir / "ic_build_args.txt"
+  if not fileExists(buildArgsPath):
+    fail("incremental C source has no build arguments: " & buildArgsPath)
+
+  var includePaths: seq[string]
+  for line in lines(buildArgsPath):
+    let argument = line.strip()
+    if argument.startsWith("--path:"):
+      let includePath = argument["--path:".len ..^ 1]
+      if includePath.len > 0 and dirExists(includePath) and
+          includePath notin includePaths:
+        includePaths.add includePath
+  if includePaths.len == 0:
+    fail("incremental C source has no compiler search paths: " & buildArgsPath)
+
+  result = @["cc", "-c", "-w", "-fno-strict-aliasing", "-fPIC", "-pthread"]
+  result.add recordedCCompileFlags(source)
+  for includePath in includePaths:
+    result.add "-I" & normalizedAbsolutePath(includePath)
+  result.add [
+    "-o", normalizedAbsolutePath(source & ".o"), normalizedAbsolutePath(source)
+  ]
 
 proc compileElfPicObjects*(nimcacheDir: string) =
   ## Recompiles generated C using Nim's recorded per-file flags plus ``-fPIC``.
   ##
-  ## The incremental backend currently does not apply command-line ``passC``
-  ## options to its C compilation graph. Nim records the exact compiler command
-  ## in every generated C file, including module-specific pragma flags, so
-  ## replaying it preserves those flags while making the objects linkable into
-  ## an ELF shared library.
+  ## Normal C-backend files carry an exact compiler command in their header.
+  ## Incremental-backend files instead say that the command is assembled by
+  ## Nim's link stage; for those, reconstruct the command from the IC build
+  ## arguments and the module's ``.cflags`` sidecar.
   var sources: seq[string]
   for path in walkFiles(nimcacheDir / "*.c"):
     sources.add path
@@ -1060,10 +1107,14 @@ proc compileElfPicObjects*(nimcacheDir: string) =
   for source in sources:
     if getFileSize(source) == 0:
       continue
-    let command = recordedCCompileCommand(source)
-    var arguments = command[1 ..^ 1]
-    arguments.add "-fPIC"
-    runProcess(command[0], arguments)
+    let recordedCommand = recordedCCompileCommand(source)
+    if recordedCommand.len == 0:
+      let command = incrementalCCompileCommand(nimcacheDir, source)
+      runProcess(command[0], command[1 ..^ 1])
+    else:
+      var arguments = recordedCommand[1 ..^ 1]
+      arguments.add "-fPIC"
+      runProcess(recordedCommand[0], arguments)
 
 proc promoteMachOArchive*(
     inputPath, outputPath: string, symbols: openArray[NativeExportSymbol]
@@ -1168,14 +1219,13 @@ proc linkMachODylib*(
     else:
       "@rpath/" & outputPath.extractFilename
   createDir(outputPath.parentDir)
-  var arguments =
-    @[
-      "-dynamiclib",
-      "-Wl,-force_load," & normalizedAbsolutePath(archivePath),
-      "-Wl,-alias,_NimMain,_" & initSymbol,
-      "-Wl,-exported_symbols_list," & normalizedAbsolutePath(exportListPath),
-      "-Wl,-install_name," & dylibName,
-    ]
+  var arguments = @[
+    "-dynamiclib",
+    "-Wl,-force_load," & normalizedAbsolutePath(archivePath),
+    "-Wl,-alias,_NimMain,_" & initSymbol,
+    "-Wl,-exported_symbols_list," & normalizedAbsolutePath(exportListPath),
+    "-Wl,-install_name," & dylibName,
+  ]
   arguments.add linkerArgs
   arguments.add ["-o", normalizedAbsolutePath(outputPath)]
   runProcess("clang", arguments)
@@ -1211,22 +1261,21 @@ INSERT AFTER .bss;
   )
   # Nim emits direct references for hidden definitions. Keep those references
   # locally bound after promoting the selected definitions to default visibility.
-  var arguments =
-    @[
-      "-shared",
-      "-Wl,-z,defs",
-      "-Wl,-Bsymbolic",
-      "-Wl,--whole-archive",
-      normalizedAbsolutePath(archivePath),
-      "-Wl,--no-whole-archive",
-      "-Wl,--defsym=" & initSymbol & "=NimMain",
-      "-Wl,--version-script," & normalizedAbsolutePath(exportListPath),
-      "-Wl,-T," & normalizedAbsolutePath(runtimeScript),
-      "-Wl,-soname," & libraryName,
-      "-pthread",
-      "-ldl",
-      "-lm",
-    ]
+  var arguments = @[
+    "-shared",
+    "-Wl,-z,defs",
+    "-Wl,-Bsymbolic",
+    "-Wl,--whole-archive",
+    normalizedAbsolutePath(archivePath),
+    "-Wl,--no-whole-archive",
+    "-Wl,--defsym=" & initSymbol & "=NimMain",
+    "-Wl,--version-script," & normalizedAbsolutePath(exportListPath),
+    "-Wl,-T," & normalizedAbsolutePath(runtimeScript),
+    "-Wl,-soname," & libraryName,
+    "-pthread",
+    "-ldl",
+    "-lm",
+  ]
   arguments.add linkerArgs
   arguments.add ["-o", normalizedAbsolutePath(outputPath)]
   runProcess("cc", arguments)
