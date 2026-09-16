@@ -977,8 +977,9 @@ proc parseParam(declaration: Cursor): NativeParam =
   if not typeDesc.cursorIsNil:
     let typeIdNode = typeDesc.findChildKind(SymbolDef)
     let typeId = if typeIdNode.cursorIsNil: "" else: typeIdNode.symName
-    if typeId.startsWith("`t23."):
-      result.byVar = true
+    let modifierKind = typeOrdinal(typeId)
+    if modifierKind in [ord(tyVar), ord(tySink), ord(tyOwned), ord(tyLent)]:
+      result.byVar = modifierKind == ord(tyVar)
       let typeSymbol = typeDesc.findLastChildKind(Symbol)
       if not typeSymbol.cursorIsNil:
         result.typeSymbol = typeSymbol.symName
