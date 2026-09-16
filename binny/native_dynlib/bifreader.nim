@@ -3,7 +3,7 @@ import ./nif/[bif, nifcoreparse, nifqueries]
 import exportconfig
 import model
 import staticlib
-import "$nim" / compiler / [astdef, idents]
+import "$nim"/compiler/[astdef, idents]
 
 type
   NativeBifError* = object of ValueError
@@ -520,8 +520,7 @@ proc compilerSymStub(context: var CompilerTypeContext, symbol: string): PSym =
     return nil
   if symbol in context.symbols:
     return context.symbols[symbol]
-  result =
-    PSym(kindImpl: skStub, state: Complete, name: PIdent(s: symbolBase(symbol)))
+  result = PSym(kindImpl: skStub, state: Complete, name: PIdent(s: symbolBase(symbol)))
   context.symbols[symbol] = result
 
 proc scanCompilerTypeDefs(context: var CompilerTypeContext, node: Cursor)
@@ -1467,7 +1466,9 @@ proc normalizedAbsolutePath(path: string): string =
 
 proc pathIsWithin(path, root: string): bool =
   let relative = relativePath(path, root)
-  result = relative != ".." and not relative.startsWith(".." & $DirSep)
+  result =
+    not relative.isAbsolute and relative != ".." and
+    not relative.startsWith(".." & $DirSep)
 
 func bifIdentity(path: string): string =
   const suffix = ".s.bif"

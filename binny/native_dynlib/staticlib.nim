@@ -166,7 +166,9 @@ proc normalizedAbsolutePath(path: string): string =
 
 proc pathIsWithin(path, root: string): bool =
   let relative = relativePath(path, root)
-  result = relative != ".." and not relative.startsWith(".." & $DirSep)
+  result =
+    not relative.isAbsolute and relative != ".." and
+    not relative.startsWith(".." & $DirSep)
 
 proc readModuleSource(module: var BifModule): string =
   var cursor = module.buf.beginRead()
