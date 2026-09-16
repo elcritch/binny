@@ -59,6 +59,7 @@ type
     baseTypeSymbol*: string
     indexTypeSymbol*: string
     elementTypeSymbol*: string
+    arrayLength*: int64
     size*: int64
     alignment*: int64
     layoutFingerprint*: string

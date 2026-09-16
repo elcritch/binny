@@ -44,7 +44,9 @@ type
     packed: bool
     union: bool
     baseTypeSymbol: string
+    indexTypeSymbol: string
     elementTypeSymbol: string
+    arrayLength: int64
     enumValues: seq[NativeEnumValue]
     record: seq[NativeRecordPart]
 
@@ -102,10 +104,13 @@ func bifLayoutKind(symbol: string): string =
   of 22: "ref"
   of 23: "var"
   of 24: "sequence"
+  of 25: "proc"
   of 26: "pointer"
   of 27: "openarray"
   of 28: "string"
   of 29: "cstring"
+  of 49: "varargs"
+  of 50: "uncheckedarray"
   of 31: "int"
   of 32: "int8"
   of 33: "int16"
@@ -212,34 +217,68 @@ proc bifRecord(node: Cursor): seq[NativeRecordPart] =
     children.skip
 
 proc bifEnum(node: Cursor): seq[NativeEnumValue] =
+  let typeNode = node.findDescendantTag("type0")
+  if not typeNode.cursorIsNil:
+    let completeEnum = typeNode.findChildTag("enumty")
+    if not completeEnum.cursorIsNil:
+      return bifEnum(completeEnum)
+  var nextOrdinal: int64
   var children = node.childCursor()
   while children.hasMore:
-    if children.kind == TagLit and children.tagName == "sd" and
-        not children.findChildTag("enumfield").cursorIsNil:
-      var value = NativeEnumValue(ordinal: -1)
-      var fields = children.childCursor()
-      var sawMarker = false
-      var hasOrdinal = false
-      var integerIndex = 0
-      while fields.hasMore:
-        case fields.kind
-        of SymbolDef:
-          value.name = symbolBase(fields.symName)
-        of TagLit:
-          if fields.tagName == "enumfield":
-            sawMarker = true
-        of IntLit:
-          if sawMarker:
-            if integerIndex == 1:
-              value.ordinal = fields.intVal
-              hasOrdinal = true
-            inc integerIndex
-        else:
-          discard
-        fields.skip
-      if value.name.len > 0 and hasOrdinal:
-        result.add value
+    case children.kind
+    of Symbol:
+      if not children.symName.startsWith("`t"):
+        result.add NativeEnumValue(
+          name: symbolBase(children.symName), ordinal: nextOrdinal
+        )
+        inc nextOrdinal
+    of TagLit:
+      if children.tagName == "sd" and not children.findChildTag("enumfield").cursorIsNil:
+        var value = NativeEnumValue(ordinal: -1)
+        var fields = children.childCursor()
+        var sawMarker = false
+        var hasOrdinal = false
+        var integerIndex = 0
+        while fields.hasMore:
+          case fields.kind
+          of SymbolDef:
+            value.name = symbolBase(fields.symName)
+          of TagLit:
+            if fields.tagName == "enumfield":
+              sawMarker = true
+          of IntLit:
+            if sawMarker:
+              if integerIndex == 1:
+                value.ordinal = fields.intVal
+                hasOrdinal = true
+              inc integerIndex
+          else:
+            discard
+          fields.skip
+        if value.name.len > 0 and hasOrdinal:
+          result.add value
+          nextOrdinal = max(nextOrdinal, value.ordinal + 1)
+    else:
+      discard
     children.skip
+
+proc bifRangeLength(node: Cursor): int64 =
+  var bounds: seq[int64]
+  var children = node.childCursor()
+  while children.hasMore:
+    if children.kind == TagLit and children.tagName == "intlit":
+      let value = children.findLastChildKind(IntLit)
+      if not value.cursorIsNil:
+        bounds.add value.intVal
+    children.skip
+  if bounds.len >= 2 and bounds[^1] >= bounds[^2]:
+    let distance = uint64(bounds[^1]) - uint64(bounds[^2])
+    if distance < uint64(high(int64)):
+      result = int64(distance + 1)
+    else:
+      result = -1
+  else:
+    result = -1
 
 proc bifLayout(node: Cursor): AbiTypeEntry =
   var children = node.childCursor()
@@ -249,6 +288,7 @@ proc bifLayout(node: Cursor): AbiTypeEntry =
   result.kind = result.typeSymbol.bifLayoutKind
   result.size = -1
   result.alignment = -1
+  result.arrayLength = -1
   children.skip
 
   if children.hasMore:
@@ -271,6 +311,7 @@ proc bifLayout(node: Cursor): AbiTypeEntry =
     children.skip
 
   var tailTypes: seq[string]
+  var genericArguments: seq[string]
   var nestedLayouts: seq[AbiTypeEntry]
   var sawMetadataString = false
   while children.hasMore:
@@ -286,6 +327,23 @@ proc bifLayout(node: Cursor): AbiTypeEntry =
         result.record = bifRecord(children)
       of "enumty":
         result.enumValues = bifEnum(children)
+      of "range":
+        result.arrayLength = bifRangeLength(children)
+      of "genericargs":
+        var arguments = children.childCursor()
+        while arguments.hasMore:
+          case arguments.kind
+          of Symbol:
+            genericArguments.add arguments.symName
+          of TagLit:
+            if arguments.tagName == "td":
+              let nested = bifLayout(arguments)
+              if nested.typeSymbol.len > 0:
+                genericArguments.add nested.typeSymbol
+                nestedLayouts.add nested
+          else:
+            discard
+          arguments.skip
       of "td":
         let nested = bifLayout(children)
         if nested.typeSymbol.len > 0:
@@ -300,7 +358,9 @@ proc bifLayout(node: Cursor): AbiTypeEntry =
     let actual = nestedLayouts[^1]
     result.kind = actual.kind
     result.baseTypeSymbol = actual.baseTypeSymbol
+    result.indexTypeSymbol = actual.indexTypeSymbol
     result.elementTypeSymbol = actual.elementTypeSymbol
+    result.arrayLength = actual.arrayLength
     result.enumValues = actual.enumValues
     result.record = actual.record
     result.inheritable = actual.inheritable
@@ -312,12 +372,32 @@ proc bifLayout(node: Cursor): AbiTypeEntry =
       result.alignment = actual.alignment
   elif result.kind == "ref" and nestedLayouts.len > 0:
     result.elementTypeSymbol = nestedLayouts[^1].typeSymbol
+  elif result.kind == "array":
+    let arguments = if genericArguments.len > 0: genericArguments else: tailTypes
+    if arguments.len >= 2:
+      result.indexTypeSymbol = arguments[^2]
+      result.elementTypeSymbol = arguments[^1]
+    elif arguments.len > 0:
+      result.elementTypeSymbol = arguments[^1]
+    elif nestedLayouts.len > 0:
+      result.elementTypeSymbol = nestedLayouts[^1].typeSymbol
+    if result.indexTypeSymbol.len == 0:
+      for nested in nestedLayouts:
+        if nested.kind == "range":
+          result.indexTypeSymbol = nested.typeSymbol
+          break
+    if result.arrayLength < 0 and result.indexTypeSymbol.len > 0:
+      for nested in nestedLayouts:
+        if nested.typeSymbol == result.indexTypeSymbol and nested.kind == "range":
+          result.arrayLength = nested.arrayLength
+          break
   elif result.kind in [
-    "array", "distinct", "genericbody", "genericinvocation", "openarray", "range",
-    "sequence", "set", "string", "var",
+    "distinct", "genericbody", "genericinvocation", "openarray", "range", "sequence",
+    "set", "string", "uncheckedarray", "var", "varargs",
   ]:
-    if tailTypes.len > 0:
-      result.elementTypeSymbol = tailTypes[^1]
+    let arguments = if genericArguments.len > 0: genericArguments else: tailTypes
+    if arguments.len > 0:
+      result.elementTypeSymbol = arguments[^1]
     elif nestedLayouts.len > 0:
       result.elementTypeSymbol = nestedLayouts[^1].typeSymbol
   elif result.kind == "object" and tailTypes.len > 0:
@@ -350,12 +430,16 @@ proc mergeLayout(layouts: var Table[string, AbiTypeEntry], layout: AbiTypeEntry)
     merged.size = layout.size
   if merged.alignment < 0 and layout.alignment >= 0:
     merged.alignment = layout.alignment
+  if merged.arrayLength < 0 and layout.arrayLength >= 0:
+    merged.arrayLength = layout.arrayLength
   if merged.record.len == 0 and layout.record.len > 0:
     merged.record = layout.record
   if merged.enumValues.len == 0 and layout.enumValues.len > 0:
     merged.enumValues = layout.enumValues
   if merged.baseTypeSymbol.len == 0:
     merged.baseTypeSymbol = layout.baseTypeSymbol
+  if merged.indexTypeSymbol.len == 0:
+    merged.indexTypeSymbol = layout.indexTypeSymbol
   if merged.elementTypeSymbol.len == 0:
     merged.elementTypeSymbol = layout.elementTypeSymbol
   merged.inheritable = merged.inheritable or layout.inheritable
@@ -415,6 +499,7 @@ proc parseNativeType(
 ): bool =
   typ.size = -1
   typ.alignment = -1
+  typ.arrayLength = -1
   let sourceType = declaration.findChildTag("type0")
   if sourceType.cursorIsNil:
     return false
@@ -579,6 +664,11 @@ proc parseNativeProc(declaration: Cursor, abi: AbiProcEntry): NativeProc =
     if children.kind == Symbol:
       result.returnTypeSymbol = children.symName
       result.returnByVar = result.returnTypeSymbol.startsWith("`t23.")
+    elif children.kind == TagLit and children.tagName == "td":
+      let typeId = children.findChildKind(SymbolDef)
+      if not typeId.cursorIsNil:
+        result.returnTypeSymbol = typeId.symName
+        result.returnByVar = result.returnTypeSymbol.startsWith("`t23.")
     children.skip
   type IndexedParam = tuple[position: int, param: NativeParam]
 
@@ -656,6 +746,9 @@ proc applyLayout(typ: var NativeType, layouts: Table[string, AbiTypeEntry]): boo
       recordLayout.elementTypeSymbol in layouts:
     recordLayout = layouts[recordLayout.elementTypeSymbol]
   typ.baseTypeSymbol = recordLayout.baseTypeSymbol
+  if typ.kind == ntArray:
+    typ.indexTypeSymbol = declared.indexTypeSymbol
+    typ.arrayLength = declared.arrayLength
   if typ.kind != ntAlias:
     typ.elementTypeSymbol = declared.elementTypeSymbol
   typ.record = recordLayout.record
@@ -667,7 +760,9 @@ proc typeFromLayout(layout: AbiTypeEntry): NativeType =
   result.nifSymbol = layout.typeSymbol
   result.typeId = layout.typeSymbol
   result.baseTypeSymbol = layout.baseTypeSymbol
+  result.indexTypeSymbol = layout.indexTypeSymbol
   result.elementTypeSymbol = layout.elementTypeSymbol
+  result.arrayLength = layout.arrayLength
   result.size = layout.size
   result.alignment = layout.alignment
   result.layoutFingerprint = layout.layoutFingerprint
@@ -816,6 +911,7 @@ proc collectLayoutDependencies(
     return
   dependencies[layout.typeSymbol] = true
   addLayoutDependency(layout.baseTypeSymbol, layouts, dependencies)
+  addLayoutDependency(layout.indexTypeSymbol, layouts, dependencies)
   addLayoutDependency(layout.elementTypeSymbol, layouts, dependencies)
   collectRecordDependencies(layout.record, layouts, dependencies)
 
@@ -857,7 +953,10 @@ proc shouldSkipReferencedType(
   let layout = layouts[symbol]
   let usableUnknownLayout =
     layout.kind in ["openarray", "sequence", "set"] or
-    layout.kind in ["object", "tuple"] and layout.record.len > 0
+    layout.kind == "array" and (
+      layout.arrayLength >= 0 or
+      layout.indexTypeSymbol.len > 0 and layout.elementTypeSymbol.len > 0
+    ) or layout.kind in ["object", "tuple"] and layout.record.len > 0
   layout.size < 0 and not usableUnknownLayout or
     layout.kind in ["genericbody", "genericinvocation"]
 
@@ -917,6 +1016,7 @@ proc collectReferencedLayoutDependencies(
     skipInternal: Table[string, bool],
 ) =
   collectReferencedType(layout.baseTypeSymbol, layouts, requiredTypes, skipInternal)
+  collectReferencedType(layout.indexTypeSymbol, layouts, requiredTypes, skipInternal)
   collectReferencedType(layout.elementTypeSymbol, layouts, requiredTypes, skipInternal)
   collectReferencedRecordDependencies(
     layout.record, layouts, requiredTypes, skipInternal
@@ -1275,8 +1375,11 @@ proc buildNativeApi(
     let hasMissingTupleFields =
       layout.kind == "tuple" and layout.size > 0 and layout.record.len == 0
     if layout.typeSymbol notin represented and (
-      layout.size >= 0 or layout.kind in ["openarray", "sequence", "set"] or
-      layout.kind in ["object", "tuple"] and layout.record.len > 0
+      layout.size >= 0 or layout.arrayLength >= 0 or
+      layout.kind == "array" and layout.indexTypeSymbol.len > 0 and
+      layout.elementTypeSymbol.len > 0 or layout.kind in [
+        "openarray", "sequence", "set"
+      ] or layout.kind in ["object", "tuple"] and layout.record.len > 0
     ) and layout.kind.isMaterializedKind and layout.typeSymbol in requiredTypes and
         not hasUnresolvedElement and not hasMissingTupleFields:
       if layout.typeSymbol in preferredLayoutNames:
