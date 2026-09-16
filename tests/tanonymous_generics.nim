@@ -2,15 +2,6 @@ import std/[assertions, os, osproc, strutils, tempfiles]
 import binny/native_dynlib
 import binny/native_dynlib/staticlib
 
-proc quoteShell(value: string): string =
-  result = "'"
-  for character in value:
-    if character == '\'':
-      result.add "'\"'\"'"
-    else:
-      result.add character
-  result.add "'"
-
 proc run(arguments: openArray[string]): string =
   var command: seq[string]
   for argument in arguments:
@@ -24,7 +15,7 @@ proc supportsBif(compiler: string): bool =
   result =
     (defined(macosx) or defined(linux) or defined(freebsd) or defined(windows)) and
     help.exitCode == 0 and "--genBif:on|off" in help.output and
-    fileExists(compiler.parentDir / "nifler")
+    fileExists(compiler.parentDir / ("nifler" & ExeExt))
 
 when defined(macosx) or defined(linux) or defined(freebsd) or defined(windows):
   let compiler = getCurrentCompilerExe()
