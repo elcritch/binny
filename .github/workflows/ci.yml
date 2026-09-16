@@ -101,8 +101,22 @@ jobs:
         if: runner.os == 'Windows'
         env:
           GRABNIM_GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          winpty -Xallow-non-tty grabnim devel
+          archive="$RUNNER_TEMP/windows_x64.zip"
+          extracted="$RUNNER_TEMP/nim-devel-extracted"
+          curl --fail --location --silent --show-error \
+            https://github.com/nim-lang/nightlies/releases/download/latest-devel/windows_x64.zip \
+            --output "$archive"
+          digest="$(gh api repos/nim-lang/nightlies/releases/tags/latest-devel \
+            --jq '.assets[] | select(.name == "windows_x64.zip") | .digest')"
+          printf '%s  %s\n' "${digest#sha256:}" "$archive" | sha256sum --check -
+          mkdir -p "$extracted"
+          unzip -q "$archive" -d "$extracted"
+          grabnim_root="$(cygpath -u "$LOCALAPPDATA")/grabnim"
+          mkdir -p "$grabnim_root"
+          mv "$extracted"/nim-* "$grabnim_root/nim-devel"
+          grabnim devel
           nim_root="$(grabnim path devel | tr -d '\r\"')"
           nim_root="$(cygpath -u "$nim_root")"
           export PATH="/c/msys64/mingw64/bin:$nim_root/bin:$PATH"
