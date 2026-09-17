@@ -90,7 +90,8 @@ proc instantiatedFrom*(declaration: Cursor): string =
   if parts.len >= 3 and parts[^2].kind == Symbol:
     result = parts[^2].symName
 
-proc declarationType(declaration: Cursor): string =
+proc declarationType*(declaration: Cursor): string =
+  ## Resolves a declaration's type identity, including references to shared types.
   let descriptor = declaration.findChildTag("td")
   if not descriptor.cursorIsNil:
     return descriptor.typeSymbol
@@ -103,7 +104,8 @@ proc declarationType(declaration: Cursor): string =
 proc genericParameters(evidence: GenericEvidence, declaration: Cursor): seq[string] =
   var routine = declaration.childCursor()
   while routine.hasMore:
-    if routine.kind != TagLit or routine.tagName notin ["proc", "func", "method", "converter"]:
+    if routine.kind != TagLit or
+        routine.tagName notin ["proc", "func", "method", "converter", "iterator"]:
       routine.skip
       continue
     let parameters = routine.findChildTag("genericparams")
@@ -265,6 +267,15 @@ proc signatureKey*(evidence: GenericEvidence, declaration: Cursor): string =
     let limit = typ.sons.len - ord(typ.kind == tyGenericInst)
     for index in 0..<limit:
       result.add "[" & identity(typ.sons[index]) & "]"
+  let descriptor = declaration.findChildTag("td")
+  if descriptor.cursorIsNil:
+    let type_id = declaration.declarationType
+    if type_id notin evidence.types or evidence.types[type_id].kind != tyProc:
+      fail("missing compiler routine type for " & declaration.findChildKind(SymbolDef).symName)
+    let typ = evidence.types[type_id]
+    for index in 1..<typ.sons.len:
+      result.add "\x1f" & identity(typ.sons[index])
+    return
   let owner = declaration.findChildKind(SymbolDef).symName
   var params: seq[tuple[position: int, typ: string]]
   proc collect(node: Cursor) =
@@ -282,6 +293,6 @@ proc signatureKey*(evidence: GenericEvidence, declaration: Cursor): string =
       while child.hasMore:
         collect(child)
         child.skip
-  collect(declaration.findChildTag("td").findChildTag("formalparams"))
+  collect(descriptor.findChildTag("formalparams"))
   params.sort(proc(a, b: tuple[position: int, typ: string]): int = cmp(a.position, b.position))
   for param in params: result.add "\x1f" & param.typ

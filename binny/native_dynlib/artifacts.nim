@@ -111,7 +111,7 @@ proc knownProcTypeExpression(
       if param.name.len > 0: nimIdentifier(param.name) else: "arg" & $index
     let modifier = if param.byVar: "var " elif param.bySink: "sink " else: ""
     parts.add paramName & ": " & modifier & typeExpression
-  result = "proc(" & parts.join("; ") & ")"
+  result = (if procInfo.iteratorRoutine: "iterator(" else: "proc(") & parts.join("; ") & ")"
   if procInfo.returnTypeSymbol.len > 0:
     let returnType = knownTypeExpression(procInfo.returnTypeSymbol, names)
     if returnType.len == 0:
@@ -121,6 +121,9 @@ proc knownProcTypeExpression(
     result.add ": " & modifier & returnType
   if procInfo.callConv.len > 0:
     result.add " {." & procInfo.callConv & ".}"
+  if procInfo.iteratorRoutine:
+    # Keep iterator-type pragmas separate from an enclosing factory routine.
+    result = "(" & result & ")"
 
 proc typeSize(api: NativeApi, symbol: string): int64 =
   for candidate in api.types:
@@ -685,6 +688,17 @@ proc params(procInfo: NativeProc, names: Table[string, string]): string =
         nimType(param.typeSymbol, names)
   result = parts.join("; ")
 
+proc iteratorLocalName(proc_info: NativeProc, stem: string): string =
+  result = stem
+  while proc_info.params.anyIt(cmpIgnoreStyle(it.name, result) == 0):
+    result.add "Local"
+
+proc returnDeclaration(proc_info: NativeProc, names: Table[string, string]): string =
+  let return_type = nimType(proc_info.returnTypeSymbol, names)
+  if return_type.len > 0:
+    result = ": " & (if proc_info.returnByVar: "var "
+                     elif proc_info.returnByLent: "lent " else: "") & return_type
+
 proc generateNativeModule*(
     api: NativeApi, libraryOverride = "", libraryNameStrdefine = false
 ): string =
@@ -724,10 +738,19 @@ proc generateNativeModule*(
   result.add " = " & libraryName.escape & "\n\n"
   result.add generateTypes(api, names)
   result.add generateStaticChecks(api, names)
+  for index, procInfo in api.procs:
+    if procInfo.iteratorRoutine:
+      var formals = params(procInfo, names)
+      if not procInfo.closureEnv:
+        if formals.len > 0: formals.add "; "
+        formals.add iteratorLocalName(procInfo, "binnyStop") & ": bool"
+      result.add "type BinnyIterator" & $index & " = iterator(" & formals &
+        ")" & returnDeclaration(procInfo, names) & " {.closure.}\n\n"
   result.add "proc nativeNimMain() {.cdecl, importc: " & api.initSymbol.escape &
     ", dynlib: nativeLibrary.}\n\n"
   result.add "nativeNimMain()\n"
-  result.add "\n{.push nimcall, dynlib: nativeLibrary.}\n"
+  # A pushed nimcall would also override nested closure iterator types.
+  result.add "\n{.push dynlib: nativeLibrary.}\n"
 
   for typ in api.types:
     if not typ.opaque:
@@ -747,19 +770,13 @@ proc generateNativeModule*(
     result.add "  " & prefix & "Destroy(addr value)\n"
     result.add "proc `=copy`(dest: var " & storage & "; source: " & storage & ") =\n"
     result.add "  " & prefix & "Copy(addr dest, unsafeAddr source)\n"
-    result.add "\n{.push nimcall, dynlib: nativeLibrary.}\n"
+    result.add "\n{.push dynlib: nativeLibrary.}\n"
     result.add "doAssert sizeof(" & storage & ") == " & prefix & "Size()\n"
     result.add "doAssert alignof(" & storage & ") == " & prefix & "Alignment()\n"
 
   for hook in api.hooks:
     let procInfo = hook.procInfo
-    let returnType = nimType(procInfo.returnTypeSymbol, names)
-    let returnDecl =
-      if returnType.len == 0:
-        ""
-      else:
-        ": " & (if procInfo.returnByVar: "var "
-                elif procInfo.returnByLent: "lent " else: "") & returnType
+    let returnDecl = returnDeclaration(procInfo, names)
     let formals = params(procInfo, names)
     if hook.status == nhCustom:
       result.add "\nproc " & nimIdentifier(hook.kind) & "(" & formals & ")" & returnDecl &
@@ -768,19 +785,41 @@ proc generateNativeModule*(
       result.add "\nproc " & nimIdentifier(hook.kind) & "(" & formals & ")" & returnDecl &
         " {.error.}\n"
 
-  for procInfo in api.procs:
-    let returnType = nimType(procInfo.returnTypeSymbol, names)
-    let returnDecl =
-      if returnType.len == 0:
-        ""
-      else:
-        ": " & (if procInfo.returnByVar: "var "
-                elif procInfo.returnByLent: "lent " else: "") & returnType
+  for index, procInfo in api.procs:
+    let returnDecl = returnDeclaration(procInfo, names)
     let formals = params(procInfo, names)
-    result.add "\nproc " & nimIdentifier(procInfo.name) & "*(" & formals & ")" &
-      returnDecl
-    result.add " {.importc: " & procInfo.cSymbol.escape
-    if procInfo.discardable:
-      result.add ", discardable"
-    result.add ".}\n"
+    if procInfo.iteratorRoutine:
+      let factory = "binnyIteratorFactory" & $index
+      result.add "\nproc " & factory & "(): BinnyIterator" & $index &
+        " {.importc: " & procInfo.cSymbol.escape & ".}\n"
+    else:
+      result.add "\nproc " & nimIdentifier(procInfo.name) & "*(" & formals & ")" & returnDecl
+      result.add " {.importc: " & procInfo.cSymbol.escape
+      if procInfo.discardable:
+        result.add ", discardable"
+      result.add ".}\n"
   result.add "\n{.pop.}\n"
+  for index, procInfo in api.procs:
+    if procInfo.iteratorRoutine:
+      let return_decl = returnDeclaration(procInfo, names)
+      let state = iteratorLocalName(procInfo, "binnyIterator")
+      let value = iteratorLocalName(procInfo, "binnyValue")
+      var arguments = procInfo.params.mapIt(nimIdentifier(it.name)).join(", ")
+      result.add "\niterator " & nimIdentifier(procInfo.name) & "*(" &
+        params(procInfo, names) & ")" & return_decl
+      if procInfo.closureEnv:
+        result.add " {.closure.}"
+      result.add " =\n  let " & state & " = binnyIteratorFactory" & $index & "()\n"
+      if not procInfo.closureEnv:
+        if arguments.len > 0: arguments.add ", "
+        # Resume once with cancellation to unwind the producer's inline loop,
+        # including its defer/finally blocks, when the consumer exits early.
+        result.add "  try:\n    for " & value & " in " & state & "(" & arguments & "false):\n"
+        result.add "      yield " & value & "\n  finally:\n    if not finished(" & state & "):\n"
+        result.add "      discard " & state & "(" & arguments & "true)\n"
+      elif return_decl.len == 0:
+        result.add "  while true:\n    " & state & "(" & arguments & ")\n"
+        result.add "    if finished(" & state & "): break\n    yield\n"
+      else:
+        result.add "  for " & value & " in " & state & "(" & arguments & "):\n"
+        result.add "    yield " & value & "\n"

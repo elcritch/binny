@@ -1,6 +1,7 @@
 import std/[algorithm, os, sequtils, strutils, tables]
 import ./nif/[bif, nifcoreparse, nifqueries]
 import exportconfig
+import genericexports
 import model
 import staticlib
 import "$nim"/compiler/[astdef, idents]
@@ -614,6 +615,7 @@ proc compilerProcInfo(
   result.nifSymbol = symbol
   result.callConv = compilerCallConvName(typ.callConvImpl)
   result.closureEnv = typ.callConvImpl == ccClosure
+  result.iteratorRoutine = tfIterator in typ.flagsImpl
   result.varargs = tfVarargs in typ.flagsImpl
   if typ.sonsImpl.len > 0:
     result.returnTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[0])
@@ -1189,12 +1191,32 @@ proc parseParamPosition(declaration: Cursor): int =
     children.skip
   fail("missing parameter position metadata")
 
-proc parseNativeProc(declaration: Cursor, abi: AbiProcEntry): NativeProc =
+proc parseNativeProc(declaration: Cursor, abi: AbiProcEntry,
+    layouts: Table[string, AbiTypeEntry]): NativeProc =
   result.name = symbolBase(abi.nifSymbol)
   result.nifSymbol = abi.nifSymbol
   result.cSymbol = abi.cSymbol
   result.returnLowering = abi.returnLowering
   result.callConv = "nimcall"
+  result.iteratorRoutine = not declaration.findChildTag("iterator").cursorIsNil
+  let descriptor = declaration.findChildTag("td")
+  let proc_type = declaration.declarationType
+  if descriptor.cursorIsNil and proc_type in layouts:
+    let signature = layouts[proc_type].procInfo
+    result.params = signature.params
+    result.returnTypeSymbol = signature.returnTypeSymbol
+    result.returnByVar = signature.returnByVar
+    result.returnByLent = signature.returnByLent
+    result.closureEnv = signature.closureEnv
+    result.discardable = declaration.hasDescendantIdent("discardable")
+    return
+  if result.iteratorRoutine:
+    if not descriptor.cursorIsNil:
+      var part = descriptor.childCursor()
+      while part.hasMore:
+        if part.kind == Ident and part.strVal == "closure":
+          result.closureEnv = true
+        part.skip
   result.discardable = declaration.hasDescendantIdent("discardable")
   let formals = declaration.findDescendantTag("formalparams")
   if formals.cursorIsNil:
@@ -1944,7 +1966,7 @@ proc buildNativeApi(
     let declaration = findSemanticDeclaration(modules, item.nifSymbol)
     if declaration.cursorIsNil:
       fail("semantic declaration not found for " & item.nifSymbol)
-    var semantic = parseNativeProc(declaration, item)
+    var semantic = parseNativeProc(declaration, item, layouts)
     let descriptor = declaration.findChildTag("td")
     if not descriptor.cursorIsNil:
       let proc_type = descriptor.findChildKind(SymbolDef).symName
@@ -2325,7 +2347,7 @@ proc buildNativeApi(
     let declaration = findSemanticDeclaration(modules, nifSymbol)
     if declaration.cursorIsNil:
       fail("semantic declaration not found for " & nifSymbol)
-    var routine = parseNativeProc(declaration, item)
+    var routine = parseNativeProc(declaration, item, layouts)
     routine.returnTypeSymbol = item.resolvedReturnTypeSymbol
     routine.returnByVar = typeOrdinal(routine.returnTypeSymbol) == ord(tyVar)
     routine.returnByLent = typeOrdinal(routine.returnTypeSymbol) == ord(tyLent)
@@ -2344,6 +2366,7 @@ proc buildNativeApi(
         AbiProcEntry(
           nifSymbol: item.nifSymbol, cSymbol: item.cSymbol, returnLowering: nlDirect
         ),
+        layouts,
       ),
     )
 

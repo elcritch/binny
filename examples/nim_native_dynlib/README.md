@@ -188,7 +188,7 @@ regular C backend is the default:
    closure and C emission. With `nim c`, Binny generates a temporary root
    module; with `nim ic`, it updates the backend roots directly. The C root
    imports the original producer even for dependency-only exports, and emits
-   out-of-line thunks for selected inline routines.
+   out-of-line thunks for selected inline routines and factories for iterators.
 5. On Linux and FreeBSD, the emitted C is recompiled as position-independent
    code before the generated objects are collected into
    `libproducer.private.a`.
@@ -240,6 +240,24 @@ Sets, tables, and deques also reuse their standard-library declarations without
 `typeImports` entries, including instances appearing only in routine signatures
 or nested inside other containers.
 
+Public regular and closure iterators are supported with the regular C backend.
+They use the same `includeProcs`, `excludeProcs`, and concrete generic `typeArgs`
+selectors as procedures. The generated client API still declares `iterator`,
+so normal `for value in values(...)` loops work without importing the producer.
+Closure iterators retain `{.closure.}`, direct resumable calls, and `finished()`.
+Iterator types in procedure signatures are also preserved.
+
+Regular iterators use a private factory that creates a closure state machine.
+Each loop advances lazily to the next `yield`; results are not collected into a
+sequence. This adds a state allocation and a function call per advance. The
+adapter preserves `var` yields, open arrays, and `sink` parameters. On early
+`break`, return, or a consumer exception, it resumes once in cancellation mode
+to unwind the producer's loop and run its `defer`/`finally` cleanup without
+consuming the remaining values. Closure iterators keep Nim's usual closure
+lifetime and cleanup behavior. These bindings are runtime iterators; they cannot
+be evaluated at compile time. Incremental (`nim ic`) iterator exports currently
+report an error; use the regular C backend for an API containing iterators.
+
 Range bindings preserve the resolved bounds and base type, including signed and
 unsigned integers, chars, enums, and floats. Typed buffers retain their
 `ptr UncheckedArray[T]` element type; pointers remain borrowed raw storage, so the
@@ -262,6 +280,9 @@ buffers, and sink/lent ownership behavior with both backends under ARC and ORC.
 `tests/tnative_dynlib_c_exports.nim` covers clean two-pass C builds, stale
 artifacts, same-named modules, overloads, inline calls, and dependency-only
 producer initialization under ARC with `useMalloc`.
+`tests/tnative_dynlib_iterators.nim` covers regular and closure iterators, concrete
+generics, independent state, lazy execution, early-exit cleanup, ownership,
+mutable yields, and dependency-free consumers under ARC and ORC.
 
 The build helper records its exact C manifest automatically. When calling
 `prepareNativeRoutines` directly with multiple build descriptions in one cache,

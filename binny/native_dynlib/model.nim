@@ -107,6 +107,7 @@ type
     returnLowering*: NativeLoweringMode
     callConv*: string
     closureEnv*: bool
+    iteratorRoutine*: bool
     varargs*: bool
     discardable*: bool
     params*: seq[NativeParam]

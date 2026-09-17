@@ -23,6 +23,7 @@ type
     ## declaration for ABI signature reconstruction and export selection.
     backendNifSymbol*: string
     cSymbol*: string
+    iteratorRoutine*: bool
     inlineRoutine: bool
     sourceLine, sourceColumn: int
     genericArguments: seq[string]
@@ -49,7 +50,7 @@ type
     flags: string
 
 const
-  routineKinds = ["proc", "func", "method", "converter"]
+  routineKinds = ["proc", "func", "method", "converter", "iterator"]
   hookKinds = ["=destroy", "=copy", "=dup", "=sink", "=trace", "=wasMoved"]
   machMagic64 = 0xfeedfacf'u32
   loadCommandSymtab = 0x2'u32
@@ -513,6 +514,7 @@ proc publicRoutineSymbols*(
           sourcePath: absoluteSource, nifSymbol: name,
           backendNifSymbol: methodDispatcherSymbol(declaration),
           inlineRoutine: inlineRoutine,
+          iteratorRoutine: not declaration.findChildTag("iterator").cursorIsNil,
           sourceLine: int(position.line), sourceColumn: int(position.col),
         )
   var generic_instances: seq[NativeExportSymbol]
@@ -523,6 +525,7 @@ proc publicRoutineSymbols*(
         sourcePath: generic_origins[instance.origin], nifSymbol: instance.symbol,
         genericOrigin: instance.origin, sourceLine: int(position.line),
         sourceColumn: int(position.col),
+        iteratorRoutine: not instance.declaration.findChildTag("iterator").cursorIsNil,
       )
   if generic_instances.len > 0:
     # Determine selected origins before resolving types from dependency BIFs.
@@ -844,7 +847,8 @@ proc cFunctionDefinitions(path: string): seq[string] =
   for index, token in tokens:
     if depth == 0 and (
       token.cTokenPrefix.len > 0 or token.startsWith("binny_inline_") or
-      token.startsWith("binny_generic_") or token.startsWith("binny_opaque_")
+      token.startsWith("binny_generic_") or token.startsWith("binny_opaque_") or
+      token.startsWith("binny_iterator_")
     ):
       var position = index + 1
       # Nim's N_NIMCALL/N_INLINE macros place the name inside their parentheses.
@@ -981,8 +985,9 @@ proc writeCBackendRoot(
 ): JsonNode =
   result = newJObject()
   for routine in routines:
-    if routine.inlineRoutine or routine.genericOrigin.len > 0:
-      let prefix = if routine.genericOrigin.len > 0: "binny_generic_" else: "binny_inline_"
+    if routine.iteratorRoutine or routine.inlineRoutine or routine.genericOrigin.len > 0:
+      let prefix = if routine.iteratorRoutine: "binny_iterator_"
+                   elif routine.genericOrigin.len > 0: "binny_generic_" else: "binny_inline_"
       result[routine.thunkKey] = % (prefix & routine.nifSymbol.mangleCName)
   var routineNamesBySource: Table[string, seq[string]]
   # Import the producer even when the selected API consists only of dependencies.
@@ -1034,6 +1039,42 @@ proc binnyInlineThunk(symbol: NimNode, exportName: string): NimNode {.compileTim
              else: newTree(nnkReturnStmt, invocation)
   result = newTree(nnkProcDef, ident(exportName), newEmptyNode(), newEmptyNode(),
     parameters, pragmas, newEmptyNode(), newStmtList(body))
+
+proc binnyIteratorFactory(symbol: NimNode, exportName: string): NimNode {.compileTime.} =
+  let signature = symbol.getTypeInst
+  let parameters = signature[0].copyNimTree
+  var closureIterator = false
+  for pragma in signature[1]:
+    if pragma.eqIdent("closure"):
+      closureIterator = true
+  var invocation = newCall(symbol)
+  for index in 1..<parameters.len:
+    let parameter = parameters[index]
+    for nameIndex in 0..<parameter.len - 2:
+      let argument = genSym(nskParam, "argument" & $(invocation.len - 1))
+      parameter[nameIndex] = argument
+      invocation.add argument
+    parameter[^1] = newEmptyNode()
+  let stop = genSym(nskParam, "binnyStop")
+  if not closureIterator:
+    parameters.add newIdentDefs(stop, bindSym("bool"))
+  let iteratorType = newTree(nnkIteratorTy, parameters.copyNimTree,
+    newTree(nnkPragma, ident("closure")))
+  let item = genSym(nskForVar, "item")
+  let resume = genSym(nskIterator, "resume")
+  let body = newTree(nnkForStmt, item, invocation,
+    newStmtList(newTree(nnkYieldStmt, item),
+      newTree(nnkIfStmt, newTree(nnkElifBranch, stop,
+        newStmtList(newTree(nnkBreakStmt, newEmptyNode()))))))
+  let iteratorDef = newTree(nnkIteratorDef, resume, newEmptyNode(), newEmptyNode(),
+    parameters, newTree(nnkPragma, ident("closure")), newEmptyNode(), body)
+  result = newTree(nnkProcDef, ident(exportName), newEmptyNode(), newEmptyNode(),
+    newTree(nnkFormalParams, iteratorType),
+    newTree(nnkPragma, ident("used"), ident("noinline"),
+      newColonExpr(ident("exportc"), newLit(exportName))), newEmptyNode(),
+    newStmtList(iteratorDef, newTree(nnkReturnStmt, resume)))
+  if closureIterator:
+    result[^1] = newStmtList(newTree(nnkReturnStmt, symbol))
 
 """
   for index, source in sources:
@@ -1105,19 +1146,20 @@ proc binnyInlineThunk(symbol: NimNode, exportName: string): NimNode {.compileTim
       content.add "    if implementation.lineInfoObj.filename == " &
         source.nimStringLiteral & " and\n"
       content.add "        implementation.kind in {nnkProcDef, nnkFuncDef, " &
-        "nnkMethodDef, nnkConverterDef, nnkIteratorDef} and\n"
+        "nnkMethodDef, nnkConverterDef} and\n"
       content.add "        implementation[2].kind == nnkEmpty:\n"
       content.add "      result.add newLetStmt(genSym(nskLet, " &
         "\"binnyRoot\"), symbol)\n"
       content.add "\n" & keepMacro & "()\n"
 
   for index, routine in routines:
-    if routine.inlineRoutine or routine.genericOrigin.len > 0:
+    if routine.iteratorRoutine or routine.inlineRoutine or routine.genericOrigin.len > 0:
       let
         source = normalizedAbsolutePath(routine.sourcePath)
         name = routine.nifSymbol.semanticName
         keepMacro = "binnyExportInline" & $index
         exportName = result[routine.thunkKey].getStr
+        thunk_builder = if routine.iteratorRoutine: "binnyIteratorFactory" else: "binnyInlineThunk"
       content.add "\nmacro " & keepMacro & "(): untyped =\n"
       content.add "  result = newStmtList()\n"
       content.add "  for symbol in bindSym(" & name.nimStringLiteral & ", brForceOpen):\n"
@@ -1136,17 +1178,18 @@ proc binnyInlineThunk(symbol: NimNode, exportName: string): NimNode {.compileTim
         content.add "      result.add newCall(bindSym(" & specialization_macro.nimStringLiteral &
           "), specialization)\n"
       else:
-        content.add "      result.add binnyInlineThunk(symbol, " &
+        content.add "      result.add " & thunk_builder & "(symbol, " &
           exportName.nimStringLiteral & ")\n"
       content.add "  if result.len != 1:\n"
-      content.add "    error(" & ("cannot identify inline export " &
+      content.add "    error(" & ("cannot identify native export " &
         routine.nifSymbol).nimStringLiteral & ")\n"
       if routine.genericOrigin.len > 0:
         let specialization_macro = "binnySpecialize" & $index
         # Place the typed helper before the macro that binds it.
         let insertion = content.rfind("\nmacro " & keepMacro)
         content.insert("\nmacro " & specialization_macro & "(symbol: typed): untyped =\n" &
-          "  result = binnyInlineThunk(symbol, " & exportName.nimStringLiteral & ")\n", insertion)
+          "  result = " & thunk_builder & "(symbol, " & exportName.nimStringLiteral & ")\n",
+          insertion)
       content.add "\n" & keepMacro & "()\n"
 
   var typeHooks: Table[string, seq[NativeHookSymbol]]
@@ -1208,6 +1251,9 @@ proc rootPublicRoutines*(
   ## Run this after the first ``nim ic`` backend pass. Running ``nim ic`` again
   ## then recomputes DCE and emits the public routines plus their dependencies.
   var exports = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig, mainSource)
+  for symbol in exports:
+    if symbol.iteratorRoutine:
+      fail("native iterator exports currently require the normal C backend: " & symbol.nifSymbol)
   for hook in nativeHookSymbols(nimcacheDir, sourceRoot):
     if not hook.forbidden:
       exports.add NativeExportSymbol(
@@ -1273,6 +1319,7 @@ proc prepareNativeRoutines*(
   ## C builds receive a generated module that takes the address of each public
   ## routine and exercises required ownership hooks in an uncalled helper.
   ## Inline routines receive out-of-line thunks with their original signatures.
+  ## Iterators receive factories for independent, lazy closure state machines.
   ## ``cBuildManifest`` selects the compiler JSON build description explicitly
   ## when the cache contains more than one; otherwise it must be unambiguous.
   if cBuildManifest.len == 0 and nimcacheDir.hasIncrementalCArtifacts:

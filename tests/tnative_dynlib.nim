@@ -225,7 +225,7 @@ block generated_module_allows_an_initializer_only_api:
   )
   doAssert "proc nativeNimMain()" in generated
   doAssert "nativeNimMain()" in generated
-  doAssert "{.push nimcall, dynlib: nativeLibrary.}" in generated
+  doAssert "{.push dynlib: nativeLibrary.}" in generated
 
 block generated_module_checks_runtime_configuration:
   let temporary = createTempDir("binny-native-runtime-checks-", "")
@@ -693,12 +693,12 @@ block generated_module_directly_imports_procs:
     procs: @[NativeProc(name: "ping", cSymbol: "ping")],
   )
   let generated = generateNativeModule(api)
-  doAssert "{.push nimcall, dynlib: nativeLibrary.}" in generated
+  doAssert "{.push dynlib: nativeLibrary.}" in generated
   doAssert "proc ping*() {.importc: \"ping\".}" in generated
   doAssert "initNativeLibrary" notin generated
   doAssert "proc nativeNimMain() {.cdecl, importc: " &
     "\"libsample_NimMain_pro47ngcy1\", dynlib: nativeLibrary.}" in generated
-  doAssert "nativeNimMain()\n\n{.push nimcall, dynlib: nativeLibrary.}" in generated
+  doAssert "nativeNimMain()\n\n{.push dynlib: nativeLibrary.}" in generated
   doAssert "{.pop.}" in generated
   doAssert "nativeRaw" notin generated
 
