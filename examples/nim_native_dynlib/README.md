@@ -166,8 +166,19 @@ symbols the dylib exposes.
   generics, imported declarations, and local-only inline definitions are not
   promoted.
 - Generated bindings cover the concrete types exercised here: objects, refs,
-  inheritance, case and packed objects, aliases, sequences, `OrderedTable`,
-  tuples, open arrays, and custom or forbidden ownership hooks.
+  inheritance, case and packed objects, aliases, sequences, `Table`,
+  `OrderedTable`, `Option`, tuples, open arrays, and custom or forbidden ownership
+  hooks.
+
+Selected public methods export Nim's dispatcher, so a consumer call reaches
+the producer's runtime-specific override rather than calling only the base
+implementation. Standard-library container instances reuse their local Nim
+declarations; their concrete argument types are reconstructed as needed.
+Reconstructed dependency types do not require importing their original module
+into the consumer. Polymorphic refs must be constructed by the producer to
+retain the runtime type information used by its dispatcher.
 
 The integration test in `tests/tnative_staticlib.nim` builds a fresh fixture,
 generates bindings from BIF and C NIF, and runs a separate Nim consumer.
+`tests/tnative_dynlib_methods.nim` checks dispatch, container fields, callbacks,
+and dependency-free consumer bindings with both compiler backends.

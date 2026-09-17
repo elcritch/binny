@@ -100,6 +100,7 @@ proc bifField(node: Cursor): NativeField =
     children.skip
 
   var sawMarker = false
+  var sawMagic = false
   var sawFlags = false
   var integerIndex = 0
   while children.hasMore:
@@ -124,6 +125,13 @@ proc bifField(node: Cursor): NativeField =
         if integerIndex == 0:
           result.offset = children.intVal
         inc integerIndex
+    of DotToken:
+      if sawMarker:
+        if not sawMagic:
+          sawMagic = true
+        elif not sawFlags:
+          # Tuple fields can have no flags; their flag slot is still present.
+          sawFlags = true
     else:
       discard
     children.skip
@@ -135,6 +143,7 @@ proc bifRecord(node: Cursor): seq[NativeRecordPart]
 proc bifBranch(node: Cursor): NativeBranch =
   result.index = -1
   result.isElse = node.tagName == "else"
+  result.record = bifRecord(node)
   var children = node.childCursor()
   while children.hasMore:
     if children.kind == TagLit:
@@ -146,8 +155,6 @@ proc bifBranch(node: Cursor): NativeBranch =
             result.selectors.add $selector.intVal
             break
           selector.skip
-      of "reclist":
-        result.record = bifRecord(children)
       else:
         discard
     children.skip
@@ -157,6 +164,8 @@ proc bifRecord(node: Cursor): seq[NativeRecordPart] =
   while children.hasMore:
     if children.kind == TagLit:
       case children.tagName
+      of "reclist":
+        result.add bifRecord(children)
       of "sd":
         if not children.findChildTag("field").cursorIsNil:
           result.add NativeRecordPart(kind: nrField, field: bifField(children))
@@ -1237,9 +1246,9 @@ proc typeFromLayout(layout: AbiTypeEntry): NativeType =
   else:
     fail("unsupported native ABI layout kind: " & layout.kind)
 
-proc parseStdOrderedTable(
+proc parseStdContainer(
     node: Cursor,
-    stdTablesModules: Table[string, bool],
+    stdContainerModules: Table[string, string],
     layouts: Table[string, AbiTypeEntry],
     typ: var NativeType,
 ): bool =
@@ -1254,40 +1263,60 @@ proc parseStdOrderedTable(
     of Symbol:
       symbols.add children.symName
     of TagLit:
-      if children.tagName != "ht":
+      if children.tagName == "td" and symbols.len == 0:
+        let instance = children.findChildKind(SymbolDef)
+        if instance.cursorIsNil:
+          return false
+        symbols.add instance.symName
+      elif children.tagName in ["ht", "tuplety"]:
+        let typeDesc = children.findChildTag("td")
+        if children.tagName == "tuplety" and typeDesc.cursorIsNil:
+          return false
+        let argument =
+          if children.tagName == "tuplety":
+            typeDesc.findLastChildKind(Symbol)
+          else:
+            children.findLastChildKind(Symbol)
+        if argument.cursorIsNil:
+          return false
+        arguments.add argument.symName
+      else:
         return false
-      let argument = children.findLastChildKind(Symbol)
-      if argument.cursorIsNil:
-        return false
-      arguments.add argument.symName
     of DotToken:
       discard
     else:
       return false
     children.skip
 
-  if symbols.len != 2 or arguments.len != 2 or symbolBase(symbols[1]) != "OrderedTable" or
-      symbolModule(symbols[1]) notin stdTablesModules or symbols[0] notin layouts or
+  if symbols.len != 2 or symbolModule(symbols[1]) notin stdContainerModules or
+      symbols[0] notin layouts or
       layouts[symbols[0]].kind != "object":
+    return false
+  let module = stdContainerModules[symbolModule(symbols[1])]
+  let name = symbolBase(symbols[1])
+  if not (
+    module == "std/tables" and name in ["Table", "OrderedTable"] and arguments.len == 2 or
+    module == "std/options" and name == "Option" and arguments.len == 1
+  ):
     return false
 
   let layout = layouts[symbols[0]]
   typ = NativeType(
-    name: "OrderedTable",
+    name: name,
     nifSymbol: layout.typeSymbol,
     typeId: layout.typeSymbol,
     kind: ntImportedGeneric,
     size: layout.size,
     alignment: layout.alignment,
     layoutFingerprint: layout.layoutFingerprint,
-    importModule: "std/tables",
+    importModule: module,
     genericArguments: arguments,
   )
   result = true
 
-proc collectStdOrderedTables(
+proc collectStdContainers(
     node: Cursor,
-    stdTablesModules: Table[string, bool],
+    stdContainerModules: Table[string, string],
     layouts: Table[string, AbiTypeEntry],
     instances: var Table[string, NativeType],
     skipTypes: var Table[string, bool],
@@ -1295,14 +1324,14 @@ proc collectStdOrderedTables(
   if node.kind != TagLit:
     return
   var typ: NativeType
-  if parseStdOrderedTable(node, stdTablesModules, layouts, typ):
+  if parseStdContainer(node, stdContainerModules, layouts, typ):
     instances[typ.typeId] = typ
     skipTypes[typ.nifSymbol] = true
     skipTypes[typ.typeId] = true
   var children = node.childCursor()
   while children.hasMore:
     if children.kind == TagLit:
-      collectStdOrderedTables(children, stdTablesModules, layouts, instances, skipTypes)
+      collectStdContainers(children, stdContainerModules, layouts, instances, skipTypes)
     children.skip
 
 func isMaterializedKind(kind: string): bool =
@@ -1718,7 +1747,7 @@ proc buildNativeApi(
       else:
         param.lowering = nlDirect
   var skipSystemModuleTypeSymbols: Table[string, bool]
-  var stdTablesModules: Table[string, bool]
+  var stdContainerModules: Table[string, string]
   var signatureTypeSymbols: Table[string, bool]
   for item in description.procs:
     if item.returnTypeSymbol.len > 0:
@@ -1731,10 +1760,14 @@ proc buildNativeApi(
     if module.name == "tables":
       let path = bifPath.parentDir / (module.identity & ".s.bif")
       if readModuleSource(path).isStdTablesSource:
-        stdTablesModules[module.identity] = true
+        stdContainerModules[module.identity] = "std/tables"
+    if module.name == "options":
+      let path = bifPath.parentDir / (module.identity & ".s.bif")
+      if readModuleSource(path).replace('\\', '/').endsWith("/lib/pure/options.nim"):
+        stdContainerModules[module.identity] = "std/options"
 
   var importedGenericTypes: Table[string, NativeType]
-  var skipStdTableObjectTypes: Table[string, bool]
+  var skipStdContainerTypes: Table[string, bool]
   var unmaterializedTypes: seq[NativeType]
   var preferredTypeAliases: seq[PreferredTypeAlias]
   var applicationModules: Table[string, bool]
@@ -1748,9 +1781,9 @@ proc buildNativeApi(
       if inspectDeclaration:
         if not declaration.findChildTag("type").cursorIsNil and
             not declaration.findChildTag("type0").cursorIsNil:
-          collectStdOrderedTables(
-            declaration, stdTablesModules, layouts, importedGenericTypes,
-            skipStdTableObjectTypes,
+          collectStdContainers(
+            declaration, stdContainerModules, layouts, importedGenericTypes,
+            skipStdContainerTypes,
           )
           var typ: NativeType
           if parseNativeType(declaration, nifSymbol, typ):
@@ -1764,11 +1797,11 @@ proc buildNativeApi(
               typ.alignment = -1
               unmaterializedTypes.add typ
               continue
-            if symbolModule(typ.nifSymbol) in stdTablesModules and
-                symbolBase(typ.nifSymbol) == "OrderedTable":
+            if symbolModule(typ.nifSymbol) in stdContainerModules and
+                symbolBase(typ.nifSymbol) in ["Table", "OrderedTable", "Option"]:
               continue
-            if typ.nifSymbol in skipStdTableObjectTypes or
-                typ.typeId in skipStdTableObjectTypes:
+            if typ.nifSymbol in skipStdContainerTypes or
+                typ.typeId in skipStdContainerTypes:
               continue
             result.types.add typ
             # Only root aliases should name equivalent layouts from dependencies.
@@ -1782,7 +1815,11 @@ proc buildNativeApi(
     result.types.add typ
 
   result.applyTypeImports(typeImports)
-  let opaqueTypes = importedTypeSymbols(result, layouts)
+  var opaqueTypes = importedTypeSymbols(result, layouts)
+  # The standard library supplies these generic layouts. Their arguments
+  # remain ABI dependencies, but their private storage declarations do not.
+  for typ in importedGenericTypes.values:
+    opaqueTypes[typ.typeId] = true
 
   for alias in preferredTypeAliases:
     if alias.layoutSymbol notin layouts:
@@ -1800,12 +1837,6 @@ proc buildNativeApi(
   var represented: Table[string, bool]
   for typ in result.types:
     represented[typ.typeId] = true
-
-  var internalLayoutTypes: Table[string, bool]
-  for typ in importedGenericTypes.values:
-    addLayoutDependency(typ.typeId, layouts, internalLayoutTypes)
-  for typ in importedGenericTypes.values:
-    internalLayoutTypes.del typ.typeId
 
   for item in description.procs:
     let nifSymbol = item.nifSymbol
@@ -1838,7 +1869,7 @@ proc buildNativeApi(
     if layout.kind == "proc":
       unwrapVarReturn(layout.procInfo, layouts)
 
-  var skipInternalTypes = internalLayoutTypes
+  var skipInternalTypes: Table[string, bool]
 
   var requiredTypes: Table[string, bool]
   for typ in result.types:
@@ -1850,21 +1881,16 @@ proc buildNativeApi(
     if isSignatureType or isMaterializedSemanticType:
       if moduleIdentity.len > 0 and moduleIdentity in skipSystemModuleTypeSymbols:
         continue
-      let symbolSkip =
-        if typ.kind == ntImportedGeneric:
-          skipInternalTypes
-        else:
-          initTable[string, bool]()
       collectReferencedType(
-        typ.typeId, layouts, requiredTypes, symbolSkip, opaqueTypes
+        typ.typeId, layouts, requiredTypes, skipInternalTypes, opaqueTypes
       )
       if not typ.imported and typ.kind == ntArray:
         collectReferencedType(
-          typ.indexTypeSymbol, layouts, requiredTypes, symbolSkip, opaqueTypes
+          typ.indexTypeSymbol, layouts, requiredTypes, skipInternalTypes, opaqueTypes
         )
       if not typ.imported and typ.kind == ntAlias:
         collectReferencedType(
-          typ.elementTypeSymbol, layouts, requiredTypes, symbolSkip, opaqueTypes
+          typ.elementTypeSymbol, layouts, requiredTypes, skipInternalTypes, opaqueTypes
         )
 
   for procInfo in result.procs:
@@ -1967,7 +1993,8 @@ proc buildNativeApi(
       named_ref_types[typ.typeId] = true
   for refLayout in description.types:
     let layout = layouts[refLayout.typeSymbol]
-    if layout.typeSymbol in named_ref_types or layout.kind != "ref" or
+    if layout.typeSymbol notin requiredTypes or
+        layout.typeSymbol in named_ref_types or layout.kind != "ref" or
         layout.elementTypeSymbol notin layouts or
         layouts[layout.elementTypeSymbol].kind != "object":
       continue

@@ -320,6 +320,40 @@ block generated_module_imports_canonical_ordered_tables:
   doAssert "doAssert sizeof(OrderedTable[Layer, RenderList]) == 40" in generated
   doAssert "OrderedTable* = object" notin generated
 
+block generated_module_declares_case_enums_before_records:
+  let api = NativeApi(
+    libraryName: "libsample.so",
+    initSymbol: "NimMain",
+    types: @[
+      NativeType(
+        name: "Config",
+        nifSymbol: "Config.0.sample",
+        typeId: "`t17.1.sample",
+        kind: ntObject,
+        record: @[
+          NativeRecordPart(
+            kind: nrCase,
+            discriminant: NativeField(
+              name: "kind", typeSymbol: "Kind.0.sample", exported: true
+            ),
+            branches: @[NativeBranch(selectors: @["empty"], record: @[])],
+          )
+        ],
+      ),
+      NativeType(
+        name: "Kind",
+        nifSymbol: "Kind.0.sample",
+        typeId: "`t14.2.sample",
+        kind: ntEnum,
+        enumValues: @[NativeEnumValue(name: "empty", ordinal: 0)],
+      ),
+    ],
+    procs: @[NativeProc(name: "consume", cSymbol: "consume")],
+  )
+  let generated = generateNativeModule(api)
+  doAssert generated.find("Kind* = enum") < generated.find("Config* = object")
+  doAssert "case kind*: Kind\n    of empty:" in generated
+
 block generated_module_reuses_imported_types:
   let api = NativeApi(
     libraryName: "libsample.so",

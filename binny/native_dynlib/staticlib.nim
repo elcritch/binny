@@ -18,6 +18,9 @@ type
   NativeExportSymbol* = object
     sourcePath*: string
     nifSymbol*: string
+    ## Methods use their dispatcher for calls, while retaining the source
+    ## declaration for ABI signature reconstruction and export selection.
+    backendNifSymbol*: string
     cSymbol*: string
 
   NativeHookSymbol* = object
@@ -246,6 +249,31 @@ proc isSourceRoutineDeclaration(declaration: Cursor): bool =
       return true
     children.skip
 
+proc methodDispatcherSymbol(declaration: Cursor): string =
+  var children = declaration.childCursor()
+  while children.hasMore:
+    if children.kind == TagLit and children.tagName == "method" and
+        not children.findChildTag("ht").cursorIsNil:
+      var parts = children.childCursor()
+      while parts.hasMore:
+        if parts.kind == TagLit and parts.tagName == "sd" and
+            not parts.findChildTag("method").cursorIsNil:
+          let name = parts.findChildKind(SymbolDef)
+          if not name.cursorIsNil:
+            return name.symName
+        parts.skip
+      # Overrides refer to the existing dispatcher instead of defining it.
+      let dispatcher = children.findLastChildKind(Symbol)
+      if not dispatcher.cursorIsNil:
+        return dispatcher.symName
+    children.skip
+
+func backendSymbol(symbol: NativeExportSymbol): string =
+  if symbol.backendNifSymbol.len > 0:
+    symbol.backendNifSymbol
+  else:
+    symbol.nifSymbol
+
 proc declarationTypeSymbol(declaration: Cursor): string =
   let typeDesc = declaration.findChildTag("td")
   if not typeDesc.cursorIsNil:
@@ -365,7 +393,10 @@ proc publicRoutineSymbols*(
     for name, visibility, declaration in module.declarations:
       if visibility == ivExported and semanticModule(name) == moduleSuffix and
           declaration.isRoutineDeclaration:
-        result.add NativeExportSymbol(sourcePath: absoluteSource, nifSymbol: name)
+        result.add NativeExportSymbol(
+          sourcePath: absoluteSource, nifSymbol: name,
+          backendNifSymbol: methodDispatcherSymbol(declaration),
+        )
   result = applyExportConfig(result, sourceRoot, exportConfig)
 
 proc nativeHookSymbols*(nimcacheDir, sourceRoot: string): seq[NativeHookSymbol] =
@@ -465,26 +496,26 @@ proc resolveIncrementalNativeSymbols(
 ): seq[NativeExportSymbol] =
   ## Matches semantic routines to their exact incremental-backend C names.
   result = @symbols
-  var indexes = initTable[string, int]()
+  var indexes = initTable[string, seq[int]]()
   for index, symbol in result:
-    indexes[symbol.nifSymbol] = index
+    indexes.mgetOrPut(symbol.backendSymbol, @[]).add index
 
   var matched = initHashSet[string]()
   for path in walkFiles(nimcacheDir / "*.c.nif"):
     for definition in readCDefinitions(path):
       if definition.nifSymbol in indexes:
-        let index = indexes[definition.nifSymbol]
-        if result[index].cSymbol.len == 0:
-          result[index].cSymbol = definition.cSymbol
-        elif result[index].cSymbol != definition.cSymbol:
-          fail(
-            "one semantic routine has multiple backend names: " & definition.nifSymbol
-          )
+        for index in indexes[definition.nifSymbol]:
+          if result[index].cSymbol.len == 0:
+            result[index].cSymbol = definition.cSymbol
+          elif result[index].cSymbol != definition.cSymbol:
+            fail(
+              "one semantic routine has multiple backend names: " & definition.nifSymbol
+            )
         matched.incl definition.nifSymbol
 
   var missing: seq[string]
   for symbol in result:
-    if symbol.nifSymbol notin matched:
+    if symbol.backendSymbol notin matched:
       missing.add symbol.nifSymbol
   if missing.len > 0:
     missing.sort()
@@ -594,18 +625,26 @@ proc resolveCNativeSymbols(
   var candidates = newSeq[HashSet[string]](result.len)
   var missing: seq[string]
   let backendSymbols = cBackendSymbols(nimcacheDir)
+  var backend_sources: Table[string, string]
   for index, symbol in result:
-    let prefix = symbol.nifSymbol.cSymbolPrefix
+    let backend_module = symbol.backendSymbol.semanticModule
+    var backend_source = symbol.sourcePath
+    if backend_module != symbol.nifSymbol.semanticModule:
+      if backend_module notin backend_sources:
+        var module = bif.load(nimcacheDir / (backend_module & ".s.bif"))
+        backend_sources[backend_module] = module.readModuleSource()
+      backend_source = backend_sources[backend_module]
+    let prefix = symbol.backendSymbol.cSymbolPrefix
     if prefix.len == 0:
       missing.add symbol.nifSymbol
     else:
       candidates[index] = backendSymbols.getOrDefault(prefix)
       candidates[index] = sourceOwnedCBackendSymbols(
-        candidates[index], prefix, symbol.sourcePath
+        candidates[index], prefix, backend_source
       )
       if candidates[index].len == 0:
         missing.add symbol.nifSymbol
-    moduleIndexes.mgetOrPut(symbol.nifSymbol.semanticModule, @[]).add index
+    moduleIndexes.mgetOrPut(backend_module, @[]).add index
   if missing.len > 0:
     missing.sort()
     fail("native routines have no C backend definitions:\n  " & missing.join("\n  "))
@@ -614,7 +653,7 @@ proc resolveCNativeSymbols(
     var commonSuffixes: HashSet[string]
     var first = true
     for index in indexes:
-      let prefix = result[index].nifSymbol.cSymbolPrefix
+      let prefix = result[index].backendSymbol.cSymbolPrefix
       var suffixes: HashSet[string]
       for candidate in candidates[index]:
         suffixes.incl candidate[prefix.len ..^ 1]
@@ -627,7 +666,7 @@ proc resolveCNativeSymbols(
       fail("cannot determine one C backend module suffix for " & module)
     let suffix = commonSuffixes.pop()
     for index in indexes:
-      let candidate = result[index].nifSymbol.cSymbolPrefix & suffix
+      let candidate = result[index].backendSymbol.cSymbolPrefix & suffix
       if candidate notin candidates[index]:
         fail("C backend definition mismatch for " & result[index].nifSymbol)
       result[index].cSymbol = candidate
@@ -799,9 +838,9 @@ proc rootPublicRoutines*(
       exports.add NativeExportSymbol(
         sourcePath: hook.sourcePath, nifSymbol: hook.nifSymbol
       )
-  var indexes = initTable[string, int]()
+  var indexes = initTable[string, seq[int]]()
   for index, symbol in exports:
-    indexes[symbol.nifSymbol] = index
+    indexes.mgetOrPut(symbol.backendSymbol, @[]).add index
 
   type Artifact = object
     path: string
@@ -813,10 +852,13 @@ proc rootPublicRoutines*(
   for path in walkFiles(nimcacheDir / "*.c.nif"):
     var artifact = Artifact(path: path, definitions: readCDefinitions(path))
     for definition in artifact.definitions:
-      if definition.nifSymbol in indexes and
-          exports[indexes[definition.nifSymbol]].sourcePath == absoluteMain:
-        artifact.ownsMain = true
-        break
+      if definition.nifSymbol in indexes:
+        for index in indexes[definition.nifSymbol]:
+          if exports[index].sourcePath == absoluteMain:
+            artifact.ownsMain = true
+            break
+        if artifact.ownsMain:
+          break
     artifacts.add artifact
   artifacts.sort(
     proc(left, right: Artifact): int =
@@ -831,13 +873,13 @@ proc rootPublicRoutines*(
     var changed = false
     for definition in artifact.definitions:
       if definition.nifSymbol in indexes:
-        let index = indexes[definition.nifSymbol]
-        if exports[index].cSymbol.len == 0:
-          exports[index].cSymbol = definition.cSymbol
-        elif exports[index].cSymbol != definition.cSymbol:
-          fail(
-            "one semantic routine has multiple backend names: " & definition.nifSymbol
-          )
+        for index in indexes[definition.nifSymbol]:
+          if exports[index].cSymbol.len == 0:
+            exports[index].cSymbol = definition.cSymbol
+          elif exports[index].cSymbol != definition.cSymbol:
+            fail(
+              "one semantic routine has multiple backend names: " & definition.nifSymbol
+            )
         if 'x' notin definition.flags:
           changed = content.replaceDefinitionFlags(definition) or changed
     if changed:

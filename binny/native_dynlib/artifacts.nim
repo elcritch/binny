@@ -436,7 +436,9 @@ proc generateTypes(api: NativeApi, names: Table[string, string]): string =
   if types.len == 0:
     return
   result.add "type\n"
-  for typ in types:
+  # Case discriminants and their selectors need complete enum declarations,
+  # even though other fields can refer forward within the same type section.
+  for typ in types.filterIt(it.kind == ntEnum) & types.filterIt(it.kind != ntEnum):
     result.add "  " & nimIdentifier(typ.name) & "*"
     var pragmas: seq[string] = @[]
     if typ.inheritable:
