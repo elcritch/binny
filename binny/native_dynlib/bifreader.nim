@@ -538,6 +538,30 @@ func compilerCallConvName(callConv: TCallingConvention): string =
 proc compilerProcInfo(
     context: CompilerTypeContext, symbol: string, typ: PType, node: Cursor
 ): NativeProc =
+  proc parseCompilerParam(declaration: Cursor): NativeParam =
+    let name = declaration.findChildKind(SymbolDef)
+    if not name.cursorIsNil:
+      result.name = symbolBase(name.symName)
+    let typeDesc = declaration.findChildTag("td")
+    if not typeDesc.cursorIsNil:
+      let typeIdNode = typeDesc.findChildKind(SymbolDef)
+      let typeId = if typeIdNode.cursorIsNil: "" else: typeIdNode.symName
+      let modifierKind = typeOrdinal(typeId)
+      if modifierKind in [ord(tyVar), ord(tySink), ord(tyOwned), ord(tyLent)]:
+        result.byVar = modifierKind == ord(tyVar)
+        let modifier = context.types.getOrDefault(typeId)
+        if modifier == nil or modifier.sonsImpl.len == 0:
+          fail("missing compiler type for native proc parameter: " & result.name)
+        result.typeSymbol = context.compilerTypeSymbol(modifier.sonsImpl[^1])
+      else:
+        result.typeSymbol = typeId
+    else:
+      let typeSymbol = declaration.findChildKind(Symbol)
+      if not typeSymbol.cursorIsNil:
+        result.typeSymbol = typeSymbol.symName
+    if result.typeSymbol.len == 0:
+      fail("native ABI only supports value parameters: " & result.name)
+
   result.name = symbolBase(symbol)
   result.nifSymbol = symbol
   result.callConv = compilerCallConvName(typ.callConvImpl)
@@ -549,18 +573,16 @@ proc compilerProcInfo(
     result.returnLowering =
       if result.returnTypeSymbol.len == 0: nlVoid else: nlDirect
 
-  proc collectParams(node: Cursor, params: var seq[NativeParam]) =
-    var children = node.childCursor()
-    while children.hasMore:
-      if children.kind == TagLit:
-        if children.tagName == "sd" and
-            not children.findChildTag("param").cursorIsNil:
-          params.add children.parseParam
-        else:
-          collectParams(children, params)
-      children.skip
-
-  collectParams(node, result.params)
+  # A proc type's formal parameters are the direct ``sd`` children of its
+  # ``formalparams`` node. Nested compiler type definitions can contain their
+  # own ``sd`` nodes, but those are unrelated declarations and must not be
+  # treated as parameters of this proc type.
+  var children = node.childCursor()
+  while children.hasMore:
+    if children.kind == TagLit and children.tagName == "sd" and
+        not children.findChildTag("param").cursorIsNil:
+      result.params.add parseCompilerParam(children)
+    children.skip
 
 proc compilerSymStub(context: var CompilerTypeContext, symbol: string): PSym =
   if symbol.len == 0:
@@ -1975,10 +1997,22 @@ proc readBifNativeApi*(
   let
     bifPath = findSemanticBif(nimcacheDir, sourcePath)
     initSymbol = nativeInitSymbol(libraryName, bifPath)
-    routines = resolveNativeSymbols(
-      nimcacheDir, publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig)
-    )
-    hooks = resolveNativeHooks(nimcacheDir, nativeHookSymbols(nimcacheDir, sourceRoot))
+    routineSymbols = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig)
+    nativeHooks = nativeHookSymbols(nimcacheDir, sourceRoot)
+  var allSymbols = routineSymbols
+  var hookSymbolIndexes: seq[tuple[hookIndex: int, symbolIndex: int]]
+  for hookIndex, hook in nativeHooks:
+    if not hook.forbidden:
+      hookSymbolIndexes.add((hookIndex, allSymbols.len))
+      allSymbols.add NativeExportSymbol(
+        sourcePath: hook.sourcePath, nifSymbol: hook.nifSymbol
+      )
+  let resolvedSymbols = resolveNativeSymbols(nimcacheDir, allSymbols)
+  var routines = resolvedSymbols[0 ..< routineSymbols.len]
+  var hooks = nativeHooks
+  for (hookIndex, symbolIndex) in hookSymbolIndexes:
+    hooks[hookIndex].cSymbol = resolvedSymbols[symbolIndex].cSymbol
+  let
     description = bifNativeDescription(
       nimcacheDir, sourceRoot, libraryName, initSymbol, routines, hooks
     )
