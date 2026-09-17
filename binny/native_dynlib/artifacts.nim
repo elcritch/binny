@@ -151,6 +151,28 @@ proc arrayLength(api: NativeApi, typ: NativeType): int64 =
     return -1
   typ.size div elementSize
 
+proc arrayIndexExpression(
+    api: NativeApi, typ: NativeType, names: Table[string, string]
+): string =
+  if typ.indexTypeSymbol.len > 0:
+    for indexType in api.types:
+      if indexType.typeId == typ.indexTypeSymbol or
+          indexType.nifSymbol == typ.indexTypeSymbol:
+        let base = knownTypeExpression(indexType.elementTypeSymbol, names)
+        let length = api.arrayLength(typ)
+        if indexType.kind == ntRange and indexType.isAnonymousGenericType and
+            base == "int" and indexType.rangeLow == "0" and length >= 0 and
+            indexType.rangeHigh == $(length - 1):
+          return $length
+        # Defer unresolved indices rather than discarding their lower bound.
+        return knownTypeExpression(typ.indexTypeSymbol, names)
+    let index = knownTypeExpression(typ.indexTypeSymbol, names)
+    if index.len > 0:
+      return index
+  let length = api.arrayLength(typ)
+  if length >= 0:
+    result = $length
+
 proc nimType(symbol: string, names: Table[string, string]): string
 
 proc typeNames(api: NativeApi): Table[string, string] =
@@ -211,14 +233,9 @@ proc typeNames(api: NativeApi): Table[string, string] =
         of ntRange:
           rendered = rangeExpression(typ, element)
         of ntArray:
-          if typ.indexTypeSymbol.len > 0:
-            let index = knownTypeExpression(typ.indexTypeSymbol, result)
-            if index.len > 0:
-              rendered = "array[" & index & ", " & element & "]"
-          if rendered.len == 0:
-            let length = api.arrayLength(typ)
-            if length >= 0:
-              rendered = "array[" & $length & ", " & element & "]"
+          let index = arrayIndexExpression(api, typ, result)
+          if index.len > 0:
+            rendered = "array[" & index & ", " & element & "]"
         else:
           discard
       else:
@@ -481,18 +498,12 @@ proc generateTypes(api: NativeApi, names: Table[string, string]): string =
       result.add "UncheckedArray[" & nimType(typ.elementTypeSymbol, names) & "]\n\n"
       continue
     of ntArray:
-      if typ.indexTypeSymbol.len > 0:
-        let index = knownTypeExpression(typ.indexTypeSymbol, names)
-        if index.len > 0:
-          result.add "array[" & index & ", " & nimType(typ.elementTypeSymbol, names) &
-            "]\n\n"
-          continue
-      let length = api.arrayLength(typ)
-      if length < 0:
+      let index = arrayIndexExpression(api, typ, names)
+      if index.len == 0:
         raise newException(
           NativeArtifactError, "unsupported native ABI array layout: " & typ.nifSymbol
         )
-      result.add "array[" & $length & ", " & nimType(typ.elementTypeSymbol, names) &
+      result.add "array[" & index & ", " & nimType(typ.elementTypeSymbol, names) &
         "]\n\n"
       continue
     of ntSequence:
@@ -554,13 +565,17 @@ proc generateFieldChecks(
       for branch in part.branches:
         result.add generateFieldChecks(typeName, branch.record, indent, exportedOnly)
 
-proc generateLayoutChecks(api: NativeApi, names: Table[string, string]): string =
+proc generateStaticChecks(api: NativeApi, names: Table[string, string]): string =
   let types = api.types.filterIt(
     not it.isBuiltinType and it.kind notin {ntOpenArray, ntProc}
   )
-  if types.len == 0:
-    return
-  result.add "static:\n"
+  result.add """
+static:
+  when not defined(useMalloc):
+    {.error: "Binny native dynlib wrappers require -d:useMalloc.".}
+  when not (defined(gcArc) or defined(gcAtomicArc) or defined(gcOrc)):
+    {.error: "Binny native dynlib wrappers require --mm:arc, --mm:atomicArc, or --mm:orc.".}
+"""
   for typ in types:
     let typeName =
       if typ.isAnonymousGenericType:
@@ -658,7 +673,7 @@ proc generateNativeModule*(
     result.add " {.strdefine.}"
   result.add " = " & libraryName.escape & "\n\n"
   result.add generateTypes(api, names)
-  result.add generateLayoutChecks(api, names)
+  result.add generateStaticChecks(api, names)
   result.add "proc nativeNimMain() {.cdecl, importc: " & api.initSymbol.escape &
     ", dynlib: nativeLibrary.}\n\n"
   result.add "nativeNimMain()\n"

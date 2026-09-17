@@ -1,4 +1,4 @@
-import std/[assertions, os, strutils, tempfiles]
+import std/[assertions, os, osproc, strutils, tempfiles]
 import binny/native_dynlib
 import binny/native_dynlib/[artifacts, model]
 import binny/native_dynlib/staticlib
@@ -178,6 +178,42 @@ block generated_module_allows_an_initializer_only_api:
   doAssert "nativeNimMain()" in generated
   doAssert "{.push nimcall, dynlib: nativeLibrary.}" in generated
 
+block generated_module_checks_runtime_configuration:
+  let temporary = createTempDir("binny-native-runtime-checks-", "")
+  defer:
+    removeDir(temporary)
+  let source = temporary / "wrapper.nim"
+  let buildMode =
+    when defined(danger): " -d:danger"
+    elif defined(release): " -d:release"
+    else: ""
+  let command = getCurrentCompilerExe().quoteShell &
+    " check --noNimblePath --hints:off --warnings:off --nimcache:" &
+    (temporary / "cache").quoteShell & buildMode
+  for withLayout in [false, true]:
+    var api = NativeApi(libraryName: "libsample.so", initSymbol: "NimMain")
+    if withLayout:
+      api.types = @[NativeType(
+        name: "Value", nifSymbol: "Value.0.sample", kind: ntAlias,
+        elementTypeSymbol: "int32", size: 4, alignment: 4,
+      )]
+    let generated = generateNativeModule(api)
+    doAssert "static:\n  when not defined(useMalloc):" in generated
+    doAssert "defined(gcArc) or defined(gcAtomicArc) or defined(gcOrc)" in generated
+    writeFile(source, generated)
+    for memoryManager in ["arc", "atomicArc", "orc"]:
+      let flags = " --mm:" & memoryManager
+      let accepted = execCmdEx(command & flags & " -d:useMalloc " & source.quoteShell)
+      doAssert accepted.exitCode == 0, accepted.output
+      let rejected = execCmdEx(command & flags & " --undef:useMalloc " & source.quoteShell)
+      doAssert rejected.exitCode != 0, "wrapper must require useMalloc"
+      doAssert "Binny native dynlib wrappers require -d:useMalloc." in rejected.output
+    for memoryManager in ["refc", "none"]:
+      let rejected = execCmdEx(command & " --mm:" & memoryManager &
+        " -d:useMalloc " & source.quoteShell)
+      doAssert rejected.exitCode != 0, "wrapper must require a supported memory manager"
+      doAssert "Binny native dynlib wrappers require --mm:arc" in rejected.output
+
 block generated_module_preserves_builtin_range_types:
   let api = NativeApi(
     libraryName: "libsample.so",
@@ -243,6 +279,48 @@ block generated_module_rejects_ranges_without_resolved_bounds:
   )
   doAssertRaises NativeArtifactError:
     discard generateNativeModule(api)
+
+block generated_array_indices_are_independent_of_discovery_order:
+  for namedIndex in [false, true]:
+    for lowerBound in [0, 2]:
+      let indexSymbol = "`t20.1.sample"
+      let sequenceSymbol = "`t24.1.sample"
+      let arraySymbol = "`t16.1.sample"
+      let indexType = NativeType(
+        name: "Bounds", nifSymbol: (if namedIndex: "Bounds.0.sample" else: indexSymbol),
+        typeId: indexSymbol, kind: ntRange, elementTypeSymbol: "int",
+        rangeLow: $lowerBound, rangeHigh: $(lowerBound + 3), size: 8, alignment: 8,
+      )
+      let sequenceType = NativeType(
+        name: "NativeAbiSequence", nifSymbol: sequenceSymbol, typeId: sequenceSymbol,
+        kind: ntSequence, elementTypeSymbol: "int", size: 16, alignment: 8,
+      )
+      let arrayType = NativeType(
+        name: "Values", nifSymbol: arraySymbol, typeId: arraySymbol, kind: ntArray,
+        indexTypeSymbol: indexSymbol, elementTypeSymbol: sequenceSymbol,
+        arrayLength: 4, size: 64, alignment: 8,
+      )
+      let expectedIndex =
+        if namedIndex: "Bounds"
+        elif lowerBound == 0: "4"
+        else: "range[int(2)..int(5)]"
+      var api = NativeApi(
+        libraryName: "libsample.so", initSymbol: "NimMain",
+        procs: @[NativeProc(
+          name: "consume", cSymbol: "consume",
+          params: @[NativeParam(name: "values", typeSymbol: arraySymbol)],
+        )],
+      )
+      for types in [@[arrayType, sequenceType, indexType],
+                    @[indexType, sequenceType, arrayType]]:
+        api.types = types
+        let generated = generateNativeModule(api)
+        doAssert "values: array[" & expectedIndex & ", seq[int]]" in generated
+      var namedArray = arrayType
+      namedArray.nifSymbol = "Values.0.sample"
+      api.types = @[namedArray, sequenceType, indexType]
+      let generated = generateNativeModule(api)
+      doAssert "Values* = array[" & expectedIndex & ", seq[int]]" in generated
 
 block generated_module_preserves_sink_and_lent_contracts:
   let api = NativeApi(

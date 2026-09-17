@@ -57,6 +57,9 @@ jobs:
       - name: Test native static library
         run: nim c -r tests/tnative_staticlib.nim
 
+      - name: Test direct C-backend exports and inline thunks
+        run: nim c -r tests/tnative_dynlib_c_exports.nim
+
       - name: Build native dynlib producer
         working-directory: examples/nim_native_dynlib
         run: nim buildProducer
@@ -172,11 +175,17 @@ jobs:
       - name: Show compiler version
         run: nim --version
 
+      - name: Test native binding generation and runtime guards
+        run: nim c -r tests/tnative_dynlib.nim
+
       - name: Test anonymous generic and named ref bindings
         run: nim c -r tests/tanonymous_generics.nim
 
       - name: Test native static library
         run: nim c -r tests/tnative_staticlib.nim
+
+      - name: Test direct C-backend exports and inline thunks
+        run: nim c -r tests/tnative_dynlib_c_exports.nim
 
       - name: Build native dynlib producer
         working-directory: examples/nim_native_dynlib

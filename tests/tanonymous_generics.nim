@@ -142,15 +142,15 @@ proc identityRecursiveBox*(value: RecursiveBox[int]): RecursiveBox[int] {.noinli
     doAssert "proc sumNestedSequence*(values: seq[array[4, int]]): int" in
       generatedBindings
     doAssert "proc sumNestedArray*(values: array[4, seq[int]]): int" in generatedBindings
-    doAssert "proc identityNode*(value: NativeAbi" in generatedBindings
-    doAssert "children: seq[NativeAbi" in generatedBindings
+    doAssert "proc identityNode*(value: ref NativeAbi" in generatedBindings
+    doAssert "children: seq[ref NativeAbi" in generatedBindings
     doAssert "proc sumBox*(value: NativeAbi" in generatedBindings
     doAssert "proc sumPair*(value: NativeAbi" in generatedBindings
     doAssert "proc sumNestedBox*(value: NativeAbi" in generatedBindings
-    doAssert "proc identityRecursiveBox*(value: NativeAbi" in generatedBindings
+    doAssert "proc identityRecursiveBox*(value: ref NativeAbi" in generatedBindings
     doAssert "key: int" in generatedBindings
     doAssert "value: bool" in generatedBindings
-    doAssert "next: NativeAbi" in generatedBindings
+    doAssert "next: ref NativeAbi" in generatedBindings
     doAssert "proc identityPublicNode*(value: PublicNode): PublicNode" in
       generatedBindings
     doAssert "proc publicChildren*(value: PublicNode): seq[PublicNode]" in
@@ -173,6 +173,12 @@ proc identityRecursiveBox*(value: RecursiveBox[int]): RecursiveBox[int] {.noinli
       consumer,
       """
 import producer_abi
+
+proc checkAnonymousRefs() {.used.} =
+  let node = identityNode(nil)
+  discard identityNode(node)
+  let box = identityRecursiveBox(nil)
+  discard identityRecursiveBox(box)
 
 proc checkPublicRefs(node: PublicNode) {.used.} =
   let same: PublicNode = identityPublicNode(node)

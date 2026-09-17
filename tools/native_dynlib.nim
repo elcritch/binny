@@ -6,7 +6,7 @@ import binny/native_dynlib/staticlib
 proc usage() {.noreturn.} =
   quit """
 usage:
-  native_dynlib prepare NIMCACHE SOURCE_ROOT MAIN_SOURCE C_ROOT [--config:CONFIG]
+  native_dynlib prepare NIMCACHE SOURCE_ROOT MAIN_SOURCE C_ROOT [--config:CONFIG] [--c-build-manifest:JSON]
   native_dynlib exports NIMCACHE SOURCE_ROOT MAIN_SOURCE LIBRARY EXPORT_LIST [--config:CONFIG]
   native_dynlib root NIMCACHE MAIN_SOURCE LIBRARY EXPORT_LIST [--config:CONFIG]
   native_dynlib bindings NIMCACHE SOURCE_ROOT SOURCE LIBRARY OUTPUT [--config:CONFIG] [--library-strdefine]
@@ -69,15 +69,18 @@ if paramCount() == 0:
 try:
   case paramStr(1)
   of "prepare":
-    if paramCount() notin {5, 6}:
+    if paramCount() notin 5..7:
       usage()
-    let exportConfig =
-      if paramCount() == 6:
-        loadConfigArgument(paramStr(6))
+    var exportConfig: NativeExportConfig
+    var cBuildManifest: string
+    for index in 6..paramCount():
+      let argument = paramStr(index)
+      if argument.startsWith("--c-build-manifest:"):
+        cBuildManifest = argument["--c-build-manifest:".len ..^ 1]
       else:
-        NativeExportConfig()
+        exportConfig = loadConfigArgument(argument)
     let backend = prepareNativeRoutines(
-      paramStr(2), paramStr(3), paramStr(4), paramStr(5), exportConfig
+      paramStr(2), paramStr(3), paramStr(4), paramStr(5), exportConfig, cBuildManifest
     )
     case backend
     of ncbC:

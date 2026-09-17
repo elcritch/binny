@@ -4,7 +4,7 @@
 ## C artifacts, keeps the selected routines live across whole-program dead-code
 ## elimination, and promotes their Mach-O or ELF symbols after archiving.
 
-import std/[algorithm, cmdline, os, osproc, sets, streams, strutils, tables, tempfiles]
+import std/[algorithm, cmdline, json, os, osproc, sets, streams, strutils, tables, tempfiles]
 import nif/[bif, nifcore, nifcoreparse, nifqueries]
 import exportconfig
 
@@ -22,6 +22,8 @@ type
     ## declaration for ABI signature reconstruction and export selection.
     backendNifSymbol*: string
     cSymbol*: string
+    inlineRoutine: bool
+    sourceLine, sourceColumn: int
 
   NativeHookSymbol* = object
     sourcePath*: string
@@ -396,9 +398,28 @@ proc publicRoutineSymbols*(
     for name, visibility, declaration in module.declarations:
       if visibility == ivExported and semanticModule(name) == moduleSuffix and
           declaration.isRoutineDeclaration:
+        var inlineRoutine = false
+        let typeDesc = declaration.findChildTag("td")
+        if not typeDesc.cursorIsNil:
+          var typeParts = typeDesc.childCursor()
+          while typeParts.hasMore:
+            if typeParts.kind == Ident and typeParts.strVal == "inline":
+              inlineRoutine = true
+            typeParts.skip
+        var children = declaration.childCursor()
+        while children.hasMore:
+          if children.kind == TagLit and children.tagName in routineKinds and
+              not children.findChildTag("ht").cursorIsNil:
+            let pragmas = children.findChildTag("pragma")
+            inlineRoutine = inlineRoutine or
+              (not pragmas.cursorIsNil and pragmas.hasDescendantIdent("inline"))
+          children.skip
+        let position = declaration.rawLineInfo
         result.add NativeExportSymbol(
           sourcePath: absoluteSource, nifSymbol: name,
           backendNifSymbol: methodDispatcherSymbol(declaration),
+          inlineRoutine: inlineRoutine,
+          sourceLine: int(position.line), sourceColumn: int(position.col),
         )
   result = applyExportConfig(result, sourceRoot, exportConfig)
 
@@ -572,53 +593,134 @@ proc sourceCModuleSuffixes(sourcePath: string): seq[string] =
     if suffix.len > 0 and suffix notin result:
       result.add suffix
 
-proc cModuleSourceMatchScore(candidate, prefix, sourcePath: string): int =
-  if sourcePath.len == 0 or candidate.len <= prefix.len:
-    return
-  let candidateSuffix = candidate[prefix.len ..^ 1]
-  for sourceSuffix in sourceCModuleSuffixes(sourcePath):
-    if candidateSuffix == sourceSuffix:
-      result = max(result, sourceSuffix.len)
-    elif candidateSuffix.len > sourceSuffix.len and
-        candidateSuffix.endsWith(sourceSuffix) and
-        candidateSuffix[candidateSuffix.len - sourceSuffix.len - 1] == 'Z':
-      result = max(result, sourceSuffix.len)
-
 proc sourceOwnedCBackendSymbols(
-    candidates: HashSet[string], prefix, sourcePath: string
+    candidates: HashSet[string], prefix, sourcePath, projectPath, libPath: string
 ): HashSet[string] =
-  ## Keeps only C names whose module suffix belongs to ``sourcePath``.
-  ##
-  ## A C file can mention dependency routines, and the complete nimcache can
-  ## contain the same hook prefix for many modules.  The source path is the
-  ## ownership information that distinguishes those otherwise similar names.
-  var bestScore = 0
+  ## A prepared build has the exact C project path, not a guessed suffix length.
+  let base = if libPath.len > 0 and pathIsWithin(sourcePath, libPath): libPath
+             else: projectPath
+  let suffixes =
+    if base.len > 0:
+      @[mangleCModuleSuffix(relativePath(sourcePath, base).replace('\\', '/'))]
+    else:
+      sourceCModuleSuffixes(sourcePath)
   for candidate in candidates:
-    let score = cModuleSourceMatchScore(candidate, prefix, sourcePath)
-    if score > bestScore:
-      bestScore = score
-      result = initHashSet[string]()
-    if score == bestScore and score > 0:
+    if candidate.len > prefix.len and candidate[prefix.len ..^ 1] in suffixes:
       result.incl candidate
-  if bestScore == 0:
-    result = candidates
 
-proc cBackendSymbols(nimcacheDir: string): Table[string, HashSet[string]] =
-  for path in walkFiles(nimcacheDir / "*.c"):
-    let content = readFile(path)
-    var position = 0
-    while position < content.len:
-      if not content[position].isCIdentifierCharacter:
+func cBuildStatePath(nimcacheDir: string): string =
+  nimcacheDir / "binny_native_build.json"
+
+proc cBuildState(nimcacheDir: string): JsonNode =
+  let path = cBuildStatePath(nimcacheDir)
+  result = if fileExists(path): parseFile(path) else: newJObject()
+
+proc findCBuildManifest(nimcacheDir, explicitPath: string): string =
+  if explicitPath.len > 0:
+    if not fileExists(explicitPath):
+      fail("C build manifest is missing: " & explicitPath)
+    return normalizedAbsolutePath(explicitPath)
+  let state = cBuildState(nimcacheDir)
+  if state.hasKey("manifest"):
+    return findCBuildManifest(nimcacheDir, state["manifest"].getStr)
+  var manifests: seq[string]
+  for path in walkFiles(nimcacheDir / "*.json"):
+    let description = parseFile(path)
+    if description.kind == JObject and description.hasKey("compile") and
+        description.hasKey("link") and description.hasKey("outputFile"):
+      manifests.add path
+  if manifests.len != 1:
+    fail("expected one active C build manifest; pass cBuildManifest to prepareNativeRoutines")
+  result = normalizedAbsolutePath(manifests[0])
+
+proc activeCSources(nimcacheDir: string): seq[string] =
+  let path = findCBuildManifest(nimcacheDir, "")
+  let description = parseFile(path)
+  if not description.hasKey("link") or description["link"].kind != JArray:
+    fail("C build manifest has no link object list: " & path)
+  let base = description.getOrDefault("currentDir").getStr(path.parentDir)
+  for node in description["link"]:
+    let objectPath = node.getStr
+    let extension = objectPath.splitFile.ext
+    if extension in [".o", ".obj"]:
+      let source = objectPath[0 ..< objectPath.len - extension.len]
+      let absoluteSource = if source.isAbsolute: source else: base / source
+      if absoluteSource.endsWith(".c") and fileExists(absoluteSource) and
+          absoluteSource notin result:
+        result.add absoluteSource
+
+proc compilerCLibPath(manifestPath: string): string =
+  let description = parseFile(manifestPath)
+  for entry in description["compile"]:
+    let arguments = parseCmdLine(entry[1].getStr)
+    for index, argument in arguments:
+      let directory =
+        if argument in ["-I", "/I"] and index + 1 < arguments.len: arguments[index + 1]
+        elif argument.startsWith("-I") or argument.startsWith("/I"): argument[2 ..^ 1]
+        else: ""
+      if directory.len > 0 and fileExists(directory / "nimbase.h"):
+        let path = normalizedAbsolutePath(directory)
+        if result.len > 0 and result != path:
+          fail("C build manifest uses multiple Nim library headers: " & manifestPath)
+        result = path
+
+proc cTokens(content: string): seq[string] =
+  var position = 0
+  while position < content.len:
+    let character = content[position]
+    if character in Whitespace:
+      inc position
+    elif character == '#' or (character == '/' and position + 1 < content.len and
+        content[position + 1] == '/'):
+      while position < content.len and content[position] != '\n':
+        if content[position] == '\\' and position + 1 < content.len:
+          position += 2
+        else:
+          inc position
+    elif character == '/' and position + 1 < content.len and content[position + 1] == '*':
+      let ending = content.find("*/", position + 2)
+      position = if ending < 0: content.len else: ending + 2
+    elif character in {'"', '\''}:
+      inc position
+      while position < content.len and content[position] != character:
+        position += (if content[position] == '\\': 2 else: 1)
+      if position < content.len:
         inc position
-        continue
-      var ending = position + 1
-      while ending < content.len and content[ending].isCIdentifierCharacter:
-        inc ending
-      let token = content[position ..< ending]
-      let prefix = token.cTokenPrefix
-      if prefix.len > 0 and token.len > prefix.len:
-        result.mgetOrPut(prefix, initHashSet[string]()).incl token
-      position = ending
+      result.add "literal"
+    elif character.isCIdentifierCharacter:
+      let start = position
+      while position < content.len and content[position].isCIdentifierCharacter:
+        inc position
+      result.add content[start ..< position]
+    else:
+      result.add $character
+      inc position
+
+proc cFunctionDefinitions(path: string): seq[string] =
+  let tokens = cTokens(readFile(path))
+  var depth = 0
+  for index, token in tokens:
+    if depth == 0 and (token.cTokenPrefix.len > 0 or token.startsWith("binny_inline_")):
+      var position = index + 1
+      # Nim's N_NIMCALL/N_INLINE macros place the name inside their parentheses.
+      if position < tokens.len and tokens[position] == ")":
+        inc position
+      if position < tokens.len and tokens[position] == "(":
+        var parentheses = 1
+        inc position
+        while position < tokens.len and parentheses > 0:
+          if tokens[position] == "(": inc parentheses
+          elif tokens[position] == ")": dec parentheses
+          inc position
+        if position < tokens.len and tokens[position] == "{":
+          result.add token
+    if token == "{": inc depth
+    elif token == "}": dec depth
+
+proc cBackendSymbols(nimcacheDir: string): HashSet[string] =
+  for path in activeCSources(nimcacheDir):
+    for definition in cFunctionDefinitions(path):
+      result.incl definition
 
 proc resolveCNativeSymbols(
     nimcacheDir: string, symbols: openArray[NativeExportSymbol]
@@ -628,26 +730,38 @@ proc resolveCNativeSymbols(
   var candidates = newSeq[HashSet[string]](result.len)
   var missing: seq[string]
   let backendSymbols = cBackendSymbols(nimcacheDir)
-  var backend_sources: Table[string, string]
+  let state = cBuildState(nimcacheDir)
+  let projectPath = state.getOrDefault("projectPath").getStr
+  let libPath = state.getOrDefault("libPath").getStr
+  let thunks = state.getOrDefault("thunks")
+  var backendSources: Table[string, string]
   for index, symbol in result:
-    let backend_module = symbol.backendSymbol.semanticModule
-    var backend_source = symbol.sourcePath
-    if backend_module != symbol.nifSymbol.semanticModule:
-      if backend_module notin backend_sources:
-        var module = bif.load(nimcacheDir / (backend_module & ".s.bif"))
-        backend_sources[backend_module] = module.readModuleSource()
-      backend_source = backend_sources[backend_module]
+    if thunks != nil and thunks.hasKey(symbol.nifSymbol):
+      let thunk = thunks[symbol.nifSymbol].getStr
+      if thunk notin backendSymbols:
+        fail("selected inline routine has no C thunk definition: " & symbol.nifSymbol)
+      result[index].cSymbol = thunk
+      continue
+    let backendModule = symbol.backendSymbol.semanticModule
+    var backendSource = symbol.sourcePath
+    if backendModule != symbol.nifSymbol.semanticModule:
+      if backendModule notin backendSources:
+        var module = bif.load(nimcacheDir / (backendModule & ".s.bif"))
+        backendSources[backendModule] = module.readModuleSource()
+      backendSource = backendSources[backendModule]
     let prefix = symbol.backendSymbol.cSymbolPrefix
     if prefix.len == 0:
       missing.add symbol.nifSymbol
     else:
-      candidates[index] = backendSymbols.getOrDefault(prefix)
+      for definition in backendSymbols:
+        if definition.cTokenPrefix == prefix:
+          candidates[index].incl definition
       candidates[index] = sourceOwnedCBackendSymbols(
-        candidates[index], prefix, backend_source
+        candidates[index], prefix, backendSource, projectPath, libPath
       )
       if candidates[index].len == 0:
         missing.add symbol.nifSymbol
-    moduleIndexes.mgetOrPut(backend_module, @[]).add index
+    moduleIndexes.mgetOrPut(backendModule, @[]).add index
   if missing.len > 0:
     missing.sort()
     fail("native routines have no C backend definitions:\n  " & missing.join("\n  "))
@@ -682,7 +796,7 @@ proc resolveNativeSymbols*(
     nimcacheDir: string, symbols: openArray[NativeExportSymbol]
 ): seq[NativeExportSymbol] =
   ## Matches semantic routines to exact names from either compiler C backend.
-  if nimcacheDir.hasIncrementalCArtifacts:
+  if nimcacheDir.hasIncrementalCArtifacts and not fileExists(cBuildStatePath(nimcacheDir)):
     result = resolveIncrementalNativeSymbols(nimcacheDir, symbols)
   else:
     result = resolveCNativeSymbols(nimcacheDir, symbols)
@@ -715,12 +829,17 @@ func nimQuotedIdentifier(value: string): string =
   "`" & value.replace("`", "") & "`"
 
 proc writeCBackendRoot(
-    outputPath: string,
+    outputPath, mainSource: string,
     routines: openArray[NativeExportSymbol],
     hooks: openArray[NativeHookSymbol],
-) =
+): JsonNode =
+  result = newJObject()
+  for routine in routines:
+    if routine.inlineRoutine:
+      result[routine.nifSymbol] = % ("binny_inline_" & routine.nifSymbol.mangleCName)
   var routineNamesBySource: Table[string, seq[string]]
-  var sources: seq[string]
+  # Import the producer even when the selected API consists only of dependencies.
+  var sources = @[normalizedAbsolutePath(mainSource)]
   for routine in routines:
     let source = normalizedAbsolutePath(routine.sourcePath)
     if source notin sources:
@@ -737,6 +856,36 @@ proc writeCBackendRoot(
   var aliases: Table[string, string]
   var content = "## Generated by Binny to keep public native routines reachable.\n\n"
   content.add "import std/macros\n"
+  if result.len > 0:
+    content.add """
+
+proc binnyInlineThunk(symbol: NimNode, exportName: string): NimNode {.compileTime.} =
+  let implementation = symbol.getImpl
+  let parameters = implementation[3].copyNimTree
+  var invocation = newCall(symbol)
+  for index in 1..<parameters.len:
+    let parameter = parameters[index]
+    for nameIndex in 0..<parameter.len - 2:
+      let argument = genSym(nskParam, "argument" & $(invocation.len - 1))
+      parameter[nameIndex] = argument
+      invocation.add argument
+    parameter[^1] = newEmptyNode()
+  var pragmas = newTree(nnkPragma)
+  for pragma in implementation[4]:
+    let name = if pragma.kind == nnkExprColonExpr: pragma[0] else: pragma
+    if name.kind notin {nnkIdent, nnkSym} or $name notin [
+      "inline", "exportc", "extern", "dynlib", "importc", "header", "noinline", "used"
+    ]:
+      pragmas.add pragma.copyNimTree
+  pragmas.add ident("noinline")
+  pragmas.add ident("used")
+  pragmas.add newColonExpr(ident("exportc"), newLit(exportName))
+  let body = if parameters[0].kind == nnkEmpty: invocation
+             else: newTree(nnkReturnStmt, invocation)
+  result = newTree(nnkProcDef, ident(exportName), newEmptyNode(), newEmptyNode(),
+    parameters, pragmas, newEmptyNode(), newStmtList(body))
+
+"""
   for index, source in sources:
     let
       parts = source.splitFile
@@ -775,6 +924,28 @@ proc writeCBackendRoot(
       content.add "        implementation[2].kind == nnkEmpty:\n"
       content.add "      result.add newLetStmt(genSym(nskLet, " &
         "\"binnyRoot\"), symbol)\n"
+      content.add "\n" & keepMacro & "()\n"
+
+  for index, routine in routines:
+    if routine.inlineRoutine:
+      let
+        source = normalizedAbsolutePath(routine.sourcePath)
+        name = routine.nifSymbol.semanticName
+        keepMacro = "binnyExportInline" & $index
+        exportName = result[routine.nifSymbol].getStr
+      content.add "\nmacro " & keepMacro & "(): untyped =\n"
+      content.add "  result = newStmtList()\n"
+      content.add "  for symbol in bindSym(" & name.nimStringLiteral & ", brForceOpen):\n"
+      content.add "    let implementation = symbol.getImpl\n"
+      content.add "    let position = implementation[0].lineInfoObj\n"
+      content.add "    if position.filename == " & source.nimStringLiteral & " and\n"
+      content.add "        position.line == " & $routine.sourceLine & " and\n"
+      content.add "        position.column == " & $routine.sourceColumn & ":\n"
+      content.add "      result.add binnyInlineThunk(symbol, " &
+        exportName.nimStringLiteral & ")\n"
+      content.add "  if result.len != 1:\n"
+      content.add "    error(" & ("cannot identify inline export " &
+        routine.nifSymbol).nimStringLiteral & ")\n"
       content.add "\n" & keepMacro & "()\n"
 
   var typeHooks: Table[string, seq[NativeHookSymbol]]
@@ -888,25 +1059,42 @@ proc rootPublicRoutines*(
     if changed:
       writeFile(artifact.path, content)
 
-  result = resolveNativeSymbols(nimcacheDir, exports)
+  result = resolveIncrementalNativeSymbols(nimcacheDir, exports)
 
 proc prepareNativeRoutines*(
     nimcacheDir, sourceRoot, mainSource, cRootSource: string,
     exportConfig = NativeExportConfig(),
+    cBuildManifest = "",
 ): NativeCodegenBackend =
   ## Prepares public routines for a second compiler pass.
   ##
   ## Incremental builds root matching ``.c.nif`` definitions in place. Normal
   ## C builds receive a generated module that takes the address of each public
   ## routine and exercises required ownership hooks in an uncalled helper.
-  if nimcacheDir.hasIncrementalCArtifacts:
+  ## Inline routines receive out-of-line thunks with their original signatures.
+  ## ``cBuildManifest`` selects the compiler JSON build description explicitly
+  ## when the cache contains more than one; otherwise it must be unambiguous.
+  if cBuildManifest.len == 0 and nimcacheDir.hasIncrementalCArtifacts:
+    let statePath = cBuildStatePath(nimcacheDir)
+    if fileExists(statePath):
+      removeFile(statePath)
     discard rootPublicRoutines(nimcacheDir, sourceRoot, mainSource, exportConfig)
     result = ncbIncremental
   else:
     let
       routines = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig)
       hooks = nativeHookSymbols(nimcacheDir, sourceRoot)
-    writeCBackendRoot(cRootSource, routines, hooks)
+    let manifest = findCBuildManifest(nimcacheDir, cBuildManifest)
+    let recordedLibPath = cBuildState(nimcacheDir).getOrDefault("libPath").getStr
+    let compilerLibPath = compilerCLibPath(manifest)
+    let thunks = writeCBackendRoot(cRootSource, mainSource, routines, hooks)
+    let state = %*{
+      "manifest": manifest,
+      "projectPath": normalizedAbsolutePath(cRootSource).parentDir,
+      "libPath": (if compilerLibPath.len > 0: compilerLibPath else: recordedLibPath),
+      "thunks": thunks,
+    }
+    writeFile(cBuildStatePath(nimcacheDir), state.pretty)
     result = ncbC
 
 proc nativeExportSymbols*(

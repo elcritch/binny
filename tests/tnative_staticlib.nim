@@ -1,4 +1,4 @@
-import std/[assertions, dynlib, os, osproc, strutils, tempfiles]
+import std/[assertions, dynlib, json, os, osproc, strutils, tempfiles]
 import binny/native_dynlib
 import binny/native_dynlib/staticlib
 
@@ -40,14 +40,23 @@ block c_backend_symbols_are_resolved_by_source:
     dependencyOwner = "depsZpixieZsrcZpixieZfileformatsZsvg"
   writeFile(
     temporary / "native_bindings.nim.c",
-    "void eqdestroy__u0__" & sourceOwner & "(void);\n" &
-      "void eqcopy__u3__" & sourceOwner & "(void);\n",
+    "void eqdestroy__u0__" & sourceOwner & "(void) {}\n" &
+      "void eqcopy__u3__" & sourceOwner & "(void) {}\n" &
+      "void eqcopy__u3__inactive(void);\n" &
+      "/* void eqcopy__u3__comment(void) {} */\n" &
+      "const char *example = \"void eqcopy__u3__string(void) {}\";\n",
   )
   writeFile(
     temporary / "svg.nim.c",
-    "void eqdestroy__u0__" & dependencyOwner & "(void);\n" &
-      "void eqcopy__u3__" & dependencyOwner & "(void);\n",
+    "void eqdestroy__u0__" & dependencyOwner & "(void) {}\n" &
+      "void eqcopy__u3__" & dependencyOwner & "(void) {}\n",
   )
+  let manifest = %*{
+    "outputFile": temporary / "backend",
+    "compile": [],
+    "link": [temporary / "native_bindings.nim.c.o", temporary / "svg.nim.c.o"],
+  }
+  writeFile(temporary / "backend.json", $manifest)
 
   let resolved = resolveNativeSymbols(
     temporary,
@@ -62,6 +71,36 @@ block c_backend_symbols_are_resolved_by_source:
   )
   doAssert resolved[0].cSymbol == "eqdestroy__u0__" & sourceOwner
   doAssert resolved[1].cSymbol == "eqcopy__u3__" & sourceOwner
+
+  writeFile(temporary / "stale.nim.c",
+    "void eqcopy__u3__" & sourceOwner & "(void) {}\n")
+  doAssert resolveNativeSymbols(temporary, [NativeExportSymbol(
+    sourcePath: source, nifSymbol: "=copy.3.shared"
+  )])[0].cSymbol == resolved[1].cSymbol
+
+  writeFile(temporary / "native_bindings.nim.c",
+    "void eqcopy__u3__" & sourceOwner & "(void) {}\n" &
+    "void eqcopy__u3__figdrawZbindingsZnative95bindings(void) {}\n")
+  try:
+    discard resolveNativeSymbols(temporary, [NativeExportSymbol(
+      sourcePath: source, nifSymbol: "=copy.3.shared"
+    )])
+    doAssert false, "genuine active-definition ambiguity must fail"
+  except NativeStaticLibError as error:
+    doAssert "cannot determine one C backend module suffix" in error.msg
+
+  writeFile(temporary / "native_bindings.nim.c",
+    "void eqcopy__u3__" & sourceOwner & "(void);\n")
+  doAssertRaises NativeStaticLibError:
+    discard resolveNativeSymbols(temporary, [NativeExportSymbol(
+      sourcePath: source, nifSymbol: "=copy.3.shared"
+    )])
+
+  writeFile(temporary / "another.json", $manifest)
+  doAssertRaises NativeStaticLibError:
+    discard resolveNativeSymbols(temporary, [NativeExportSymbol(
+      sourcePath: source, nifSymbol: "=copy.3.shared"
+    )])
 
 when defined(macosx) or defined(linux) or defined(freebsd) or defined(windows):
   let compiler = getCurrentCompilerExe()

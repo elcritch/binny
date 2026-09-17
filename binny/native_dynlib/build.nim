@@ -213,6 +213,8 @@ proc prepareRoutines(config: NativeDynlibBuildConfig) =
     config.producerCache, config.sourceRoot, config.sourcePath, config.cRootSource
   ]
   arguments.addExportConfig(config)
+  if config.backend == "c":
+    arguments.add "--c-build-manifest:" & config.backendOutput & ".json"
   runCommand(arguments)
 
 proc writeExportList(config: NativeDynlibBuildConfig) =

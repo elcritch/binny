@@ -126,15 +126,19 @@ Binny supports both the regular C and incremental compiler backends. The
 regular C backend is the default:
 
 1. `nim c --genBif:on` (or `nim ic --genBif:on`) writes semantic `.s.bif`
-   files and backend `.c.nif` artifacts.
+   files and backend `.c` (or `.c.nif`) artifacts.
 2. `tools/native_dynlib` reads each application BIF, applies
    `native_dynlib.json`, and selects the remaining exported routines plus custom
    ownership hooks required by public types.
-3. It matches the semantic symbol in BIF to the same symbol recorded on a
-   `.c.nif` definition, obtaining the exact backend C name.
+3. Incremental builds match semantic symbols to `.c.nif` definitions. Regular
+   C builds use only function definitions in translation units listed by the
+   compiler's active JSON link manifest, with source-aware module ownership.
+   Declarations and stale artifacts cannot supply export names.
 4. It makes those definitions liveness roots and reruns Nim's normal dependency
    closure and C emission. With `nim c`, Binny generates a temporary root
-   module; with `nim ic`, it updates the backend roots directly.
+   module; with `nim ic`, it updates the backend roots directly. The C root
+   imports the original producer even for dependency-only exports, and emits
+   out-of-line thunks for selected inline routines.
 5. On Linux and FreeBSD, the emitted C is recompiled as position-independent
    code before the generated objects are collected into
    `libproducer.private.a`.
@@ -146,7 +150,7 @@ regular C backend is the default:
    `libproducer.exports` as a Darwin export list or GNU version script. Only
    the unique alias is public.
 8. The binding generator reads procedure signatures and concrete type layouts
-   from BIF, then uses `.c.nif` for the exact import names.
+   from BIF, then uses the same active backend artifacts for exact import names.
 9. The consumer compiles against the generated Nim module and loads the dynamic
    library directly.
 
@@ -159,12 +163,15 @@ symbols the dylib exposes.
 - Archive promotion supports 64-bit Mach-O on macOS and little-endian ELF64 on
   Linux and FreeBSD.
 - The producer and caller must agree on Nim compiler, memory manager, allocator,
-  target, and native type layouts.
+  target, and native type layouts. Generated wrappers require `-d:useMalloc` and
+  `--mm:arc`, `--mm:atomicArc`, or `--mm:orc` at compile time, even without layout
+  checks. These guards do not prove that the producer used matching settings.
 - Application modules are the BIF modules whose source files live beside the
   main producer source. Compiler and dependency modules are excluded.
 - A selected routine must have one externally linked backend definition. Open
-  generics, imported declarations, and local-only inline definitions are not
-  promoted.
+  generics and imported declarations are not promoted. Selected inline routines
+  in regular C builds use automatically generated callable thunks; local symbols
+  are never force-promoted.
 - Generated bindings cover the concrete types exercised here: objects, refs,
   inheritance, case and packed objects, aliases, sequences, `Table`,
   `OrderedTable`, `CountTable`, their `Ref` variants, `HashSet`, `OrderedSet`,
@@ -202,3 +209,11 @@ generates bindings from BIF and C NIF, and runs a separate Nim consumer.
 and dependency-free consumer bindings with both compiler backends.
 `tests/tnative_dynlib_coretypes.nim` covers container reuse, range checks, typed
 buffers, and sink/lent ownership behavior with both backends under ARC and ORC.
+`tests/tnative_dynlib_c_exports.nim` covers clean two-pass C builds, stale
+artifacts, same-named modules, overloads, inline calls, and dependency-only
+producer initialization under ARC with `useMalloc`.
+
+The build helper records its exact C manifest automatically. When calling
+`prepareNativeRoutines` directly with multiple build descriptions in one cache,
+pass `cBuildManifest = "path/to/backend.json"` (or use the tool's
+`--c-build-manifest:...` option). Binny does not select a manifest by timestamp.
