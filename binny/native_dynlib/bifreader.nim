@@ -50,6 +50,7 @@ type
     arrayLength: int64
     enumValues: seq[NativeEnumValue]
     record: seq[NativeRecordPart]
+    procInfo: NativeProc
 
   PreferredTypeAlias = object
     nifSymbol: string
@@ -240,6 +241,8 @@ proc bifRangeLength(node: Cursor): int64 =
   else:
     result = -1
 
+proc parseParam(declaration: Cursor): NativeParam
+
 type CompilerTypeContext = object
   types: Table[string, PType]
   parsed: Table[string, bool]
@@ -250,6 +253,7 @@ type CompilerTypeContext = object
   records: Table[string, seq[NativeRecordPart]]
   enumValues: Table[string, seq[NativeEnumValue]]
   rangeLengths: Table[string, int64]
+  procTypes: Table[string, NativeProc]
 
 proc initCompilerTypeContext(): CompilerTypeContext =
   result.types = initTable[string, PType]()
@@ -260,6 +264,7 @@ proc initCompilerTypeContext(): CompilerTypeContext =
   result.records = initTable[string, seq[NativeRecordPart]]()
   result.enumValues = initTable[string, seq[NativeEnumValue]]()
   result.rangeLengths = initTable[string, int64]()
+  result.procTypes = initTable[string, NativeProc]()
   result.nextModuleId = 1
 
 proc compilerModuleId(context: var CompilerTypeContext, suffix: string): int32 =
@@ -515,6 +520,48 @@ proc loadCompilerInt(node: var Cursor): int64 =
   result = node.intVal
   skip node
 
+func compilerCallConvName(callConv: TCallingConvention): string =
+  case callConv
+  of ccNimCall: "nimcall"
+  of ccStdCall: "stdcall"
+  of ccCDecl: "cdecl"
+  of ccSafeCall: "safecall"
+  of ccSysCall: "syscall"
+  of ccInline: "inline"
+  of ccNoInline: "noinline"
+  of ccFastCall: "fastcall"
+  of ccThisCall: "thiscall"
+  of ccClosure: "closure"
+  of ccNoConvention: "noconv"
+  of ccMember: "member"
+
+proc compilerProcInfo(
+    context: CompilerTypeContext, symbol: string, typ: PType, node: Cursor
+): NativeProc =
+  result.name = symbolBase(symbol)
+  result.nifSymbol = symbol
+  result.callConv = compilerCallConvName(typ.callConvImpl)
+  result.closureEnv = typ.callConvImpl == ccClosure
+  result.varargs = tfVarargs in typ.flagsImpl
+  if typ.sonsImpl.len > 0:
+    result.returnTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[0])
+    result.returnByVar = result.returnTypeSymbol.startsWith("`t23.")
+    result.returnLowering =
+      if result.returnTypeSymbol.len == 0: nlVoid else: nlDirect
+
+  proc collectParams(node: Cursor, params: var seq[NativeParam]) =
+    var children = node.childCursor()
+    while children.hasMore:
+      if children.kind == TagLit:
+        if children.tagName == "sd" and
+            not children.findChildTag("param").cursorIsNil:
+          params.add children.parseParam
+        else:
+          collectParams(children, params)
+      children.skip
+
+  collectParams(node, result.params)
+
 proc compilerSymStub(context: var CompilerTypeContext, symbol: string): PSym =
   if symbol.len == 0:
     return nil
@@ -606,6 +653,7 @@ proc loadCompilerTypeDef(context: var CompilerTypeContext, node: var Cursor): PT
   context.parsed[name] = true
   result.state = Complete
 
+  var procNode: Cursor
   node.into:
     if node.kind != SymbolDef:
       fail("Nim compiler type definition has an invalid name in BIF")
@@ -625,6 +673,8 @@ proc loadCompilerTypeDef(context: var CompilerTypeContext, node: var Cursor): PT
       skip node
     else:
       let nodeValue = node
+      if result.kind == tyProc and nodeValue.tagName == "formalparams":
+        procNode = nodeValue
       context.scanCompilerTypeDefs(nodeValue)
       case nodeValue.kind
       of TagLit:
@@ -646,6 +696,8 @@ proc loadCompilerTypeDef(context: var CompilerTypeContext, node: var Cursor): PT
     loadCompilerLoc(node)
     while node.hasMore:
       result.sonsImpl.add context.loadCompilerTypeRef(node)
+  if not procNode.cursorIsNil:
+    context.procTypes[name] = context.compilerProcInfo(name, result, procNode)
 
 proc compilerLayoutKind(kind: TTypeKind): string =
   case kind
@@ -700,6 +752,7 @@ proc compilerAbiLayout(
   result.union = tfUnion in typ.flagsImpl
   result.record = context.records.getOrDefault(symbol)
   result.enumValues = context.enumValues.getOrDefault(symbol)
+  result.procInfo = context.procTypes.getOrDefault(symbol)
   if symbol in context.rangeLengths:
     result.arrayLength = context.rangeLengths[symbol]
 
@@ -714,6 +767,7 @@ proc compilerAbiLayout(
         result.baseTypeSymbol = actualLayout.baseTypeSymbol
         result.indexTypeSymbol = actualLayout.indexTypeSymbol
         result.elementTypeSymbol = actualLayout.elementTypeSymbol
+        result.procInfo = actualLayout.procInfo
         if result.size < 0:
           result.size = actualLayout.size
         if result.alignment < 0:
@@ -802,6 +856,8 @@ proc mergeLayout(layouts: var Table[string, AbiTypeEntry], layout: AbiTypeEntry)
     merged.indexTypeSymbol = layout.indexTypeSymbol
   if merged.elementTypeSymbol.len == 0:
     merged.elementTypeSymbol = layout.elementTypeSymbol
+  if merged.procInfo.nifSymbol.len == 0:
+    merged.procInfo = layout.procInfo
   merged.inheritable = merged.inheritable or layout.inheritable
   merged.packed = merged.packed or layout.packed
   merged.union = merged.union or layout.union
@@ -1092,6 +1148,8 @@ proc applyLayout(typ: var NativeType, layouts: Table[string, AbiTypeEntry]): boo
       typ.kind = ntSet
     of "tuple":
       typ.kind = ntTuple
+    of "proc":
+      typ.kind = ntProc
     else:
       return false
   typ.size = declared.size
@@ -1112,6 +1170,8 @@ proc applyLayout(typ: var NativeType, layouts: Table[string, AbiTypeEntry]): boo
     typ.arrayLength = declared.arrayLength
   if typ.kind != ntAlias:
     typ.elementTypeSymbol = declared.elementTypeSymbol
+  if typ.kind == ntProc:
+    typ.procInfo = declared.procInfo
   typ.record = recordLayout.record
   result = true
 
@@ -1132,6 +1192,7 @@ proc typeFromLayout(layout: AbiTypeEntry): NativeType =
   result.union = layout.union
   result.enumValues = layout.enumValues
   result.record = layout.record
+  result.procInfo = layout.procInfo
   case layout.kind
   of "object":
     result.kind = ntObject
@@ -1149,6 +1210,8 @@ proc typeFromLayout(layout: AbiTypeEntry): NativeType =
     result.kind = ntTuple
   of "openarray":
     result.kind = ntOpenArray
+  of "proc":
+    result.kind = ntProc
   else:
     fail("unsupported native ABI layout kind: " & layout.kind)
 
@@ -1222,7 +1285,8 @@ proc collectStdOrderedTables(
 
 func isMaterializedKind(kind: string): bool =
   kind in
-    ["object", "enum", "distinct", "array", "sequence", "set", "tuple", "openarray"]
+    ["object", "enum", "distinct", "array", "sequence", "set", "tuple", "openarray",
+     "proc"]
 
 proc addLayoutDependency(
   layoutSymbol: string,
@@ -1274,6 +1338,9 @@ proc collectLayoutDependencies(
   addLayoutDependency(layout.baseTypeSymbol, layouts, dependencies)
   addLayoutDependency(layout.indexTypeSymbol, layouts, dependencies)
   addLayoutDependency(layout.elementTypeSymbol, layouts, dependencies)
+  addLayoutDependency(layout.procInfo.returnTypeSymbol, layouts, dependencies)
+  for param in layout.procInfo.params:
+    addLayoutDependency(param.typeSymbol, layouts, dependencies)
   collectRecordDependencies(layout.record, layouts, dependencies)
 
 proc addLayoutDependency(
@@ -1317,6 +1384,7 @@ proc shouldSkipReferencedType(
   let layout = layouts[symbol]
   let usableUnknownLayout =
     layout.kind in ["openarray", "sequence", "set"] or
+    layout.kind == "proc" and layout.procInfo.nifSymbol.len > 0 or
     layout.kind == "array" and (
       layout.arrayLength >= 0 or
       layout.indexTypeSymbol.len > 0 and layout.elementTypeSymbol.len > 0
@@ -1397,6 +1465,13 @@ proc collectReferencedLayoutDependencies(
   collectReferencedType(
     layout.elementTypeSymbol, layouts, requiredTypes, skipInternal, opaqueTypes
   )
+  collectReferencedType(
+    layout.procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternal, opaqueTypes
+  )
+  for param in layout.procInfo.params:
+    collectReferencedType(
+      param.typeSymbol, layouts, requiredTypes, skipInternal, opaqueTypes
+    )
   collectReferencedRecordDependencies(
     layout.record, layouts, requiredTypes, skipInternal, opaqueTypes
   )
@@ -1736,6 +1811,9 @@ proc buildNativeApi(
     unwrapVarReturn(procInfo, layouts)
   for hook in result.hooks.mitems:
     unwrapVarReturn(hook.procInfo, layouts)
+  for layout in layouts.mvalues:
+    if layout.kind == "proc":
+      unwrapVarReturn(layout.procInfo, layouts)
 
   var skipInternalTypes = internalLayoutTypes
 
@@ -1823,7 +1901,8 @@ proc buildNativeApi(
       layout.kind == "array" and layout.indexTypeSymbol.len > 0 and
       layout.elementTypeSymbol.len > 0 or layout.kind in [
         "openarray", "sequence", "set"
-      ] or layout.kind in ["object", "tuple"] and layout.record.len > 0
+      ] or layout.kind in ["object", "tuple"] and layout.record.len > 0 or
+      layout.kind == "proc" and layout.procInfo.nifSymbol.len > 0
     ) and layout.kind.isMaterializedKind and layout.typeSymbol in requiredTypes and
         not hasUnresolvedElement and not hasMissingTupleFields:
       if layout.typeSymbol in preferredLayoutNames:

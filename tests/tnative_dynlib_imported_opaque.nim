@@ -28,9 +28,14 @@ when defined(macosx) or defined(linux) or defined(freebsd) or defined(windows):
       cache = temporary / "nimcache"
       backend = cache / "producer-backend"
       bindings = temporary / "producer_abi.nim"
+      reconstructed_bindings = temporary / "producer_reconstructed_abi.nim"
       consumer = temporary / "consumer.nim"
       consumerCache = cache / "consumer"
       consumerBinary = temporary / ("consumer" & ExeExt)
+      reconstructed_consumer = temporary / "reconstructed_consumer.nim"
+      reconstructed_consumer_cache = cache / "reconstructed-consumer"
+      reconstructed_consumer_binary =
+        temporary / ("reconstructed-consumer" & ExeExt)
     defer:
       removeDir(temporary)
 
@@ -94,6 +99,21 @@ proc siwinWindowStep*(window: Window): int {.noinline.} =
     doAssert "proc siwinWindowStep*(window: Window): int" in generated
     doAssert "doAssert sizeof(Window) == 8" in generated
 
+    let reconstructed_config = initBifNativeBindingsConfig(
+      source,
+      cache,
+      temporary / "libproducer",
+      source.parentDir,
+      initNativeExportConfig(),
+    )
+    doAssert reconstructed_config.writeNativeBindings(reconstructed_bindings)
+    let reconstructed_generated = readFile(reconstructed_bindings)
+    doAssert "  ClipboardContentChangedEvent*" in reconstructed_generated
+    doAssert "  Clipboard* = ref object" in reconstructed_generated
+    doAssert "onContentChanged*: proc(e: ClipboardContentChangedEvent) {.closure.}" in
+      reconstructed_generated
+    doAssert "  Window* = ref object" in reconstructed_generated
+
     writeFile(
       consumer,
       """
@@ -117,6 +137,34 @@ doAssert siwinWindowStep(instance) == 1
         "--nimcache:" & consumerCache,
         "--out:" & consumerBinary,
         consumer,
+      ]
+    )
+
+    writeFile(
+      reconstructed_consumer,
+      """
+import producer_reconstructed_abi
+
+static:
+  doAssert sizeof(Window) == 8
+  doAssert sizeof(Clipboard) == 8
+  doAssert offsetOf(Window, clipboard) == 0
+  doAssert offsetOf(Clipboard, onContentChanged) == 0
+
+let instance = Window()
+doAssert siwinWindowStep(instance) == 1
+""",
+    )
+    discard run(
+      [
+        compiler,
+        "c",
+        "--mm:orc",
+        "-d:useMalloc",
+        "--path:" & temporary,
+        "--nimcache:" & reconstructed_consumer_cache,
+        "--out:" & reconstructed_consumer_binary,
+        reconstructed_consumer,
       ]
     )
   else:

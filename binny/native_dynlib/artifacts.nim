@@ -93,6 +93,27 @@ func knownTypeExpression(symbol: string, names: Table[string, string]): string =
   if result.len == 0:
     result = simpleBuiltinType(symbol)
 
+proc knownProcTypeExpression(
+    procInfo: NativeProc, names: Table[string, string]
+): string =
+  var parts: seq[string]
+  for index, param in procInfo.params:
+    let typeExpression = knownTypeExpression(param.typeSymbol, names)
+    if typeExpression.len == 0:
+      return
+    let paramName =
+      if param.name.len > 0: nimIdentifier(param.name) else: "arg" & $index
+    let modifier = if param.byVar: "var " else: ""
+    parts.add paramName & ": " & modifier & typeExpression
+  result = "proc(" & parts.join("; ") & ")"
+  if procInfo.returnTypeSymbol.len > 0:
+    let returnType = knownTypeExpression(procInfo.returnTypeSymbol, names)
+    if returnType.len == 0:
+      return ""
+    result.add ": " & (if procInfo.returnByVar: "var " else: "") & returnType
+  if procInfo.callConv.len > 0:
+    result.add " {." & procInfo.callConv & ".}"
+
 proc typeSize(api: NativeApi, symbol: string): int64 =
   for candidate in api.types:
     if (candidate.nifSymbol == symbol or candidate.typeId == symbol) and
@@ -128,6 +149,8 @@ proc nimType(symbol: string, names: Table[string, string]): string
 proc typeNames(api: NativeApi): Table[string, string] =
   for typ in api.types:
     if typ.isAnonymousGenericType:
+      continue
+    elif typ.kind == ntProc:
       continue
     elif typ.kind == ntRange and typ.name in ["Natural", "Positive"]:
       result[typ.nifSymbol] = typ.name
@@ -182,6 +205,18 @@ proc typeNames(api: NativeApi): Table[string, string] =
       let rendered = "openArray[" & nimType(typ.elementTypeSymbol, result) & "]"
       result[typ.nifSymbol] = rendered
       result[typ.typeId] = rendered
+
+  changed = true
+  while changed:
+    changed = false
+    for typ in api.types:
+      if typ.kind != ntProc or typ.typeId in result:
+        continue
+      let rendered = knownProcTypeExpression(typ.procInfo, result)
+      if rendered.len > 0:
+        result[typ.nifSymbol] = rendered
+        result[typ.typeId] = rendered
+        changed = true
 
 proc nimType(symbol: string, names: Table[string, string]): string =
   if symbol.len == 0:
@@ -394,8 +429,8 @@ proc generateTuple(
 
 proc generateTypes(api: NativeApi, names: Table[string, string]): string =
   let types = api.types.filterIt(
-    not it.isBuiltinType and not it.imported and
-      it.kind notin {ntImportedGeneric, ntOpenArray} and
+      not it.isBuiltinType and not it.imported and
+      it.kind notin {ntImportedGeneric, ntOpenArray, ntProc} and
       not it.isAnonymousGenericType
   )
   if types.len == 0:
@@ -454,6 +489,10 @@ proc generateTypes(api: NativeApi, names: Table[string, string]): string =
       raise newException(
         NativeArtifactError, "open arrays are not standalone type declarations"
       )
+    of ntProc:
+      raise newException(
+        NativeArtifactError, "proc types are not standalone type declarations"
+      )
     of ntRange:
       raise newException(
         NativeArtifactError, "unsupported named native ABI range: " & typ.name
@@ -496,7 +535,9 @@ proc generateFieldChecks(
         result.add generateFieldChecks(typeName, branch.record, indent, exportedOnly)
 
 proc generateLayoutChecks(api: NativeApi, names: Table[string, string]): string =
-  let types = api.types.filterIt(not it.isBuiltinType and it.kind != ntOpenArray)
+  let types = api.types.filterIt(
+    not it.isBuiltinType and it.kind notin {ntOpenArray, ntProc}
+  )
   if types.len == 0:
     return
   result.add "static:\n"
