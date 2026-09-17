@@ -1,4 +1,4 @@
-import std/[algorithm, os, strutils, tables]
+import std/[algorithm, os, sequtils, strutils, tables]
 import ./nif/[bif, nifcoreparse, nifqueries]
 import exportconfig
 import model
@@ -12,6 +12,7 @@ type
     nifSymbol: string
     cSymbol: string
     returnTypeSymbol: string
+    resolvedReturnTypeSymbol: string
     returnLowering: NativeLoweringMode
     params: seq[NativeParam]
 
@@ -25,6 +26,7 @@ type
   BifModule = object
     identity: string
     name: string
+    sourcePath: string
 
   BifNativeDescription = object
     libraryName: string
@@ -774,6 +776,7 @@ proc compilerLayoutKind(kind: TTypeKind): string =
   case kind
   of tyBool: "bool"
   of tyChar: "char"
+  of tyAlias: "alias"
   of tyGenericInvocation: "genericinvocation"
   of tyGenericBody: "genericbody"
   of tyGenericInst: "genericinstance"
@@ -894,7 +897,7 @@ proc compilerAbiLayout(
             alignment: -1,
           ),
         )
-  of tyDistinct, tyGenericBody, tyGenericInvocation, tyOpenArray, tyRange, tySequence,
+  of tyAlias, tyDistinct, tyGenericBody, tyGenericInvocation, tyOpenArray, tyRange, tySequence,
       tySet, tyString, tyUncheckedArray, tyVar, tyVarargs, tyLent, tySink:
     # These compiler container/modifier types expose their payload as the
     # final son, matching ``ast.elementType``/``typeBodyImpl``.
@@ -928,7 +931,8 @@ proc mergeLayout(layouts: var Table[string, AbiTypeEntry], layout: AbiTypeEntry)
     merged.instantiatedTypeSymbol = layout.instantiatedTypeSymbol
   if merged.kind in ["genericinstance", "genericinvocation", "genericbody"] and
       layout.kind in
-      ["object", "enum", "distinct", "array", "sequence", "set", "tuple", "openarray"]:
+      ["alias", "object", "enum", "distinct", "array", "sequence", "set", "tuple",
+       "openarray", "ref", "pointer", "range", "proc", "uncheckedarray"]:
     merged.kind = layout.kind
   if merged.size < 0 and layout.size >= 0:
     merged.size = layout.size
@@ -946,6 +950,8 @@ proc mergeLayout(layouts: var Table[string, AbiTypeEntry], layout: AbiTypeEntry)
     merged.indexTypeSymbol = layout.indexTypeSymbol
   if merged.elementTypeSymbol.len == 0:
     merged.elementTypeSymbol = layout.elementTypeSymbol
+  if merged.procInfo.nifSymbol.len == 0:
+    merged.procInfo = layout.procInfo
   if merged.genericTypeSymbol.len == 0:
     merged.genericTypeSymbol = layout.genericTypeSymbol
     merged.genericArguments = layout.genericArguments
@@ -987,6 +993,21 @@ proc resolveRecordSelectors(
         resolveRecordSelectors(branch.record, layouts)
 
 proc finalizeLayouts(layouts: var Table[string, AbiTypeEntry]) =
+  # Each serialized typedef may refer to a realized generic body defined in a
+  # different BIF. Resolve that exact link after all definitions have loaded;
+  # a temporary per-typedef compiler context only has a partial body stub.
+  var changed = true
+  while changed:
+    changed = false
+    for symbol in toSeq(layouts.keys):
+      let layout = layouts[symbol]
+      if layout.instantiatedTypeSymbol notin layouts: continue
+      var body = layouts[layout.instantiatedTypeSymbol]
+      body.typeSymbol = symbol
+      body.semanticTypeSymbol = "" # The instance retains its own nominal identity.
+      body.instantiatedTypeSymbol = ""
+      layouts.mergeLayout(body)
+      if layouts[symbol] != layout: changed = true
   for layout in layouts.mvalues:
     resolveRecordSelectors(layout.record, layouts)
     for part in layout.record.mitems:
@@ -1014,6 +1035,10 @@ proc parseNativeType(
   typ.arrayLength = -1
   let sourceType = declaration.findChildTag("type0")
   if sourceType.cursorIsNil:
+    return false
+  if not sourceType.findChildTag("genericparams").cursorIsNil:
+    # A generic declaration's fields still contain unbound parameters. Only
+    # compiler-realized instances belong in the runtime ABI.
     return false
 
   let refType = sourceType.findChildTag("refty")
@@ -1078,6 +1103,13 @@ proc parseNativeType(
       let indexType = indexTypeNode.findLastChildKind(Symbol)
       if not indexType.cursorIsNil:
         typ.indexTypeSymbol = indexType.symName
+  elif not typeDesc.cursorIsNil and
+      typeOrdinal(typeDesc.findChildKind(SymbolDef).symName) == ord(tyAlias):
+    let target = typeDesc.findLastChildKind(Symbol)
+    if target.cursorIsNil:
+      return false
+    typ.kind = ntAlias
+    typ.elementTypeSymbol = target.symName
   else:
     return false
   result = true
@@ -1235,6 +1267,8 @@ proc applyLayout(typ: var NativeType, layouts: Table[string, AbiTypeEntry]): boo
   if typ.typeId notin layouts:
     return false
   let declared = layouts[typ.typeId]
+  if typ.kind == ntAlias and declared.kind == "alias" and declared.elementTypeSymbol.len > 0:
+    typ.elementTypeSymbol = declared.elementTypeSymbol
   if typ.kind == ntAlias and typ.elementTypeSymbol == typ.typeId:
     case declared.kind
     of "object":
@@ -1309,6 +1343,8 @@ proc typeFromLayout(layout: AbiTypeEntry): NativeType =
   result.record = layout.record
   result.procInfo = layout.procInfo
   case layout.kind
+  of "alias":
+    result.kind = ntAlias
   of "object":
     result.kind = ntObject
   of "enum":
@@ -1459,7 +1495,7 @@ proc collectStdContainers(
 
 func isMaterializedKind(kind: string): bool =
   kind in
-    ["object", "enum", "distinct", "array", "sequence", "set", "tuple", "openarray",
+    ["alias", "object", "enum", "distinct", "array", "sequence", "set", "tuple", "openarray",
      "proc", "range", "pointer", "ref", "uncheckedarray"]
 
 proc addLayoutDependency(
@@ -1557,7 +1593,7 @@ proc shouldSkipReferencedType(
     return false
   let layout = layouts[symbol]
   let usableUnknownLayout =
-    layout.kind in ["openarray", "sequence", "set", "uncheckedarray"] or
+    layout.kind in ["alias", "openarray", "sequence", "set", "uncheckedarray"] or
     layout.kind in ["pointer", "ref"] and layout.elementTypeSymbol.len > 0 or
     layout.kind == "range" and layout.rangeLow.len > 0 and layout.rangeHigh.len > 0 or
     layout.kind == "proc" and layout.procInfo.nifSymbol.len > 0 or
@@ -1766,7 +1802,8 @@ proc bifNativeDescription(
     if source.len == 0:
       continue
     let identity = path.bifIdentity
-    result.modules.add BifModule(identity: identity, name: source.splitFile.name)
+    result.modules.add BifModule(identity: identity, name: source.splitFile.name,
+      sourcePath: source.normalizedAbsolutePath)
     if source.normalizedAbsolutePath.pathIsWithin(root):
       result.applicationModules.add identity
 
@@ -1796,16 +1833,24 @@ proc bifNativeDescription(
 proc applyTypeImports(
     api: var NativeApi, typeImports: openArray[NativeTypeImport],
     layouts: Table[string, AbiTypeEntry],
+    modules: openArray[BifModule], sourceRoot: string,
 ) =
+  var module_sources: Table[string, string]
+  let root = sourceRoot.normalizedAbsolutePath
+  for module in modules:
+    module_sources[module.identity] = relativePath(module.sourcePath, root).replace('\\', '/')
   for typeImport in typeImports:
     var matchingIndex = -1
     for index, typ in api.types:
       if typ.name != typeImport.name:
         continue
+      if not includeProc(typeImport.name, typeImport.source).matches(
+          module_sources.getOrDefault(symbolModule(typ.nifSymbol)), typ.name):
+        continue
       if matchingIndex >= 0:
         fail(
           "native type import " & typeImport.name &
-            " matches more than one ABI type; use a unique public type name"
+            " matches more than one ABI type; specify its producer source"
         )
       matchingIndex = index
     if matchingIndex < 0:
@@ -1841,13 +1886,15 @@ proc applyTypeImports(
     while changed:
       changed = false
       for layout in layouts.values:
-        if layout.instantiatedTypeSymbol.len == 0:
+        let target = if layout.kind == "alias": layout.elementTypeSymbol
+                     else: layout.instantiatedTypeSymbol
+        if target.len == 0:
           continue
         if layout.typeSymbol in equivalents and
-            layout.instantiatedTypeSymbol notin equivalents:
-          equivalents[layout.instantiatedTypeSymbol] = true
+            target notin equivalents:
+          equivalents[target] = true
           changed = true
-        elif layout.instantiatedTypeSymbol in equivalents and
+        elif target in equivalents and
             layout.typeSymbol notin equivalents:
           equivalents[layout.typeSymbol] = true
           changed = true
@@ -1880,6 +1927,7 @@ proc buildNativeApi(
     bifPath: string,
     sourceDescription: BifNativeDescription,
     typeImports: openArray[NativeTypeImport],
+    sourceRoot: string,
 ): NativeApi =
   var description = sourceDescription
   result.libraryName = description.libraryName
@@ -1896,6 +1944,16 @@ proc buildNativeApi(
     if declaration.cursorIsNil:
       fail("semantic declaration not found for " & item.nifSymbol)
     var semantic = parseNativeProc(declaration, item)
+    let descriptor = declaration.findChildTag("td")
+    if not descriptor.cursorIsNil:
+      let proc_type = descriptor.findChildKind(SymbolDef).symName
+      if proc_type in layouts and layouts[proc_type].kind == "proc":
+        # Generic instances can retain the declaration's source return node.
+        # The compiler's concrete proc type carries the actual result type.
+        semantic.returnTypeSymbol = layouts[proc_type].procInfo.returnTypeSymbol
+        semantic.returnByVar = typeOrdinal(semantic.returnTypeSymbol) == ord(tyVar)
+        semantic.returnByLent = typeOrdinal(semantic.returnTypeSymbol) == ord(tyLent)
+    item.resolvedReturnTypeSymbol = semantic.returnTypeSymbol
     unwrapSignatureTypes(semantic, layouts)
     item.returnTypeSymbol = semantic.returnTypeSymbol
     item.params = semantic.params
@@ -2007,7 +2065,7 @@ proc buildNativeApi(
   for typ in importedGenericTypes.values:
     result.types.add typ
 
-  result.applyTypeImports(typeImports, layouts)
+  result.applyTypeImports(typeImports, layouts, description.modules, sourceRoot)
   var opaqueTypes = importedTypeSymbols(result, layouts)
   # The standard library supplies these generic layouts. Their arguments
   # remain ABI dependencies, but their private storage declarations do not.
@@ -2038,7 +2096,11 @@ proc buildNativeApi(
     let declaration = findSemanticDeclaration(modules, nifSymbol)
     if declaration.cursorIsNil:
       fail("semantic declaration not found for " & nifSymbol)
-    result.procs.add parseNativeProc(declaration, item)
+    var routine = parseNativeProc(declaration, item)
+    routine.returnTypeSymbol = item.resolvedReturnTypeSymbol
+    routine.returnByVar = typeOrdinal(routine.returnTypeSymbol) == ord(tyVar)
+    routine.returnByLent = typeOrdinal(routine.returnTypeSymbol) == ord(tyLent)
+    result.procs.add routine
 
   for item in description.hooks:
     let declaration = findSemanticDeclaration(modules, item.nifSymbol)
@@ -2144,7 +2206,7 @@ proc buildNativeApi(
       layout.size >= 0 or layout.arrayLength >= 0 or
       layout.kind == "array" and layout.indexTypeSymbol.len > 0 and
       layout.elementTypeSymbol.len > 0 or layout.kind in [
-        "openarray", "sequence", "set", "uncheckedarray"
+        "alias", "openarray", "sequence", "set", "uncheckedarray"
       ] or layout.kind in ["object", "tuple"] and layout.record.len > 0 or
       layout.kind in ["pointer", "ref"] and layout.elementTypeSymbol.len > 0 or
       layout.kind == "range" and layout.rangeLow.len > 0 and layout.rangeHigh.len > 0 or
@@ -2228,7 +2290,7 @@ proc readBifNativeApi*(
   let
     bifPath = findSemanticBif(nimcacheDir, sourcePath)
     initSymbol = nativeInitSymbol(libraryName, bifPath)
-    routineSymbols = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig)
+    routineSymbols = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig, sourcePath)
     nativeHooks = nativeHookSymbols(nimcacheDir, sourceRoot)
   var allSymbols = routineSymbols
   var hookSymbolIndexes: seq[tuple[hookIndex: int, symbolIndex: int]]
@@ -2247,4 +2309,4 @@ proc readBifNativeApi*(
     description = bifNativeDescription(
       nimcacheDir, sourceRoot, libraryName, initSymbol, routines, hooks
     )
-  result = buildNativeApi(bifPath, description, exportConfig.typeImports)
+  result = buildNativeApi(bifPath, description, exportConfig.typeImports, sourceRoot)

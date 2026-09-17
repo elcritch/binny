@@ -12,12 +12,15 @@ type
     ## An empty ``source`` matches every application source file.
     source*: string
     name*: string
+    typeArgs*: seq[string] ## Optional exact concrete generic arguments.
+      ## Named types use ``source.nim:Type`` relative to the producer's source root.
 
   NativeTypeImport* = object
     ## Reuses a type declared by an imported Nim module. ``name`` is the
     ## unqualified ABI type name and ``module`` is its Nim import path.
     name*: string
     module*: string
+    source*: string ## Optional source-relative producer ownership selector, with ``*`` globs.
     ## Re-exports the imported type from generated bindings unless disabled.
     exported*: bool
 
@@ -34,21 +37,22 @@ type
 proc fail(message: string) {.noinline, noreturn.} =
   raise newException(NativeExportConfigError, message)
 
-func excludeProc*(name: string, source = ""): NativeProcSelector =
+func excludeProc*(name: string, source = "", typeArgs: seq[string] = @[]): NativeProcSelector =
   ## Selects procedures to exclude by source-relative path and Nim name.
   ## Write quoted names without backticks, for example ``foo=`` or ``for``.
-  NativeProcSelector(source: source.replace('\\', '/'), name: name)
+  NativeProcSelector(source: source.replace('\\', '/'), name: name, typeArgs: typeArgs)
 
-func includeProc*(name: string, source = ""): NativeProcSelector =
+func includeProc*(name: string, source = "", typeArgs: seq[string] = @[]): NativeProcSelector =
   ## Selects a public procedure to include by source-relative path and Nim name.
   ## Write quoted names without backticks, for example ``foo=`` or ``for``.
-  NativeProcSelector(source: source.replace('\\', '/'), name: name)
+  NativeProcSelector(source: source.replace('\\', '/'), name: name, typeArgs: typeArgs)
 
-func importType*(name, module: string, exported = true): NativeTypeImport =
+func importType*(name, module: string, exported = true, source = ""): NativeTypeImport =
   ## Selects a generated type to reuse from an imported Nim module.
   ## Set ``exported`` to false to keep it private to the generated module.
   NativeTypeImport(
-    name: name, module: module.replace('\\', '/'), exported: exported
+    name: name, module: module.replace('\\', '/'), exported: exported,
+    source: source.replace('\\', '/')
   )
 
 proc validateSelector(selector: NativeProcSelector, description: string) =
@@ -58,6 +62,9 @@ proc validateSelector(selector: NativeProcSelector, description: string) =
     fail(description & " names must omit backticks: " & selector.name)
   if selector.source.isAbsolute:
     fail(description & " source must be relative: " & selector.source)
+  for argument in selector.typeArgs:
+    if argument.len == 0:
+      fail(description & " has an empty generic argument")
 
 proc validateTypeImport(typeImport: NativeTypeImport, description: string) =
   if typeImport.name.len == 0:
@@ -68,6 +75,8 @@ proc validateTypeImport(typeImport: NativeTypeImport, description: string) =
     fail(description & " has an empty module name")
   if typeImport.module.isAbsolute:
     fail(description & " module must be relative: " & typeImport.module)
+  if typeImport.source.isAbsolute:
+    fail(description & " source must be relative: " & typeImport.source)
   for character in typeImport.module:
     if character notin {
       'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_', '/', '.', '-'
@@ -123,7 +132,7 @@ func globMatches(value, pattern: string): bool =
   result = patternIndex == pattern.len
 
 func matches*(selector: NativeProcSelector, source, name: string): bool =
-  ## Returns whether a source-relative procedure matches this selector.
+  ## Matches source/name; concrete ``typeArgs`` are checked against BIF evidence.
   let sourceMatches =
     selector.source.len == 0 or
     globMatches(source.replace('\\', '/'), selector.source.replace('\\', '/'))
@@ -143,7 +152,7 @@ proc rejectUnknownFields(
 proc parseSelector(node: JsonNode, field: string, index: int): NativeProcSelector =
   let description = field & "[" & $index & "]"
   node.requireObject(description)
-  node.rejectUnknownFields(["source", "name"], description)
+  node.rejectUnknownFields(["source", "name", "typeArgs"], description)
   if not node.hasKey("name") or node["name"].kind != JString:
     fail(description & ".name must be a string")
   if node.hasKey("source") and node["source"].kind != JString:
@@ -156,11 +165,18 @@ proc parseSelector(node: JsonNode, field: string, index: int): NativeProcSelecto
         "",
     name: node["name"].getStr,
   )
+  if node.hasKey("typeArgs"):
+    if node["typeArgs"].kind != JArray:
+      fail(description & ".typeArgs must be an array of strings")
+    for argument in node["typeArgs"]:
+      if argument.kind != JString:
+        fail(description & ".typeArgs must contain strings")
+      result.typeArgs.add argument.getStr
 
 proc parseTypeImport(node: JsonNode, index: int): NativeTypeImport =
   let description = "typeImports[" & $index & "]"
   node.requireObject(description)
-  node.rejectUnknownFields(["name", "module", "export"], description)
+  node.rejectUnknownFields(["name", "module", "export", "source"], description)
   if not node.hasKey("name") or node["name"].kind != JString:
     fail(description & ".name must be a string")
   if not node.hasKey("module") or node["module"].kind != JString:
@@ -170,7 +186,10 @@ proc parseTypeImport(node: JsonNode, index: int): NativeTypeImport =
     if node["export"].kind != JBool:
       fail(description & ".export must be a boolean")
     exported = node["export"].getBool
-  result = importType(node["name"].getStr, node["module"].getStr, exported)
+  if node.hasKey("source") and node["source"].kind != JString:
+    fail(description & ".source must be a string")
+  result = importType(node["name"].getStr, node["module"].getStr, exported,
+    source = node.getOrDefault("source").getStr)
   result.validateTypeImport(description)
 
 proc loadNativeExportConfig*(path: string): NativeExportConfig =

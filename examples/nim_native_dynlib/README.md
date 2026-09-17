@@ -91,6 +91,54 @@ imported type private, set its `export` field to `false`:
 }
 ```
 
+Concrete generic routines are selected through their public declaration's
+source/name, just like ordinary routines. Binny follows the compiler's
+`instantiatedFrom` and generic `offer` records; it exports every concrete
+specialization in the active producer import graph, not generic declarations
+or instances left by inactive builds. The producer must instantiate the desired
+specializations. C builds generate callable forwarding thunks automatically,
+including for generic inline routines.
+
+Use optional `typeArgs` to select an exact specialization. Builtin arguments use
+their Nim spelling; named arguments use `source.nim:Type`, relative to the
+configured producer source root. Arguments do not accept globs. For example,
+with FigDraw's `src/figdraw/bindings` as the source root:
+
+```json
+{
+  "includeProcs": [
+    {"source": "../figrender.nim", "name": "backendKind",
+     "typeArgs": ["../windowing/siwinshim.nim:SiwinRenderBackend"]},
+    {"source": "../figrender.nim", "name": "setText*",
+     "typeArgs": ["../windowing/siwinshim.nim:SiwinRenderBackend"]}
+  ],
+  "typeImports": [
+    {"name": "CAMetalLayer", "module": "metalx/cametal",
+     "source": "*metalx/src/metalx/cametal.nim"},
+    {"name": "Lock", "module": "std/locks"},
+    {"name": "Cond", "module": "std/locks"},
+    {"name": "NSView", "module": "darwin/app_kit/nsview",
+     "source": "*darwin/darwin/app_kit/nsview.nim"}
+  ]
+}
+```
+
+The optional `typeImports.source` identifies the producer declaration's module,
+independently of the consumer's `module` import path. It uses the same relative
+path/glob rules as routine selection. Omitting it retains strict name ambiguity
+checks. Same-named imported types are qualified in signatures and layout checks;
+dependency aliases follow exact BIF targets, while `distinct` types stay distinct.
+Selected specializations that erase to indistinguishable parameter signatures
+are rejected with a request to select `typeArgs`, rather than choosing one.
+
+The non-graphical macOS integration probe uses actual FigDraw renderer types and
+all seven backend/text-flag routines without opening a window or creating a GPU
+context. It writes only into Binny's `.nimcache/figdraw-renderer-probe`:
+
+```sh
+/path/to/Nim/bin/nim c -r --path:. tools/probe_figdraw_renderer.nim /path/to/figdraw
+```
+
 The workflow uses and builds these files:
 
 ```text

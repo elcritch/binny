@@ -7,6 +7,7 @@
 import std/[algorithm, cmdline, json, os, osproc, sets, streams, strutils, tables, tempfiles]
 import nif/[bif, nifcore, nifcoreparse, nifqueries]
 import exportconfig
+import genericexports
 
 type
   NativeStaticLibError* = object of CatchableError
@@ -24,6 +25,11 @@ type
     cSymbol*: string
     inlineRoutine: bool
     sourceLine, sourceColumn: int
+    genericArguments: seq[string]
+    genericSources: seq[string]
+    genericOrigin: string
+    genericArgumentSelectors: seq[string]
+    genericSignature: string
 
   NativeHookSymbol* = object
     sourcePath*: string
@@ -279,6 +285,12 @@ func backendSymbol(symbol: NativeExportSymbol): string =
   else:
     symbol.nifSymbol
 
+func thunkKey(symbol: NativeExportSymbol): string =
+  if symbol.genericOrigin.len > 0:
+    "generic:" & symbol.genericOrigin & "\x1f" & symbol.genericArgumentSelectors.join("\x1f")
+  else:
+    symbol.nifSymbol
+
 proc declarationTypeSymbol(declaration: Cursor): string =
   let typeDesc = declaration.findChildTag("td")
   if not typeDesc.cursorIsNil:
@@ -327,10 +339,28 @@ proc firstParameterType(declaration: Cursor): string =
         return typeSymbol.symName
     children.skip
 
+proc activeSemanticModules(nimcacheDir, mainSource: string): HashSet[string] =
+  if mainSource.len == 0: return
+  var pending = @[bifModuleSuffix(findSemanticBifPath(nimcacheDir, mainSource))]
+  while pending.len > 0:
+    let identity = pending.pop()
+    if identity in result: continue
+    result.incl identity
+    var module = bif.load(nimcacheDir / (identity & ".s.bif"))
+    var root = module.buf.beginRead()
+    var child = root.childCursor()
+    while child.hasMore:
+      if child.tagIs("import"):
+        let imported = child.findChildKind(StrLit)
+        if not imported.cursorIsNil: pending.add imported.strVal
+      child.skip
+    root.endRead()
+
 proc applyExportConfig(
     symbols: openArray[NativeExportSymbol],
     sourceRoot: string,
     exportConfig: NativeExportConfig,
+    resolvedGenerics = true,
 ): seq[NativeExportSymbol] =
   exportConfig.validateNativeExportConfig()
   if exportConfig.includeProcs.len == 0 and exportConfig.excludeProcs.len == 0:
@@ -345,18 +375,21 @@ proc applyExportConfig(
       name = semanticName(symbol.nifSymbol)
     var included = exportConfig.includeProcs.len == 0
     for index, selector in exportConfig.includeProcs:
-      if selector.matches(source, name):
+      if selector.matches(source, name) and (selector.typeArgs.len == 0 or
+          selector.typeArgs == symbol.genericArgumentSelectors or
+          not resolvedGenerics and symbol.genericOrigin.len > 0):
         includedMatches[index] = true
         included = true
     var excluded = false
     for index, selector in exportConfig.excludeProcs:
-      if selector.matches(source, name):
+      if selector.matches(source, name) and (selector.typeArgs.len == 0 or
+          resolvedGenerics and selector.typeArgs == symbol.genericArgumentSelectors):
         matched[index] = true
         excluded = true
     if included and not excluded:
       result.add symbol
 
-  if exportConfig.requireMatches:
+  if exportConfig.requireMatches and resolvedGenerics:
     var missing: seq[string]
     for index, selector in exportConfig.includeProcs:
       if not includedMatches[index]:
@@ -373,17 +406,29 @@ proc applyExportConfig(
       )
 
 proc publicRoutineSymbols*(
-    nimcacheDir, sourceRoot: string, exportConfig = NativeExportConfig()
+    nimcacheDir, sourceRoot: string, exportConfig = NativeExportConfig(), mainSource = ""
 ): seq[NativeExportSymbol] =
   ## Returns public, runtime routine declarations owned by application modules.
   ##
   ## ``sourceRoot`` bounds the application: public routines from the compiler
   ## and external dependencies in the same nimcache are deliberately excluded.
+  ## ``mainSource`` bounds concrete generic instances to its semantic import
+  ## graph. Prepared C builds retain this source in their build state.
   let root = normalizedAbsolutePath(sourceRoot)
   var paths: seq[string]
   for path in walkFiles(nimcacheDir / "*.s.bif"):
     paths.add path
   paths.sort()
+
+  var evidence: GenericEvidence
+  var instances: seq[tuple[symbol: string, origin: string, declaration: Cursor]]
+  var generic_origins: Table[string, string]
+  let state_path = nimcacheDir / "binny_native_build.json"
+  let recorded_source = if fileExists(state_path):
+                          parseFile(state_path).getOrDefault("mainSource").getStr
+                        else: ""
+  let active_modules = activeSemanticModules(nimcacheDir,
+    if mainSource.len > 0: mainSource else: recorded_source)
 
   for path in paths:
     var module = bif.load(path)
@@ -396,6 +441,17 @@ proc publicRoutineSymbols*(
 
     let moduleSuffix = bifModuleSuffix(path)
     for name, visibility, declaration in module.declarations:
+      let origin = declaration.instantiatedFrom
+      if origin.len > 0 and declaration.isRoutineDeclaration and
+          (active_modules.len == 0 or moduleSuffix in active_modules):
+        instances.add (name, origin, declaration)
+      if visibility == ivExported and semanticModule(name) == moduleSuffix:
+        var children = declaration.childCursor()
+        while children.hasMore:
+          if children.kind == TagLit and children.tagName in routineKinds and
+              not children.findChildTag("genericparams").cursorIsNil:
+            generic_origins[name] = absoluteSource
+          children.skip
       if visibility == ivExported and semanticModule(name) == moduleSuffix and
           declaration.isRoutineDeclaration:
         var inlineRoutine = false
@@ -421,7 +477,55 @@ proc publicRoutineSymbols*(
           inlineRoutine: inlineRoutine,
           sourceLine: int(position.line), sourceColumn: int(position.col),
         )
+  var generic_instances: seq[NativeExportSymbol]
+  for instance in instances:
+    if instance.origin in generic_origins:
+      let position = instance.declaration.rawLineInfo
+      generic_instances.add NativeExportSymbol(
+        sourcePath: generic_origins[instance.origin], nifSymbol: instance.symbol,
+        genericOrigin: instance.origin, sourceLine: int(position.line),
+        sourceColumn: int(position.col),
+      )
+  if generic_instances.len > 0:
+    # Determine selected origins before resolving types from dependency BIFs.
+    let selected = applyExportConfig(result & generic_instances, sourceRoot, exportConfig,
+      resolvedGenerics = false)
+    var selected_ids = initHashSet[string]()
+    for routine in selected:
+      if routine.genericOrigin.len > 0: selected_ids.incl routine.nifSymbol
+    if selected_ids.len > 0:
+      for path in paths:
+        var module = bif.load(path)
+        evidence.addModule(module, bifModuleSuffix(path), module.readModuleSource())
+      var seen = initHashSet[string]()
+      for instance in instances:
+        if instance.symbol notin selected_ids: continue
+        var routine: NativeExportSymbol
+        for candidate in generic_instances:
+          if candidate.nifSymbol == instance.symbol: routine = candidate
+        routine.genericArguments = evidence.specializationArguments(
+          evidence.originDeclaration(instance.origin), instance.declaration, routine.genericSources)
+        routine.genericSignature = routine.nifSymbol.semanticName &
+          evidence.signatureKey(instance.declaration)
+        for argument in routine.genericArguments:
+          var selector = argument.replace("`", "")
+          for identity, source in evidence.sources:
+            selector = selector.replace("binnyGenericModule_" & identity & ".",
+              relativePath(normalizedAbsolutePath(source), root).replace('\\', '/') & ":")
+          routine.genericArgumentSelectors.add selector
+        let key = routine.genericOrigin & "\x1f" & routine.genericArguments.join("\x1f")
+        if key notin seen:
+          seen.incl key
+          result.add routine
   result = applyExportConfig(result, sourceRoot, exportConfig)
+  var signatures: Table[string, string]
+  for routine in result:
+    if routine.genericOrigin.len == 0: continue
+    if routine.genericSignature in signatures:
+      fail("concrete generic exports have indistinguishable call signatures: " &
+        signatures[routine.genericSignature] & " and " & routine.nifSymbol &
+        "; select the specialization with typeArgs")
+    signatures[routine.genericSignature] = routine.nifSymbol
 
 proc nativeHookSymbols*(nimcacheDir, sourceRoot: string): seq[NativeHookSymbol] =
   ## Returns custom and forbidden ownership hooks belonging to public app types.
@@ -700,7 +804,8 @@ proc cFunctionDefinitions(path: string): seq[string] =
   let tokens = cTokens(readFile(path))
   var depth = 0
   for index, token in tokens:
-    if depth == 0 and (token.cTokenPrefix.len > 0 or token.startsWith("binny_inline_")):
+    if depth == 0 and (token.cTokenPrefix.len > 0 or
+        token.startsWith("binny_inline_") or token.startsWith("binny_generic_")):
       var position = index + 1
       # Nim's N_NIMCALL/N_INLINE macros place the name inside their parentheses.
       if position < tokens.len and tokens[position] == ")":
@@ -736,15 +841,15 @@ proc resolveCNativeSymbols(
   let thunks = state.getOrDefault("thunks")
   var backendSources: Table[string, string]
   for index, symbol in result:
-    if thunks != nil and thunks.hasKey(symbol.nifSymbol):
-      let thunk = thunks[symbol.nifSymbol].getStr
+    if thunks != nil and thunks.hasKey(symbol.thunkKey):
+      let thunk = thunks[symbol.thunkKey].getStr
       if thunk notin backendSymbols:
-        fail("selected inline routine has no C thunk definition: " & symbol.nifSymbol)
+        fail("selected routine has no C forwarding thunk definition: " & symbol.nifSymbol)
       result[index].cSymbol = thunk
       continue
     let backendModule = symbol.backendSymbol.semanticModule
     var backendSource = symbol.sourcePath
-    if backendModule != symbol.nifSymbol.semanticModule:
+    if backendModule != symbol.nifSymbol.semanticModule or symbol.genericOrigin.len > 0:
       if backendModule notin backendSources:
         var module = bif.load(nimcacheDir / (backendModule & ".s.bif"))
         backendSources[backendModule] = module.readModuleSource()
@@ -835,8 +940,9 @@ proc writeCBackendRoot(
 ): JsonNode =
   result = newJObject()
   for routine in routines:
-    if routine.inlineRoutine:
-      result[routine.nifSymbol] = % ("binny_inline_" & routine.nifSymbol.mangleCName)
+    if routine.inlineRoutine or routine.genericOrigin.len > 0:
+      let prefix = if routine.genericOrigin.len > 0: "binny_generic_" else: "binny_inline_"
+      result[routine.thunkKey] = % (prefix & routine.nifSymbol.mangleCName)
   var routineNamesBySource: Table[string, seq[string]]
   # Import the producer even when the selected API consists only of dependencies.
   var sources = @[normalizedAbsolutePath(mainSource)]
@@ -861,7 +967,7 @@ proc writeCBackendRoot(
 
 proc binnyInlineThunk(symbol: NimNode, exportName: string): NimNode {.compileTime.} =
   let implementation = symbol.getImpl
-  let parameters = implementation[3].copyNimTree
+  let parameters = symbol.getTypeInst[0].copyNimTree
   var invocation = newCall(symbol)
   for index in 1..<parameters.len:
     let parameter = parameters[index]
@@ -903,6 +1009,15 @@ proc binnyInlineThunk(symbol: NimNode, exportName: string): NimNode {.compileTim
         content.add name.nimQuotedIdentifier
       content.add "\n"
 
+  var generic_sources = initHashSet[string]()
+  for routine in routines:
+    for source in routine.genericSources:
+      if source notin generic_sources:
+        generic_sources.incl source
+        let identity = bifModuleSuffix(findSemanticBifPath(outputPath.parentDir, source))
+        content.add "import " & (source.splitFile.dir / source.splitFile.name).nimStringLiteral &
+          " as binnyGenericModule_" & identity & "\n"
+
   var rootedNames = initHashSet[string]()
   for routine in routines:
     let
@@ -927,12 +1042,12 @@ proc binnyInlineThunk(symbol: NimNode, exportName: string): NimNode {.compileTim
       content.add "\n" & keepMacro & "()\n"
 
   for index, routine in routines:
-    if routine.inlineRoutine:
+    if routine.inlineRoutine or routine.genericOrigin.len > 0:
       let
         source = normalizedAbsolutePath(routine.sourcePath)
         name = routine.nifSymbol.semanticName
         keepMacro = "binnyExportInline" & $index
-        exportName = result[routine.nifSymbol].getStr
+        exportName = result[routine.thunkKey].getStr
       content.add "\nmacro " & keepMacro & "(): untyped =\n"
       content.add "  result = newStmtList()\n"
       content.add "  for symbol in bindSym(" & name.nimStringLiteral & ", brForceOpen):\n"
@@ -941,11 +1056,27 @@ proc binnyInlineThunk(symbol: NimNode, exportName: string): NimNode {.compileTim
       content.add "    if position.filename == " & source.nimStringLiteral & " and\n"
       content.add "        position.line == " & $routine.sourceLine & " and\n"
       content.add "        position.column == " & $routine.sourceColumn & ":\n"
-      content.add "      result.add binnyInlineThunk(symbol, " &
-        exportName.nimStringLiteral & ")\n"
+      if routine.genericOrigin.len > 0:
+        let specialization_macro = "binnySpecialize" & $index
+        # A typed macro receives the compiler's concrete routine symbol, so the
+        # forwarding signature preserves ownership modifiers and overloads.
+        content.add "      var specialization = newTree(nnkBracketExpr, symbol)\n"
+        for argument in routine.genericArguments:
+          content.add "      specialization.add parseExpr(" & argument.nimStringLiteral & ")\n"
+        content.add "      result.add newCall(bindSym(" & specialization_macro.nimStringLiteral &
+          "), specialization)\n"
+      else:
+        content.add "      result.add binnyInlineThunk(symbol, " &
+          exportName.nimStringLiteral & ")\n"
       content.add "  if result.len != 1:\n"
       content.add "    error(" & ("cannot identify inline export " &
         routine.nifSymbol).nimStringLiteral & ")\n"
+      if routine.genericOrigin.len > 0:
+        let specialization_macro = "binnySpecialize" & $index
+        # Place the typed helper before the macro that binds it.
+        let insertion = content.rfind("\nmacro " & keepMacro)
+        content.insert("\nmacro " & specialization_macro & "(symbol: typed): untyped =\n" &
+          "  result = binnyInlineThunk(symbol, " & exportName.nimStringLiteral & ")\n", insertion)
       content.add "\n" & keepMacro & "()\n"
 
   var typeHooks: Table[string, seq[NativeHookSymbol]]
@@ -1006,7 +1137,7 @@ proc rootPublicRoutines*(
   ##
   ## Run this after the first ``nim ic`` backend pass. Running ``nim ic`` again
   ## then recomputes DCE and emits the public routines plus their dependencies.
-  var exports = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig)
+  var exports = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig, mainSource)
   for hook in nativeHookSymbols(nimcacheDir, sourceRoot):
     if not hook.forbidden:
       exports.add NativeExportSymbol(
@@ -1081,18 +1212,24 @@ proc prepareNativeRoutines*(
     discard rootPublicRoutines(nimcacheDir, sourceRoot, mainSource, exportConfig)
     result = ncbIncremental
   else:
-    let
-      routines = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig)
-      hooks = nativeHookSymbols(nimcacheDir, sourceRoot)
     let manifest = findCBuildManifest(nimcacheDir, cBuildManifest)
     let recordedLibPath = cBuildState(nimcacheDir).getOrDefault("libPath").getStr
     let compilerLibPath = compilerCLibPath(manifest)
+    writeFile(cBuildStatePath(nimcacheDir), (%*{
+      "manifest": manifest,
+      "projectPath": normalizedAbsolutePath(mainSource).parentDir,
+      "libPath": (if compilerLibPath.len > 0: compilerLibPath else: recordedLibPath),
+    }).pretty)
+    let
+      routines = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig, mainSource)
+      hooks = nativeHookSymbols(nimcacheDir, sourceRoot)
     let thunks = writeCBackendRoot(cRootSource, mainSource, routines, hooks)
     let state = %*{
       "manifest": manifest,
       "projectPath": normalizedAbsolutePath(cRootSource).parentDir,
       "libPath": (if compilerLibPath.len > 0: compilerLibPath else: recordedLibPath),
       "thunks": thunks,
+      "mainSource": normalizedAbsolutePath(mainSource),
     }
     writeFile(cBuildStatePath(nimcacheDir), state.pretty)
     result = ncbC
@@ -1101,7 +1238,8 @@ proc nativeExportSymbols*(
     nimcacheDir, sourceRoot: string, exportConfig = NativeExportConfig()
 ): seq[NativeExportSymbol] =
   ## Resolves the selected routine and ownership-hook names after codegen.
-  var symbols = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig)
+  var symbols = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig,
+    cBuildState(nimcacheDir).getOrDefault("mainSource").getStr)
   for hook in nativeHookSymbols(nimcacheDir, sourceRoot):
     if not hook.forbidden:
       symbols.add NativeExportSymbol(

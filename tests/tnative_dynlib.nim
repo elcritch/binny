@@ -73,14 +73,14 @@ block native_export_config_loads_json:
 {
   "includeProcs": [
     {"source": "bindings/*.nim", "name": "*"},
-    {"source": "../support.nim", "name": "load*"}
+    {"source": "../support.nim", "name": "load*", "typeArgs": ["../backend.nim:State"]}
   ],
   "excludeProcs": [
     {"source": "producer*.nim", "name": "ignored*"},
     {"name": "foo="}
   ],
   "typeImports": [
-    {"name": "Rect", "module": "bumpy", "export": false}
+    {"name": "Rect", "module": "bumpy", "export": false, "source": "../bumpy.nim"}
   ],
   "requireMatches": false
 }
@@ -94,9 +94,11 @@ block native_export_config_loads_json:
   doAssert not config.requireMatches
   doAssert config.includeProcs[0].matches("bindings/producer.nim", "render")
   doAssert config.includeProcs[1].matches("../support.nim", "loadTypeface")
+  doAssert config.includeProcs[1].typeArgs == @["../backend.nim:State"]
   doAssert config.excludeProcs[0].matches("producer.nim", "ignoredDebug")
   doAssert config.excludeProcs[1].matches("support.nim", "foo=")
-  doAssert config.typeImports == [importType("Rect", "bumpy", exported = false)]
+  doAssert config.typeImports == [importType("Rect", "bumpy", exported = false,
+    source = "../bumpy.nim")]
 
 block native_export_config_rejects_invalid_type_imports:
   doAssert importType("Rect", "foo\\bar").module == "foo/bar"
@@ -104,6 +106,8 @@ block native_export_config_rejects_invalid_type_imports:
     discard initNativeExportConfig(typeImports = [importType("Rect", "")])
   doAssertRaises NativeExportConfigError:
     discard initNativeExportConfig(typeImports = [importType("Rect", "bumpy; discard")])
+  doAssertRaises NativeExportConfigError:
+    discard initNativeExportConfig(typeImports = [importType("Rect", "bumpy", source = "/bad")])
 
 block native_export_config_rejects_backticks:
   doAssertRaises NativeExportConfigError:
