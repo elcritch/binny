@@ -42,6 +42,7 @@ block bif_config_accepts_export_config:
   doAssert config.exportConfig.excludeProcs == exportConfig.excludeProcs
   doAssert config.exportConfig.includeProcs == exportConfig.includeProcs
   doAssert config.exportConfig.typeImports == exportConfig.typeImports
+  doAssert config.exportConfig.typeImports[0].exported
   doAssert config.exportConfig.requireMatches
 
 block native_export_selectors_match_exact_names_and_globs:
@@ -79,7 +80,7 @@ block native_export_config_loads_json:
     {"name": "foo="}
   ],
   "typeImports": [
-    {"name": "Rect", "module": "bumpy"}
+    {"name": "Rect", "module": "bumpy", "export": false}
   ],
   "requireMatches": false
 }
@@ -95,7 +96,7 @@ block native_export_config_loads_json:
   doAssert config.includeProcs[1].matches("../support.nim", "loadTypeface")
   doAssert config.excludeProcs[0].matches("producer.nim", "ignoredDebug")
   doAssert config.excludeProcs[1].matches("support.nim", "foo=")
-  doAssert config.typeImports == [importType("Rect", "bumpy")]
+  doAssert config.typeImports == [importType("Rect", "bumpy", exported = false)]
 
 block native_export_config_rejects_invalid_type_imports:
   doAssert importType("Rect", "foo\\bar").module == "foo/bar"
@@ -334,6 +335,7 @@ block generated_module_reuses_imported_types:
           alignment: 4,
           importModule: "bumpy",
           imported: true,
+          exported: true,
           record:
             @[
               NativeRecordPart(
@@ -387,12 +389,19 @@ block generated_module_reuses_imported_types:
   )
   let generated = generateNativeModule(api)
   doAssert "import bumpy" in generated
+  doAssert "export bumpy.Rect" in generated
   doAssert "  Rect* = object" notin generated
   doAssert "proc identityRect*(value: Rect): Rect" in generated
   doAssert "doAssert sizeof(Rect) == 16" in generated
   doAssert "doAssert alignof(Rect) == 4" in generated
   doAssert "doAssert offsetOf(Rect, x) == 0" in generated
   doAssert "doAssert offsetOf(Rect, h) == 12" in generated
+
+  var notExportedApi = api
+  notExportedApi.types[0].exported = false
+  let notExported = generateNativeModule(notExportedApi)
+  doAssert "import bumpy" in notExported
+  doAssert "export bumpy.Rect" notin notExported
 
 block generated_module_preserves_discardable_procs:
   let api = NativeApi(

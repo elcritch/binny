@@ -94,6 +94,7 @@ proc siwinWindowStep*(window: Window): int {.noinline.} =
     doAssert config.writeNativeBindings(bindings)
     let generated = readFile(bindings)
     doAssert "import siwin/window" in generated
+    doAssert "export window.Window" in generated
     doAssert "  Window* =" notin generated
     doAssert "Clipboard" notin generated
     doAssert "proc siwinWindowStep*(window: Window): int" in generated
@@ -117,7 +118,6 @@ proc siwinWindowStep*(window: Window): int {.noinline.} =
     writeFile(
       consumer,
       """
-import siwin/window
 import producer_abi
 
 static:

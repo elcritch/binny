@@ -78,6 +78,7 @@ when defined(macosx) or defined(linux) or defined(freebsd) or defined(windows):
       doAssert config.writeNativeBindings(bindings)
       let generated = readFile(bindings)
       doAssert "import bumpy" in generated
+      doAssert "export bumpy.Rect" in generated
       doAssert "  Rect* = object" notin generated
       doAssert "proc identityRect*(value: Rect): Rect" in generated
       doAssert "doAssert sizeof(Rect) == 16" in generated
@@ -88,7 +89,6 @@ when defined(macosx) or defined(linux) or defined(freebsd) or defined(windows):
       writeFile(
         consumer,
         """
-import bumpy
 import bumpy_abi
 
 let result = identityRect(Rect(x: 1, y: 2, w: 3, h: 4))

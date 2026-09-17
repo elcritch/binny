@@ -70,6 +70,8 @@ type
     importModule*: string
     ## True when ``importModule`` supplies the type declaration itself.
     imported*: bool
+    ## True when an explicitly imported type should be re-exported.
+    exported*: bool
     ## Signature for anonymous proc types. These are rendered inline instead
     ## of emitted as standalone declarations.
     procInfo*: NativeProc

@@ -18,6 +18,8 @@ type
     ## unqualified ABI type name and ``module`` is its Nim import path.
     name*: string
     module*: string
+    ## Re-exports the imported type from generated bindings unless disabled.
+    exported*: bool
 
   NativeExportConfig* = object
     ## When non-empty, only matching public procedures become exports.
@@ -42,9 +44,12 @@ func includeProc*(name: string, source = ""): NativeProcSelector =
   ## Write quoted names without backticks, for example ``foo=`` or ``for``.
   NativeProcSelector(source: source.replace('\\', '/'), name: name)
 
-func importType*(name, module: string): NativeTypeImport =
+func importType*(name, module: string, exported = true): NativeTypeImport =
   ## Selects a generated type to reuse from an imported Nim module.
-  NativeTypeImport(name: name, module: module.replace('\\', '/'))
+  ## Set ``exported`` to false to keep it private to the generated module.
+  NativeTypeImport(
+    name: name, module: module.replace('\\', '/'), exported: exported
+  )
 
 proc validateSelector(selector: NativeProcSelector, description: string) =
   if selector.name.len == 0:
@@ -155,12 +160,17 @@ proc parseSelector(node: JsonNode, field: string, index: int): NativeProcSelecto
 proc parseTypeImport(node: JsonNode, index: int): NativeTypeImport =
   let description = "typeImports[" & $index & "]"
   node.requireObject(description)
-  node.rejectUnknownFields(["name", "module"], description)
+  node.rejectUnknownFields(["name", "module", "export"], description)
   if not node.hasKey("name") or node["name"].kind != JString:
     fail(description & ".name must be a string")
   if not node.hasKey("module") or node["module"].kind != JString:
     fail(description & ".module must be a string")
-  result = importType(node["name"].getStr, node["module"].getStr)
+  var exported = true
+  if node.hasKey("export"):
+    if node["export"].kind != JBool:
+      fail(description & ".export must be a boolean")
+    exported = node["export"].getBool
+  result = importType(node["name"].getStr, node["module"].getStr, exported)
   result.validateTypeImport(description)
 
 proc loadNativeExportConfig*(path: string): NativeExportConfig =
