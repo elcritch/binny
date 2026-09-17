@@ -1290,6 +1290,7 @@ proc collectReferencedBranchDependencies(
   layouts: Table[string, AbiTypeEntry],
   requiredTypes: var Table[string, bool],
   skipInternal: Table[string, bool],
+  opaqueTypes: Table[string, bool],
 )
 
 proc collectReferencedRecordDependencies(
@@ -1297,6 +1298,7 @@ proc collectReferencedRecordDependencies(
   layouts: Table[string, AbiTypeEntry],
   requiredTypes: var Table[string, bool],
   skipInternal: Table[string, bool],
+  opaqueTypes: Table[string, bool],
 )
 
 proc collectReferencedLayoutDependencies(
@@ -1304,6 +1306,7 @@ proc collectReferencedLayoutDependencies(
   layouts: Table[string, AbiTypeEntry],
   requiredTypes: var Table[string, bool],
   skipInternal: Table[string, bool],
+  opaqueTypes: Table[string, bool],
 )
 
 proc shouldSkipReferencedType(
@@ -1326,10 +1329,14 @@ proc collectReferencedType(
     layouts: Table[string, AbiTypeEntry],
     requiredTypes: var Table[string, bool],
     skipInternal: Table[string, bool],
+    opaqueTypes: Table[string, bool],
 ) =
   if symbol.len == 0 or symbol in skipInternal:
     return
   if symbol in requiredTypes:
+    return
+  if symbol in opaqueTypes:
+    requiredTypes[symbol] = true
     return
   if symbol notin layouts:
     requiredTypes[symbol] = true
@@ -1338,7 +1345,7 @@ proc collectReferencedType(
     return
   requiredTypes[symbol] = true
   collectReferencedLayoutDependencies(
-    layouts[symbol], layouts, requiredTypes, skipInternal
+    layouts[symbol], layouts, requiredTypes, skipInternal, opaqueTypes
   )
 
 proc collectReferencedBranchDependencies(
@@ -1346,10 +1353,11 @@ proc collectReferencedBranchDependencies(
     layouts: Table[string, AbiTypeEntry],
     requiredTypes: var Table[string, bool],
     skipInternal: Table[string, bool],
+    opaqueTypes: Table[string, bool],
 ) =
   for branch in branches:
     collectReferencedRecordDependencies(
-      branch.record, layouts, requiredTypes, skipInternal
+      branch.record, layouts, requiredTypes, skipInternal, opaqueTypes
     )
 
 proc collectReferencedRecordDependencies(
@@ -1357,17 +1365,20 @@ proc collectReferencedRecordDependencies(
     layouts: Table[string, AbiTypeEntry],
     requiredTypes: var Table[string, bool],
     skipInternal: Table[string, bool],
+    opaqueTypes: Table[string, bool],
 ) =
   for part in record:
     case part.kind
     of nrField:
-      collectReferencedType(part.field.typeSymbol, layouts, requiredTypes, skipInternal)
+      collectReferencedType(
+        part.field.typeSymbol, layouts, requiredTypes, skipInternal, opaqueTypes
+      )
     of nrCase:
       collectReferencedType(
-        part.discriminant.typeSymbol, layouts, requiredTypes, skipInternal
+        part.discriminant.typeSymbol, layouts, requiredTypes, skipInternal, opaqueTypes
       )
       collectReferencedBranchDependencies(
-        part.branches, layouts, requiredTypes, skipInternal
+        part.branches, layouts, requiredTypes, skipInternal, opaqueTypes
       )
 
 proc collectReferencedLayoutDependencies(
@@ -1375,12 +1386,19 @@ proc collectReferencedLayoutDependencies(
     layouts: Table[string, AbiTypeEntry],
     requiredTypes: var Table[string, bool],
     skipInternal: Table[string, bool],
+    opaqueTypes: Table[string, bool],
 ) =
-  collectReferencedType(layout.baseTypeSymbol, layouts, requiredTypes, skipInternal)
-  collectReferencedType(layout.indexTypeSymbol, layouts, requiredTypes, skipInternal)
-  collectReferencedType(layout.elementTypeSymbol, layouts, requiredTypes, skipInternal)
+  collectReferencedType(
+    layout.baseTypeSymbol, layouts, requiredTypes, skipInternal, opaqueTypes
+  )
+  collectReferencedType(
+    layout.indexTypeSymbol, layouts, requiredTypes, skipInternal, opaqueTypes
+  )
+  collectReferencedType(
+    layout.elementTypeSymbol, layouts, requiredTypes, skipInternal, opaqueTypes
+  )
   collectReferencedRecordDependencies(
-    layout.record, layouts, requiredTypes, skipInternal
+    layout.record, layouts, requiredTypes, skipInternal, opaqueTypes
   )
 
 proc resolvedSemanticTypeSymbol(
@@ -1552,6 +1570,24 @@ proc applyTypeImports(
     api.types[matchingIndex].importModule = typeImport.module
     api.types[matchingIndex].imported = true
 
+proc importedTypeSymbols(
+    api: NativeApi, layouts: Table[string, AbiTypeEntry]
+): Table[string, bool] =
+  for typ in api.types:
+    if not typ.imported:
+      continue
+    if typ.nifSymbol.len > 0:
+      result[typ.nifSymbol] = true
+    if typ.typeId.len > 0:
+      result[typ.typeId] = true
+    for symbol in typ.equivalentTypeSymbols:
+      if symbol.len > 0:
+        result[symbol] = true
+
+  for layout in layouts.values:
+    if layout.kind == "ref" and layout.elementTypeSymbol in result:
+      result[layout.typeSymbol] = true
+
 proc buildNativeApi(
     bifPath: string,
     sourceDescription: BifNativeDescription,
@@ -1647,6 +1683,9 @@ proc buildNativeApi(
   for typ in importedGenericTypes.values:
     result.types.add typ
 
+  result.applyTypeImports(typeImports)
+  let opaqueTypes = importedTypeSymbols(result, layouts)
+
   for alias in preferredTypeAliases:
     if alias.layoutSymbol notin layouts:
       continue
@@ -1715,24 +1754,34 @@ proc buildNativeApi(
           skipInternalTypes
         else:
           initTable[string, bool]()
-      collectReferencedType(typ.typeId, layouts, requiredTypes, symbolSkip)
-      if typ.kind == ntArray:
-        collectReferencedType(typ.indexTypeSymbol, layouts, requiredTypes, symbolSkip)
-      if typ.kind == ntAlias:
-        collectReferencedType(typ.elementTypeSymbol, layouts, requiredTypes, symbolSkip)
+      collectReferencedType(
+        typ.typeId, layouts, requiredTypes, symbolSkip, opaqueTypes
+      )
+      if not typ.imported and typ.kind == ntArray:
+        collectReferencedType(
+          typ.indexTypeSymbol, layouts, requiredTypes, symbolSkip, opaqueTypes
+        )
+      if not typ.imported and typ.kind == ntAlias:
+        collectReferencedType(
+          typ.elementTypeSymbol, layouts, requiredTypes, symbolSkip, opaqueTypes
+        )
 
   for procInfo in result.procs:
     collectReferencedType(
-      procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternalTypes
+      procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternalTypes, opaqueTypes
     )
     for param in procInfo.params:
-      collectReferencedType(param.typeSymbol, layouts, requiredTypes, skipInternalTypes)
+      collectReferencedType(
+        param.typeSymbol, layouts, requiredTypes, skipInternalTypes, opaqueTypes
+      )
   for hook in result.hooks:
     collectReferencedType(
-      hook.procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternalTypes
+      hook.procInfo.returnTypeSymbol, layouts, requiredTypes, skipInternalTypes, opaqueTypes
     )
     for param in hook.procInfo.params:
-      collectReferencedType(param.typeSymbol, layouts, requiredTypes, skipInternalTypes)
+      collectReferencedType(
+        param.typeSymbol, layouts, requiredTypes, skipInternalTypes, opaqueTypes
+      )
   for symbol in signatureTypeSymbols.keys:
     requiredTypes[symbol] = true
 
@@ -1742,7 +1791,9 @@ proc buildNativeApi(
     for typ in result.types:
       if typ.kind == ntImportedGeneric and typ.typeId in requiredTypes:
         for argument in typ.genericArguments:
-          collectReferencedType(argument, layouts, requiredTypes, skipInternalTypes)
+          collectReferencedType(
+            argument, layouts, requiredTypes, skipInternalTypes, opaqueTypes
+          )
 
   var semanticTypeSymbols: Table[string, string]
   for typ in result.types:
@@ -1824,8 +1875,6 @@ proc buildNativeApi(
           typ.kind = ntRefObject
         if layout.typeSymbol notin typ.equivalentTypeSymbols:
           typ.equivalentTypeSymbols.add layout.typeSymbol
-
-  result.applyTypeImports(typeImports)
 
 proc readModuleSource*(path: string): string =
   var module = bif.load(path)
