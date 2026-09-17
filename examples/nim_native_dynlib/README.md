@@ -76,6 +76,18 @@ instead of reconstructing another one. Nested module paths such as `foo/bar`
 are supported. The binding also emits compile-time `sizeof`, `alignof`, and
 exported-field offset assertions against the producer's BIF layout, so an
 incompatible local type fails when the consumer is compiled.
+The generated binding also re-exports each imported type, allowing a facade
+module to expose those third-party types without importing and exporting each
+dependency again. Re-exporting defaults to enabled for each entry. To keep one
+imported type private, set its `export` field to `false`:
+
+```json
+{
+  "typeImports": [
+    {"name": "Rect", "module": "bumpy", "export": false}
+  ]
+}
+```
 
 The workflow uses and builds these files:
 

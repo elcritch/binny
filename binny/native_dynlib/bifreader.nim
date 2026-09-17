@@ -1666,6 +1666,7 @@ proc applyTypeImports(
       )
     api.types[matchingIndex].importModule = typeImport.module
     api.types[matchingIndex].imported = true
+    api.types[matchingIndex].exported = typeImport.exported
 
 proc importedTypeSymbols(
     api: NativeApi, layouts: Table[string, AbiTypeEntry]
