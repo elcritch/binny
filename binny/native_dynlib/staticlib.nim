@@ -505,6 +505,70 @@ func cTokenPrefix(token: string): string =
       return token[0 .. position + 1]
     marker = token.find("_u", marker + 2)
 
+func mangleCModuleSuffix(path: string): string =
+  ## Mirrors Nim's uniqueModuleName encoding used as C symbol suffixes.
+  let modulePath =
+    if path.endsWith(".nim"):
+      path[0 ..< path.len - ".nim".len]
+    else:
+      path
+  for character in modulePath:
+    case character
+    of 'a' .. 'z', '0' .. '9':
+      result.add character
+    of '/', '\\':
+      result.add 'Z'
+    of '.':
+      result.add 'O'
+    else:
+      result.addInt ord(character)
+
+proc sourceCModuleSuffixes(sourcePath: string): seq[string] =
+  ## Returns path suffixes that Nim may use when naming ``sourcePath``.
+  ##
+  ## The compiler makes the path relative to either the project, a search path,
+  ## or a package root.  We do not have that compiler configuration here, but
+  ## every such relative path ends in a suffix of the absolute source path.
+  let components = normalizedAbsolutePath(sourcePath).replace('\\', '/').split('/')
+  if components.len == 0:
+    return
+  let last = components.high
+  for first in 0 .. last:
+    let suffix = mangleCModuleSuffix(components[first .. last].join("/"))
+    if suffix.len > 0 and suffix notin result:
+      result.add suffix
+
+proc cModuleSourceMatchScore(candidate, prefix, sourcePath: string): int =
+  if sourcePath.len == 0 or candidate.len <= prefix.len:
+    return
+  let candidateSuffix = candidate[prefix.len ..^ 1]
+  for sourceSuffix in sourceCModuleSuffixes(sourcePath):
+    if candidateSuffix == sourceSuffix:
+      result = max(result, sourceSuffix.len)
+    elif candidateSuffix.len > sourceSuffix.len and
+        candidateSuffix.endsWith(sourceSuffix) and
+        candidateSuffix[candidateSuffix.len - sourceSuffix.len - 1] == 'Z':
+      result = max(result, sourceSuffix.len)
+
+proc sourceOwnedCBackendSymbols(
+    candidates: HashSet[string], prefix, sourcePath: string
+): HashSet[string] =
+  ## Keeps only C names whose module suffix belongs to ``sourcePath``.
+  ##
+  ## A C file can mention dependency routines, and the complete nimcache can
+  ## contain the same hook prefix for many modules.  The source path is the
+  ## ownership information that distinguishes those otherwise similar names.
+  var bestScore = 0
+  for candidate in candidates:
+    let score = cModuleSourceMatchScore(candidate, prefix, sourcePath)
+    if score > bestScore:
+      bestScore = score
+      result = initHashSet[string]()
+    if score == bestScore and score > 0:
+      result.incl candidate
+  if bestScore == 0:
+    result = candidates
+
 proc cBackendSymbols(nimcacheDir: string): Table[string, HashSet[string]] =
   for path in walkFiles(nimcacheDir / "*.c"):
     let content = readFile(path)
@@ -536,6 +600,9 @@ proc resolveCNativeSymbols(
       missing.add symbol.nifSymbol
     else:
       candidates[index] = backendSymbols.getOrDefault(prefix)
+      candidates[index] = sourceOwnedCBackendSymbols(
+        candidates[index], prefix, symbol.sourcePath
+      )
       if candidates[index].len == 0:
         missing.add symbol.nifSymbol
     moduleIndexes.mgetOrPut(symbol.nifSymbol.semanticModule, @[]).add index

@@ -29,6 +29,40 @@ proc listsSymbol(output, symbol: string): bool =
     if fields.len > 0 and fields[^1] == symbol:
       return true
 
+block c_backend_symbols_are_resolved_by_source:
+  let temporary = createTempDir("binny-native-source-resolution-", "")
+  defer:
+    removeDir(temporary)
+
+  let
+    source = temporary / "src" / "figdraw" / "bindings" / "native_bindings.nim"
+    sourceOwner = "srcZfigdrawZbindingsZnative95bindings"
+    dependencyOwner = "depsZpixieZsrcZpixieZfileformatsZsvg"
+  writeFile(
+    temporary / "native_bindings.nim.c",
+    "void eqdestroy__u0__" & sourceOwner & "(void);\n" &
+      "void eqcopy__u3__" & sourceOwner & "(void);\n",
+  )
+  writeFile(
+    temporary / "svg.nim.c",
+    "void eqdestroy__u0__" & dependencyOwner & "(void);\n" &
+      "void eqcopy__u3__" & dependencyOwner & "(void);\n",
+  )
+
+  let resolved = resolveNativeSymbols(
+    temporary,
+    [
+      NativeExportSymbol(
+        sourcePath: source, nifSymbol: "=destroy.0.shared"
+      ),
+      NativeExportSymbol(
+        sourcePath: source, nifSymbol: "=copy.3.shared"
+      ),
+    ],
+  )
+  doAssert resolved[0].cSymbol == "eqdestroy__u0__" & sourceOwner
+  doAssert resolved[1].cSymbol == "eqcopy__u3__" & sourceOwner
+
 when defined(macosx) or defined(linux) or defined(freebsd) or defined(windows):
   let compiler = getCurrentCompilerExe()
   if compiler.supportsStaticLibExperiment:
