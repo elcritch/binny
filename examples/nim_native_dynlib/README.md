@@ -167,8 +167,9 @@ symbols the dylib exposes.
   promoted.
 - Generated bindings cover the concrete types exercised here: objects, refs,
   inheritance, case and packed objects, aliases, sequences, `Table`,
-  `OrderedTable`, `Option`, `Slice`, `HSlice`, tuples, open arrays, and custom or
-  forbidden ownership hooks.
+  `OrderedTable`, `CountTable`, their `Ref` variants, `HashSet`, `OrderedSet`,
+  `Deque`, `Option`, `Slice`, `HSlice`, tuples, open arrays, custom ranges,
+  typed pointers, `UncheckedArray`, and custom or forbidden ownership hooks.
 
 Selected public methods export Nim's dispatcher, so a consumer call reaches
 the producer's runtime-specific override rather than calling only the base
@@ -177,6 +178,20 @@ declarations; their concrete argument types are reconstructed as needed.
 `Slice[T]` uses the canonical `HSlice[T, T]` declaration, including in procedure
 signatures and nested containers. Backwards bounds such as `1 .. ^2` retain
 Nim's `BackwardsIndex` type. No `typeImports` configuration is needed for slices.
+
+Sets, tables, and deques also reuse their standard-library declarations without
+`typeImports` entries, including instances appearing only in routine signatures
+or nested inside other containers.
+
+Range bindings preserve the resolved bounds and base type, including signed and
+unsigned integers, chars, enums, and floats. Typed buffers retain their
+`ptr UncheckedArray[T]` element type; pointers remain borrowed raw storage, so the
+caller must provide valid storage for the duration of each call.
+
+Generated signatures preserve `sink` parameters and `lent` returns, including
+callback types. Sink arguments follow Nim's usual move-or-copy rules; lent
+results borrow storage whose owner must remain alive.
+
 Reconstructed dependency types do not require importing their original module
 into the consumer. Polymorphic refs must be constructed by the producer to
 retain the runtime type information used by its dispatcher.
@@ -185,3 +200,5 @@ The integration test in `tests/tnative_staticlib.nim` builds a fresh fixture,
 generates bindings from BIF and C NIF, and runs a separate Nim consumer.
 `tests/tnative_dynlib_methods.nim` checks dispatch, container fields, callbacks,
 and dependency-free consumer bindings with both compiler backends.
+`tests/tnative_dynlib_coretypes.nim` covers container reuse, range checks, typed
+buffers, and sink/lent ownership behavior with both backends under ARC and ORC.

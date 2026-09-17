@@ -19,6 +19,9 @@ type
     ntRange
     ntProc
     ntImportedGeneric
+    ntPointer
+    ntRef
+    ntUncheckedArray
 
   NativeEnumValue* = object
     name*: string
@@ -61,6 +64,7 @@ type
     indexTypeSymbol*: string
     elementTypeSymbol*: string
     arrayLength*: int64
+    rangeLow*, rangeHigh*: string ## Resolved literals in the range's base type.
     size*: int64
     alignment*: int64
     layoutFingerprint*: string
@@ -84,6 +88,7 @@ type
     name*: string
     typeSymbol*: string
     byVar*: bool
+    bySink*: bool ## Transfers ownership; callers copy only when later reads require it.
     lowering*: NativeLoweringMode
     hiddenLengthCount*: int
 
@@ -93,6 +98,7 @@ type
     cSymbol*: string
     returnTypeSymbol*: string
     returnByVar*: bool
+    returnByLent*: bool ## Borrows the result without transferring ownership.
     returnLowering*: NativeLoweringMode
     callConv*: string
     closureEnv*: bool

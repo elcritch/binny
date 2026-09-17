@@ -82,7 +82,12 @@ func simpleBuiltinType(symbol: string): string =
 
 func isAnonymousGenericType(typ: NativeType): bool =
   typ.nifSymbol.len > 0 and typ.nifSymbol == typ.typeId and
-    typ.kind in {ntArray, ntSequence, ntSet}
+    typ.kind in {ntArray, ntSequence, ntSet, ntPointer, ntRef, ntUncheckedArray, ntRange}
+
+proc rangeExpression(typ: NativeType, base: string): string =
+  if typ.rangeLow.len == 0 or typ.rangeHigh.len == 0:
+    raise newException(NativeArtifactError, "native ABI range has no resolved bounds: " & typ.name)
+  "range[" & base & "(" & typ.rangeLow & ").." & base & "(" & typ.rangeHigh & ")]"
 
 func knownTypeExpression(symbol: string, names: Table[string, string]): string =
   if symbol.len == 0:
@@ -103,14 +108,16 @@ proc knownProcTypeExpression(
       return
     let paramName =
       if param.name.len > 0: nimIdentifier(param.name) else: "arg" & $index
-    let modifier = if param.byVar: "var " else: ""
+    let modifier = if param.byVar: "var " elif param.bySink: "sink " else: ""
     parts.add paramName & ": " & modifier & typeExpression
   result = "proc(" & parts.join("; ") & ")"
   if procInfo.returnTypeSymbol.len > 0:
     let returnType = knownTypeExpression(procInfo.returnTypeSymbol, names)
     if returnType.len == 0:
       return ""
-    result.add ": " & (if procInfo.returnByVar: "var " else: "") & returnType
+    let modifier = if procInfo.returnByVar: "var "
+                   elif procInfo.returnByLent: "lent " else: ""
+    result.add ": " & modifier & returnType
   if procInfo.callConv.len > 0:
     result.add " {." & procInfo.callConv & ".}"
 
@@ -184,7 +191,7 @@ proc typeNames(api: NativeApi): Table[string, string] =
           rendered = nimIdentifier(typ.name) & "[" & arguments.join(", ") & "]"
       of ntProc:
         rendered = knownProcTypeExpression(typ.procInfo, result)
-      of ntSequence, ntSet, ntArray, ntOpenArray:
+      of ntSequence, ntSet, ntArray, ntOpenArray, ntPointer, ntRef, ntUncheckedArray, ntRange:
         let element = knownTypeExpression(typ.elementTypeSymbol, result)
         if element.len == 0:
           continue
@@ -195,6 +202,14 @@ proc typeNames(api: NativeApi): Table[string, string] =
           rendered = "set[" & element & "]"
         of ntOpenArray:
           rendered = "openArray[" & element & "]"
+        of ntPointer:
+          rendered = "ptr " & element
+        of ntRef:
+          rendered = "ref " & element
+        of ntUncheckedArray:
+          rendered = "UncheckedArray[" & element & "]"
+        of ntRange:
+          rendered = rangeExpression(typ, element)
         of ntArray:
           if typ.indexTypeSymbol.len > 0:
             let index = knownTypeExpression(typ.indexTypeSymbol, result)
@@ -456,6 +471,15 @@ proc generateTypes(api: NativeApi, names: Table[string, string]): string =
     of ntDistinct:
       result.add "distinct " & nimType(typ.elementTypeSymbol, names) & "\n\n"
       continue
+    of ntPointer:
+      result.add "ptr " & nimType(typ.elementTypeSymbol, names) & "\n\n"
+      continue
+    of ntRef:
+      result.add "ref " & nimType(typ.elementTypeSymbol, names) & "\n\n"
+      continue
+    of ntUncheckedArray:
+      result.add "UncheckedArray[" & nimType(typ.elementTypeSymbol, names) & "]\n\n"
+      continue
     of ntArray:
       if typ.indexTypeSymbol.len > 0:
         let index = knownTypeExpression(typ.indexTypeSymbol, names)
@@ -491,9 +515,8 @@ proc generateTypes(api: NativeApi, names: Table[string, string]): string =
         NativeArtifactError, "proc types are not standalone type declarations"
       )
     of ntRange:
-      raise newException(
-        NativeArtifactError, "unsupported named native ABI range: " & typ.name
-      )
+      result.add rangeExpression(typ, nimType(typ.elementTypeSymbol, names)) & "\n\n"
+      continue
     of ntImportedGeneric:
       raise newException(
         NativeArtifactError, "imported generic native ABI types are not declarations"
@@ -597,7 +620,7 @@ proc params(procInfo: NativeProc, names: Table[string, string]): string =
         )
       parts.add nimIdentifier(param.name) & ": " & logicalType
     else:
-      let modifier = if param.byVar: "var " else: ""
+      let modifier = if param.byVar: "var " elif param.bySink: "sink " else: ""
       parts.add nimIdentifier(param.name) & ": " & modifier &
         nimType(param.typeSymbol, names)
   result = parts.join("; ")
@@ -648,7 +671,8 @@ proc generateNativeModule*(
       if returnType.len == 0:
         ""
       else:
-        ": " & (if procInfo.returnByVar: "var " else: "") & returnType
+        ": " & (if procInfo.returnByVar: "var "
+                elif procInfo.returnByLent: "lent " else: "") & returnType
     let formals = params(procInfo, names)
     if hook.status == nhCustom:
       result.add "\nproc " & nimIdentifier(hook.kind) & "(" & formals & ")" & returnDecl &
@@ -663,7 +687,8 @@ proc generateNativeModule*(
       if returnType.len == 0:
         ""
       else:
-        ": " & (if procInfo.returnByVar: "var " else: "") & returnType
+        ": " & (if procInfo.returnByVar: "var "
+                elif procInfo.returnByLent: "lent " else: "") & returnType
     let formals = params(procInfo, names)
     result.add "\nproc " & nimIdentifier(procInfo.name) & "*(" & formals & ")" &
       returnDecl

@@ -50,6 +50,7 @@ type
     genericTypeSymbol: string
     genericArguments: seq[string]
     arrayLength: int64
+    rangeLow, rangeHigh: string
     enumValues: seq[NativeEnumValue]
     record: seq[NativeRecordPart]
     procInfo: NativeProc
@@ -234,14 +235,41 @@ proc bifEnum(node: Cursor): seq[NativeEnumValue] =
       discard
     children.skip
 
+proc bifRangeBounds(node: Cursor): tuple[low, high: string] =
+  var bounds: seq[string]
+  var children = node.childCursor()
+  while children.hasMore:
+    if children.kind == TagLit:
+      var value = children.childCursor()
+      var literal: string
+      while value.hasMore:
+        case value.kind
+        of IntLit: literal = $value.intVal
+        of UIntLit: literal = $value.uintVal & "'u64"
+        of FloatLit: literal = $value.floatVal
+        of CharLit: literal = $ord(value.charLit)
+        else: discard
+        value.skip
+      if literal.len > 0:
+        bounds.add literal
+    children.skip
+  if bounds.len == 2:
+    result = (bounds[0], bounds[1])
+
 proc bifRangeLength(node: Cursor): int64 =
   var bounds: seq[int64]
   var children = node.childCursor()
   while children.hasMore:
-    if children.kind == TagLit and children.tagName == "intlit":
+    if children.kind == TagLit and children.tagName in [
+      "intlit", "int8lit", "int16lit", "int32lit", "int64lit", "charlit"
+    ]:
       let value = children.findLastChildKind(IntLit)
       if not value.cursorIsNil:
         bounds.add value.intVal
+      else:
+        let character = children.findLastChildKind(CharLit)
+        if not character.cursorIsNil:
+          bounds.add ord(character.charLit).int64
     children.skip
   if bounds.len >= 2 and bounds[^1] >= bounds[^2]:
     let distance = uint64(bounds[^1]) - uint64(bounds[^2])
@@ -264,6 +292,7 @@ type CompilerTypeContext = object
   records: Table[string, seq[NativeRecordPart]]
   enumValues: Table[string, seq[NativeEnumValue]]
   rangeLengths: Table[string, int64]
+  rangeBounds: Table[string, tuple[low, high: string]]
   procTypes: Table[string, NativeProc]
 
 proc initCompilerTypeContext(): CompilerTypeContext =
@@ -275,6 +304,7 @@ proc initCompilerTypeContext(): CompilerTypeContext =
   result.records = initTable[string, seq[NativeRecordPart]]()
   result.enumValues = initTable[string, seq[NativeEnumValue]]()
   result.rangeLengths = initTable[string, int64]()
+  result.rangeBounds = initTable[string, tuple[low, high: string]]()
   result.procTypes = initTable[string, NativeProc]()
   result.nextModuleId = 1
 
@@ -560,6 +590,7 @@ proc compilerProcInfo(
       let modifierKind = typeOrdinal(typeId)
       if modifierKind in [ord(tyVar), ord(tySink), ord(tyOwned), ord(tyLent)]:
         result.byVar = modifierKind == ord(tyVar)
+        result.bySink = modifierKind == ord(tySink)
         let modifier = context.types.getOrDefault(typeId)
         if modifier == nil or modifier.sonsImpl.len == 0:
           fail("missing compiler type for native proc parameter: " & result.name)
@@ -580,7 +611,8 @@ proc compilerProcInfo(
   result.varargs = tfVarargs in typ.flagsImpl
   if typ.sonsImpl.len > 0:
     result.returnTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[0])
-    result.returnByVar = result.returnTypeSymbol.startsWith("`t23.")
+    result.returnByVar = typeOrdinal(result.returnTypeSymbol) == ord(tyVar)
+    result.returnByLent = typeOrdinal(result.returnTypeSymbol) == ord(tyLent)
     result.returnLowering =
       if result.returnTypeSymbol.len == 0: nlVoid else: nlDirect
 
@@ -718,6 +750,7 @@ proc loadCompilerTypeDef(context: var CompilerTypeContext, node: var Cursor): PT
           context.enumValues[name] = bifEnum(nodeValue)
         of "range":
           context.rangeLengths[name] = bifRangeLength(nodeValue)
+          context.rangeBounds[name] = bifRangeBounds(nodeValue)
         else:
           discard
       else:
@@ -749,6 +782,8 @@ proc compilerLayoutKind(kind: TTypeKind): string =
   of tyPtr: "pointer"
   of tyRef: "ref"
   of tyVar: "var"
+  of tyLent: "lent"
+  of tySink: "sink"
   of tySequence: "sequence"
   of tyProc: "proc"
   of tyPointer: "pointer"
@@ -788,6 +823,10 @@ proc compilerAbiLayout(
   result.procInfo = context.procTypes.getOrDefault(symbol)
   if symbol in context.rangeLengths:
     result.arrayLength = context.rangeLengths[symbol]
+  if symbol in context.rangeBounds:
+    let bounds = context.rangeBounds[symbol]
+    result.rangeLow = bounds.low
+    result.rangeHigh = bounds.high
 
   case typ.kind
   of tyGenericInst:
@@ -805,6 +844,8 @@ proc compilerAbiLayout(
         result.indexTypeSymbol = actualLayout.indexTypeSymbol
         result.elementTypeSymbol = actualLayout.elementTypeSymbol
         result.procInfo = actualLayout.procInfo
+        result.rangeLow = actualLayout.rangeLow
+        result.rangeHigh = actualLayout.rangeHigh
         if result.size < 0:
           result.size = actualLayout.size
         if result.alignment < 0:
@@ -815,7 +856,7 @@ proc compilerAbiLayout(
           result.record = actualLayout.record
         if result.enumValues.len == 0:
           result.enumValues = actualLayout.enumValues
-  of tyRef:
+  of tyRef, tyPtr:
     # ``ast.base`` uses ``sonsImpl[0]`` for pointer-like types.
     if typ.sonsImpl.len > 0:
       result.elementTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[0])
@@ -846,7 +887,7 @@ proc compilerAbiLayout(
           ),
         )
   of tyDistinct, tyGenericBody, tyGenericInvocation, tyOpenArray, tyRange, tySequence,
-      tySet, tyString, tyUncheckedArray, tyVar, tyVarargs:
+      tySet, tyString, tyUncheckedArray, tyVar, tyVarargs, tyLent, tySink:
     # These compiler container/modifier types expose their payload as the
     # final son, matching ``ast.elementType``/``typeBodyImpl``.
     if typ.sonsImpl.len > 0:
@@ -896,6 +937,9 @@ proc mergeLayout(layouts: var Table[string, AbiTypeEntry], layout: AbiTypeEntry)
   if merged.genericTypeSymbol.len == 0:
     merged.genericTypeSymbol = layout.genericTypeSymbol
     merged.genericArguments = layout.genericArguments
+  if merged.rangeLow.len == 0:
+    merged.rangeLow = layout.rangeLow
+    merged.rangeHigh = layout.rangeHigh
   if merged.procInfo.nifSymbol.len == 0:
     merged.procInfo = layout.procInfo
   merged.inheritable = merged.inheritable or layout.inheritable
@@ -961,6 +1005,7 @@ proc parseNativeType(
     return false
 
   let refType = sourceType.findChildTag("refty")
+  let pointerType = sourceType.findChildTag("ptrty")
   let objectType = sourceType.findChildTag("objectty")
   let enumType = sourceType.findChildTag("enumty")
   let distinctType = sourceType.findChildTag("distinctty")
@@ -979,7 +1024,7 @@ proc parseNativeType(
       typeDesc.findChildTag("range")
   typ.name = symbolBase(nifSymbol)
   typ.nifSymbol = nifSymbol
-  for typeNode in [refType, objectType, enumType, distinctType, arrayType]:
+  for typeNode in [refType, pointerType, objectType, enumType, distinctType, arrayType]:
     if not typeNode.cursorIsNil:
       let typeId = typeNode.findChildKind(Symbol)
       if not typeId.cursorIsNil:
@@ -994,9 +1039,9 @@ proc parseNativeType(
     return false
   if not refType.cursorIsNil:
     let payload = refType.findChildTag("objectty")
-    if payload.cursorIsNil:
-      return false
-    typ.kind = ntRefObject
+    typ.kind = if payload.cursorIsNil: ntRef else: ntRefObject
+  elif not pointerType.cursorIsNil:
+    typ.kind = ntPointer
   elif not objectType.cursorIsNil:
     typ.kind = ntObject
   elif not enumType.cursorIsNil:
@@ -1076,11 +1121,8 @@ proc parseParam(declaration: Cursor): NativeParam =
     let modifierKind = typeOrdinal(typeId)
     if modifierKind in [ord(tyVar), ord(tySink), ord(tyOwned), ord(tyLent)]:
       result.byVar = modifierKind == ord(tyVar)
-      let typeSymbol = typeDesc.findLastChildKind(Symbol)
-      if not typeSymbol.cursorIsNil:
-        result.typeSymbol = typeSymbol.symName
-    else:
-      result.typeSymbol = typeId
+      result.bySink = modifierKind == ord(tySink)
+    result.typeSymbol = typeId
   else:
     let typeSymbol = declaration.findChildKind(Symbol)
     if not typeSymbol.cursorIsNil:
@@ -1120,12 +1162,14 @@ proc parseNativeProc(declaration: Cursor, abi: AbiProcEntry): NativeProc =
   if children.hasMore:
     if children.kind == Symbol:
       result.returnTypeSymbol = children.symName
-      result.returnByVar = result.returnTypeSymbol.startsWith("`t23.")
+      result.returnByVar = typeOrdinal(result.returnTypeSymbol) == ord(tyVar)
+      result.returnByLent = typeOrdinal(result.returnTypeSymbol) == ord(tyLent)
     elif children.kind == TagLit and children.tagName == "td":
       let typeId = children.findChildKind(SymbolDef)
       if not typeId.cursorIsNil:
         result.returnTypeSymbol = typeId.symName
-        result.returnByVar = result.returnTypeSymbol.startsWith("`t23.")
+        result.returnByVar = typeOrdinal(result.returnTypeSymbol) == ord(tyVar)
+        result.returnByLent = typeOrdinal(result.returnTypeSymbol) == ord(tyLent)
     children.skip
   type IndexedParam = tuple[position: int, param: NativeParam]
 
@@ -1156,17 +1200,24 @@ proc parseNativeProc(declaration: Cursor, abi: AbiProcEntry): NativeProc =
   for item in params:
     result.params.add item.param
 
-proc unwrapVarReturn(procInfo: var NativeProc, layouts: Table[string, AbiTypeEntry]) =
-  if not procInfo.returnByVar:
-    return
-  if procInfo.returnTypeSymbol notin layouts:
-    fail("native ABI var return type has no layout: " & procInfo.returnTypeSymbol)
-  let wrapper = layouts[procInfo.returnTypeSymbol]
-  if wrapper.kind != "var" or wrapper.elementTypeSymbol.len == 0:
-    fail(
-      "native ABI var return type has an invalid layout: " & procInfo.returnTypeSymbol
-    )
-  procInfo.returnTypeSymbol = wrapper.elementTypeSymbol
+proc unwrapSignatureTypes(procInfo: var NativeProc, layouts: Table[string, AbiTypeEntry]) =
+  for param in procInfo.params.mitems:
+    let modifierKind = typeOrdinal(param.typeSymbol)
+    if modifierKind in [ord(tyVar), ord(tySink)]:
+      if param.typeSymbol notin layouts or layouts[param.typeSymbol].elementTypeSymbol.len == 0:
+        fail("native ABI parameter modifier has no payload: " & param.typeSymbol)
+      param.byVar = modifierKind == ord(tyVar)
+      param.bySink = modifierKind == ord(tySink)
+      param.typeSymbol = layouts[param.typeSymbol].elementTypeSymbol
+  if procInfo.returnByVar or procInfo.returnByLent:
+    let modifier = if procInfo.returnByVar: "var" else: "lent"
+    if procInfo.returnTypeSymbol notin layouts:
+      fail("native ABI " & modifier & " return type has no layout: " & procInfo.returnTypeSymbol)
+    let wrapper = layouts[procInfo.returnTypeSymbol]
+    if wrapper.kind != modifier or wrapper.elementTypeSymbol.len == 0:
+      fail("native ABI " & modifier & " return type has an invalid layout: " &
+        procInfo.returnTypeSymbol)
+    procInfo.returnTypeSymbol = wrapper.elementTypeSymbol
 
 proc applyLayout(typ: var NativeType, layouts: Table[string, AbiTypeEntry]): bool =
   if typ.typeId notin layouts:
@@ -1190,6 +1241,14 @@ proc applyLayout(typ: var NativeType, layouts: Table[string, AbiTypeEntry]): boo
       typ.kind = ntTuple
     of "proc":
       typ.kind = ntProc
+    of "pointer":
+      typ.kind = ntPointer
+    of "ref":
+      typ.kind = ntRef
+    of "uncheckedarray":
+      typ.kind = ntUncheckedArray
+    of "range":
+      typ.kind = ntRange
     else:
       return false
   typ.size = declared.size
@@ -1199,6 +1258,8 @@ proc applyLayout(typ: var NativeType, layouts: Table[string, AbiTypeEntry]): boo
   typ.packed = declared.packed
   typ.union = declared.union
   typ.enumValues = declared.enumValues
+  typ.rangeLow = declared.rangeLow
+  typ.rangeHigh = declared.rangeHigh
 
   var recordLayout = declared
   if typ.kind == ntRefObject and recordLayout.record.len == 0 and
@@ -1224,6 +1285,8 @@ proc typeFromLayout(layout: AbiTypeEntry): NativeType =
   result.indexTypeSymbol = layout.indexTypeSymbol
   result.elementTypeSymbol = layout.elementTypeSymbol
   result.arrayLength = layout.arrayLength
+  result.rangeLow = layout.rangeLow
+  result.rangeHigh = layout.rangeHigh
   result.size = layout.size
   result.alignment = layout.alignment
   result.layoutFingerprint = layout.layoutFingerprint
@@ -1252,8 +1315,36 @@ proc typeFromLayout(layout: AbiTypeEntry): NativeType =
     result.kind = ntOpenArray
   of "proc":
     result.kind = ntProc
+  of "range":
+    result.kind = ntRange
+  of "pointer":
+    result.kind = ntPointer
+  of "ref":
+    result.kind = ntRef
+  of "uncheckedarray":
+    result.kind = ntUncheckedArray
   else:
     fail("unsupported native ABI layout kind: " & layout.kind)
+
+func stdContainerArity(module, name: string): int =
+  case module
+  of "std/tables":
+    case name
+    of "Table", "OrderedTable", "TableRef", "OrderedTableRef": 2
+    of "CountTable", "CountTableRef": 1
+    else: 0
+  of "std/sets":
+    if name in ["HashSet", "OrderedSet"]: 1 else: 0
+  of "std/deques":
+    if name == "Deque": 1 else: 0
+  of "std/options":
+    if name == "Option": 1 else: 0
+  of "system":
+    case name
+    of "HSlice": 2
+    of "Slice": 1
+    else: 0
+  else: 0
 
 proc initStdContainer(
     module, sourceName: string,
@@ -1266,11 +1357,10 @@ proc initStdContainer(
   if module == "system" and name == "Slice" and arguments.len == 1:
     name = "HSlice"
     arguments.add arguments[0]
-  if layout.kind != "object" or not (
-    module == "std/tables" and name in ["Table", "OrderedTable"] and arguments.len == 2 or
-    module == "std/options" and name == "Option" and arguments.len == 1 or
-    module == "system" and name == "HSlice" and arguments.len == 2
-  ):
+  let arity = stdContainerArity(module, name)
+  let layoutKind = if name in ["TableRef", "OrderedTableRef", "CountTableRef"]: "ref"
+                   else: "object"
+  if layout.kind != layoutKind or arity == 0 or arguments.len != arity:
     return false
   typ = NativeType(
     name: name,
@@ -1358,7 +1448,7 @@ proc collectStdContainers(
 func isMaterializedKind(kind: string): bool =
   kind in
     ["object", "enum", "distinct", "array", "sequence", "set", "tuple", "openarray",
-     "proc"]
+     "proc", "range", "pointer", "ref", "uncheckedarray"]
 
 proc addLayoutDependency(
   layoutSymbol: string,
@@ -1455,7 +1545,9 @@ proc shouldSkipReferencedType(
     return false
   let layout = layouts[symbol]
   let usableUnknownLayout =
-    layout.kind in ["openarray", "sequence", "set"] or
+    layout.kind in ["openarray", "sequence", "set", "uncheckedarray"] or
+    layout.kind in ["pointer", "ref"] and layout.elementTypeSymbol.len > 0 or
+    layout.kind == "range" and layout.rangeLow.len > 0 and layout.rangeHigh.len > 0 or
     layout.kind == "proc" and layout.procInfo.nifSymbol.len > 0 or
     layout.kind == "array" and (
       layout.arrayLength >= 0 or
@@ -1755,7 +1847,8 @@ proc buildNativeApi(
     let declaration = findSemanticDeclaration(modules, item.nifSymbol)
     if declaration.cursorIsNil:
       fail("semantic declaration not found for " & item.nifSymbol)
-    let semantic = parseNativeProc(declaration, item)
+    var semantic = parseNativeProc(declaration, item)
+    unwrapSignatureTypes(semantic, layouts)
     item.returnTypeSymbol = semantic.returnTypeSymbol
     item.params = semantic.params
     item.returnLowering = if semantic.returnTypeSymbol.len == 0: nlVoid else: nlDirect
@@ -1787,6 +1880,12 @@ proc buildNativeApi(
       let path = bifPath.parentDir / (module.identity & ".s.bif")
       if readModuleSource(path).replace('\\', '/').endsWith("/lib/pure/options.nim"):
         stdContainerModules[module.identity] = "std/options"
+    if module.name in ["sets", "deques"]:
+      let path = bifPath.parentDir / (module.identity & ".s.bif")
+      let source = readModuleSource(path).replace('\\', '/')
+      if source.endsWith("/lib/pure/collections/" & module.name & ".nim") or
+          source.endsWith("/lib/std/" & module.name & ".nim"):
+        stdContainerModules[module.identity] = "std/" & module.name
 
   var importedGenericTypes: Table[string, NativeType]
   var std_container_symbols: Table[string, string]
@@ -1829,10 +1928,10 @@ proc buildNativeApi(
               typ.alignment = -1
               unmaterializedTypes.add typ
               continue
-            if symbolModule(typ.nifSymbol) in stdContainerModules and
-                symbolBase(typ.nifSymbol) in [
-                  "Table", "OrderedTable", "Option", "HSlice", "Slice"
-                ]:
+            if stdContainerArity(
+              stdContainerModules.getOrDefault(symbolModule(typ.nifSymbol)),
+              symbolBase(typ.nifSymbol),
+            ) > 0:
               continue
             if typ.nifSymbol in skipStdContainerTypes or
                 typ.typeId in skipStdContainerTypes:
@@ -1908,12 +2007,12 @@ proc buildNativeApi(
     )
 
   for procInfo in result.procs.mitems:
-    unwrapVarReturn(procInfo, layouts)
+    unwrapSignatureTypes(procInfo, layouts)
   for hook in result.hooks.mitems:
-    unwrapVarReturn(hook.procInfo, layouts)
+    unwrapSignatureTypes(hook.procInfo, layouts)
   for layout in layouts.mvalues:
     if layout.kind == "proc":
-      unwrapVarReturn(layout.procInfo, layouts)
+      unwrapSignatureTypes(layout.procInfo, layouts)
 
   var skipInternalTypes: Table[string, bool]
 
@@ -1995,8 +2094,10 @@ proc buildNativeApi(
       layout.size >= 0 or layout.arrayLength >= 0 or
       layout.kind == "array" and layout.indexTypeSymbol.len > 0 and
       layout.elementTypeSymbol.len > 0 or layout.kind in [
-        "openarray", "sequence", "set"
+        "openarray", "sequence", "set", "uncheckedarray"
       ] or layout.kind in ["object", "tuple"] and layout.record.len > 0 or
+      layout.kind in ["pointer", "ref"] and layout.elementTypeSymbol.len > 0 or
+      layout.kind == "range" and layout.rangeLow.len > 0 and layout.rangeHigh.len > 0 or
       layout.kind == "proc" and layout.procInfo.nifSymbol.len > 0
     ) and layout.kind.isMaterializedKind and layout.typeSymbol in requiredTypes and
         not hasUnresolvedElement and not hasMissingTupleFields:
@@ -2040,6 +2141,7 @@ proc buildNativeApi(
   for refLayout in description.types:
     let layout = layouts[refLayout.typeSymbol]
     if layout.typeSymbol notin requiredTypes or
+        layout.typeSymbol in represented or
         layout.typeSymbol in named_ref_types or layout.kind != "ref" or
         layout.elementTypeSymbol notin layouts or
         layouts[layout.elementTypeSymbol].kind != "object":

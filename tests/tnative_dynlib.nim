@@ -204,6 +204,63 @@ block generated_module_preserves_builtin_range_types:
   doAssert "position: Natural" in generated
   doAssert "Natural* =" notin generated
 
+block generated_module_preserves_custom_range_bounds:
+  let api = NativeApi(
+    libraryName: "libsample.so", initSymbol: "NimMain",
+    types: @[
+      NativeType(
+        name: "Small", nifSymbol: "Small.0.sample", typeId: "`t20.1.sample",
+        kind: ntRange, elementTypeSymbol: "int16", rangeLow: "-4", rangeHigh: "6",
+        size: 2, alignment: 2,
+      ),
+      NativeType(
+        name: "NativeAbiRange", nifSymbol: "`t20.2.sample", typeId: "`t20.2.sample",
+        kind: ntRange, elementTypeSymbol: "uint64",
+        rangeLow: "9223372036854775808'u64", rangeHigh: "18446744073709551615'u64",
+        size: 8, alignment: 8,
+      ),
+    ],
+    procs: @[NativeProc(
+      name: "bounds", cSymbol: "bounds", returnTypeSymbol: "Small.0.sample",
+      params: @[NativeParam(name: "value", typeSymbol: "`t20.2.sample")],
+    )],
+  )
+  let generated = generateNativeModule(api)
+  doAssert "Small* = range[int16(-4)..int16(6)]" in generated
+  doAssert ("value: range[uint64(9223372036854775808'u64).." &
+    "uint64(18446744073709551615'u64)]") in generated
+  doAssert "doAssert sizeof(Small) == 2" in generated
+  doAssert "NativeAbiRange* =" notin generated
+
+block generated_module_rejects_ranges_without_resolved_bounds:
+  let api = NativeApi(
+    libraryName: "libsample.so", initSymbol: "NimMain",
+    types: @[NativeType(
+      name: "MissingBounds", nifSymbol: "MissingBounds.0.sample", typeId: "`t20.1.sample",
+      kind: ntRange, elementTypeSymbol: "int",
+    )],
+    procs: @[NativeProc(name: "consume", cSymbol: "consume")],
+  )
+  doAssertRaises NativeArtifactError:
+    discard generateNativeModule(api)
+
+block generated_module_preserves_sink_and_lent_contracts:
+  let api = NativeApi(
+    libraryName: "libsample.so", initSymbol: "NimMain",
+    procs: @[
+      NativeProc(
+        name: "consume", cSymbol: "consume", returnTypeSymbol: "int",
+        params: @[NativeParam(name: "value", typeSymbol: "string", bySink: true)],
+      ),
+      NativeProc(
+        name: "borrow", cSymbol: "borrow", returnTypeSymbol: "string", returnByLent: true,
+      ),
+    ],
+  )
+  let generated = generateNativeModule(api)
+  doAssert "proc consume*(value: sink string): int" in generated
+  doAssert "proc borrow*(): lent string" in generated
+
 block generated_module_preserves_exported_aliases:
   let api = NativeApi(
     libraryName: "libsample.so",

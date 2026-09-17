@@ -69,7 +69,7 @@ proc initUtf8Runes*(runes: openArray[Rune]): Utf8Runes {.noinline.} =
     doAssert config.writeNativeBindings(bindings)
     let generated = readFile(bindings)
     doAssert generated.count("proc initUtf8Runes*") == 2
-    doAssert "proc initUtf8Runes*(text: string): Utf8Runes" in generated
+    doAssert "proc initUtf8Runes*(text: sink string): Utf8Runes" in generated
     doAssert "proc initUtf8Runes*(runes: openArray[Rune]): Utf8Runes" in generated
 
     writeFile(
