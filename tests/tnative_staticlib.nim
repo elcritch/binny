@@ -112,6 +112,12 @@ proc `=copy`(dest: var Tracked, source: Tracked) =
 proc publicAdd*(left, right: int): int {.noinline.} =
   left + right
 
+proc publicAdd*[T](left, right: T): T =
+  left + right
+
+proc genericIdentity*(value: auto): auto =
+  value
+
 proc publicAnswer*(): int {.noinline.} =
   42
 
@@ -191,6 +197,7 @@ proc privateAdd(left, right: int): int {.noinline.} =
       doAssert exports[3].nifSymbol.startsWith("sumValues.")
       doAssert "publicAnswer" notin exportedNames.join(",")
       doAssert "ignored" notin exportedNames.join(",")
+      doAssert "genericIdentity" notin exportedNames.join(",")
       doAssert exports[0].cSymbol.len > 0
       doAssert exports[1].cSymbol.len > 0
       doAssert exports[2].cSymbol.len > 0

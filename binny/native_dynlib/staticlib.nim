@@ -236,7 +236,10 @@ proc isRoutineDeclaration(declaration: Cursor): bool =
     if children.kind == TagLit and children.tagName in routineKinds:
       var marker = children.childCursor()
       if not marker.hasMore:
-        return true
+        result = true
+      elif not children.findChildTag("genericparams").cursorIsNil:
+        # Generic declarations have no runtime symbol until instantiated.
+        return false
     children.skip
 
 proc isSourceRoutineDeclaration(declaration: Cursor): bool =
