@@ -28,6 +28,7 @@ containers, and generic instances. The installation must include the
   ownership hooks in generated bindings.
 - Export only the BIF-selected procedures and required runtime entry points.
 - Exclude public procedures with exact or `*`-glob source/name selectors.
+- Reuse compatible third-party ABI types in generated bindings with layout checks.
 - Give each library its own initializer name, such as
   `libproducer_NimMain_pro47ngcy1`.
 - Use the original Nim implementations instead of generating forwarding code.
@@ -134,6 +135,7 @@ These modules remain available under `binny/elfparser`, `binny/dwarf`,
 Build the aggregate module and run the general test task with:
 
 ```sh
+atlas install --feature:test
 nim c binny.nim
 nim test
 ```

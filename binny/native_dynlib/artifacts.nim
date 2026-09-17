@@ -394,7 +394,8 @@ proc generateTuple(
 
 proc generateTypes(api: NativeApi, names: Table[string, string]): string =
   let types = api.types.filterIt(
-    not it.isBuiltinType and it.kind notin {ntImportedGeneric, ntOpenArray} and
+    not it.isBuiltinType and not it.imported and
+      it.kind notin {ntImportedGeneric, ntOpenArray} and
       not it.isAnonymousGenericType
   )
   if types.len == 0:
@@ -474,21 +475,25 @@ proc generateTypes(api: NativeApi, names: Table[string, string]): string =
     result.add "\n"
 
 proc generateFieldChecks(
-    typeName: string, record: seq[NativeRecordPart], indent: string
+    typeName: string,
+    record: seq[NativeRecordPart],
+    indent: string,
+    exportedOnly = false,
 ): string =
   for part in record:
     case part.kind
     of nrField:
-      if part.field.offset >= 0:
+      if part.field.offset >= 0 and (not exportedOnly or part.field.exported):
         result.add indent & "doAssert offsetOf(" & typeName & ", " &
           nimIdentifier(part.field.name) & ") == " & $part.field.offset & "\n"
     of nrCase:
-      if part.discriminant.offset >= 0:
+      if part.discriminant.offset >= 0 and
+          (not exportedOnly or part.discriminant.exported):
         result.add indent & "doAssert offsetOf(" & typeName & ", " &
           nimIdentifier(part.discriminant.name) & ") == " & $part.discriminant.offset &
           "\n"
       for branch in part.branches:
-        result.add generateFieldChecks(typeName, branch.record, indent)
+        result.add generateFieldChecks(typeName, branch.record, indent, exportedOnly)
 
 proc generateLayoutChecks(api: NativeApi, names: Table[string, string]): string =
   let types = api.types.filterIt(not it.isBuiltinType and it.kind != ntOpenArray)
@@ -508,7 +513,7 @@ proc generateLayoutChecks(api: NativeApi, names: Table[string, string]): string 
     if typ.alignment >= 0:
       result.add "  doAssert alignof(" & typeName & ") == " & $typ.alignment & "\n"
     if typ.kind == ntObject:
-      result.add generateFieldChecks(typeName, typ.record, "  ")
+      result.add generateFieldChecks(typeName, typ.record, "  ", typ.imported)
   result.add "\n"
 
 proc params(procInfo: NativeProc, names: Table[string, string]): string =

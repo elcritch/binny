@@ -58,6 +58,25 @@ hooks and the library initializer remain present. The example passes this same
 file to the builder, which applies it to both archive rooting and binding
 generation.
 
+## Reuse imported ABI types
+
+When a public procedure uses a type already provided by a dependency, add a
+`typeImports` entry to the same JSON file:
+
+```json
+{
+  "typeImports": [
+    {"name": "Rect", "module": "bumpy"}
+  ]
+}
+```
+
+The generated binding imports the module and uses its `Rect` declaration
+instead of reconstructing another one. Nested module paths such as `foo/bar`
+are supported. The binding also emits compile-time `sizeof`, `alignof`, and
+exported-field offset assertions against the producer's BIF layout, so an
+incompatible local type fails when the consumer is compiled.
+
 The workflow uses and builds these files:
 
 ```text

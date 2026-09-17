@@ -29,7 +29,9 @@ block bif_config_adds_native_library_suffix:
 block bif_config_accepts_export_config:
   let
     exportConfig = initNativeExportConfig(
-      [excludeProc("debug*")], includeProcs = [includeProc("public*")]
+      [excludeProc("debug*")],
+      includeProcs = [includeProc("public*")],
+      typeImports = [importType("Rect", "bumpy")],
     )
     config = initBifNativeBindingsConfig(
       "src/producer.nim",
@@ -39,6 +41,7 @@ block bif_config_accepts_export_config:
     )
   doAssert config.exportConfig.excludeProcs == exportConfig.excludeProcs
   doAssert config.exportConfig.includeProcs == exportConfig.includeProcs
+  doAssert config.exportConfig.typeImports == exportConfig.typeImports
   doAssert config.exportConfig.requireMatches
 
 block native_export_selectors_match_exact_names_and_globs:
@@ -75,6 +78,9 @@ block native_export_config_loads_json:
     {"source": "producer*.nim", "name": "ignored*"},
     {"name": "foo="}
   ],
+  "typeImports": [
+    {"name": "Rect", "module": "bumpy"}
+  ],
   "requireMatches": false
 }
 """
@@ -89,6 +95,14 @@ block native_export_config_loads_json:
   doAssert config.includeProcs[1].matches("../support.nim", "loadTypeface")
   doAssert config.excludeProcs[0].matches("producer.nim", "ignoredDebug")
   doAssert config.excludeProcs[1].matches("support.nim", "foo=")
+  doAssert config.typeImports == [importType("Rect", "bumpy")]
+
+block native_export_config_rejects_invalid_type_imports:
+  doAssert importType("Rect", "foo\\bar").module == "foo/bar"
+  doAssertRaises NativeExportConfigError:
+    discard initNativeExportConfig(typeImports = [importType("Rect", "")])
+  doAssertRaises NativeExportConfigError:
+    discard initNativeExportConfig(typeImports = [importType("Rect", "bumpy; discard")])
 
 block native_export_config_rejects_backticks:
   doAssertRaises NativeExportConfigError:
@@ -304,6 +318,81 @@ block generated_module_imports_canonical_ordered_tables:
   doAssert "layers*: OrderedTable[Layer, RenderList]" in generated
   doAssert "doAssert sizeof(OrderedTable[Layer, RenderList]) == 40" in generated
   doAssert "OrderedTable* = object" notin generated
+
+block generated_module_reuses_imported_types:
+  let api = NativeApi(
+    libraryName: "libsample.so",
+    initSymbol: "NimMain",
+    types:
+      @[
+        NativeType(
+          name: "Rect",
+          nifSymbol: "Rect.0.bumpy",
+          typeId: "`t20.1.bumpy",
+          kind: ntObject,
+          size: 16,
+          alignment: 4,
+          importModule: "bumpy",
+          imported: true,
+          record:
+            @[
+              NativeRecordPart(
+                kind: nrField,
+                field: NativeField(
+                  name: "x",
+                  typeSymbol: "float32.0.system",
+                  exported: true,
+                  offset: 0,
+                ),
+              ),
+              NativeRecordPart(
+                kind: nrField,
+                field: NativeField(
+                  name: "y",
+                  typeSymbol: "float32.0.system",
+                  exported: true,
+                  offset: 4,
+                ),
+              ),
+              NativeRecordPart(
+                kind: nrField,
+                field: NativeField(
+                  name: "w",
+                  typeSymbol: "float32.0.system",
+                  exported: true,
+                  offset: 8,
+                ),
+              ),
+              NativeRecordPart(
+                kind: nrField,
+                field: NativeField(
+                  name: "h",
+                  typeSymbol: "float32.0.system",
+                  exported: true,
+                  offset: 12,
+                ),
+              ),
+            ],
+        )
+      ],
+    procs:
+      @[
+        NativeProc(
+          name: "identityRect",
+          cSymbol: "identityRect",
+          returnTypeSymbol: "Rect.0.bumpy",
+          params: @[NativeParam(name: "value", typeSymbol: "Rect.0.bumpy")],
+        )
+      ],
+  )
+  let generated = generateNativeModule(api)
+  doAssert "import bumpy" in generated
+  doAssert "  Rect* = object" notin generated
+  doAssert "proc identityRect*(value: Rect): Rect" in generated
+  doAssert "doAssert sizeof(Rect) == 16" in generated
+  doAssert "doAssert alignof(Rect) == 4" in generated
+  doAssert "doAssert offsetOf(Rect, x) == 0" in generated
+  doAssert "doAssert offsetOf(Rect, h) == 12" in generated
 
 block generated_module_preserves_discardable_procs:
   let api = NativeApi(

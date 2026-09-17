@@ -67,6 +67,8 @@ type
     packed*: bool
     union*: bool
     importModule*: string
+    ## True when ``importModule`` supplies the type declaration itself.
+    imported*: bool
     genericArguments*: seq[string]
     equivalentTypeSymbols*: seq[string]
     enumValues*: seq[NativeEnumValue]

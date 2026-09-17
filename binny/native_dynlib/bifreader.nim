@@ -977,8 +977,9 @@ proc parseParam(declaration: Cursor): NativeParam =
   if not typeDesc.cursorIsNil:
     let typeIdNode = typeDesc.findChildKind(SymbolDef)
     let typeId = if typeIdNode.cursorIsNil: "" else: typeIdNode.symName
-    if typeId.startsWith("`t23."):
-      result.byVar = true
+    let modifierKind = typeOrdinal(typeId)
+    if modifierKind in [ord(tyVar), ord(tySink), ord(tyOwned), ord(tyLent)]:
+      result.byVar = modifierKind == ord(tyVar)
       let typeSymbol = typeDesc.findLastChildKind(Symbol)
       if not typeSymbol.cursorIsNil:
         result.typeSymbol = typeSymbol.symName
@@ -1523,8 +1524,38 @@ proc bifNativeDescription(
       status: if hook.forbidden: nhForbidden else: nhCustom,
     )
 
+proc applyTypeImports(
+    api: var NativeApi, typeImports: openArray[NativeTypeImport]
+) =
+  for typeImport in typeImports:
+    var matchingIndex = -1
+    for index, typ in api.types:
+      if typ.name != typeImport.name:
+        continue
+      if matchingIndex >= 0:
+        fail(
+          "native type import " & typeImport.name &
+            " matches more than one ABI type; use a unique public type name"
+        )
+      matchingIndex = index
+    if matchingIndex < 0:
+      fail(
+        "native type import " & typeImport.name &
+          " was not found in the generated native ABI"
+      )
+    if api.types[matchingIndex].importModule.len > 0 and
+        api.types[matchingIndex].importModule != typeImport.module:
+      fail(
+        "native type import " & typeImport.name & " conflicts with module " &
+          api.types[matchingIndex].importModule
+      )
+    api.types[matchingIndex].importModule = typeImport.module
+    api.types[matchingIndex].imported = true
+
 proc buildNativeApi(
-    bifPath: string, sourceDescription: BifNativeDescription
+    bifPath: string,
+    sourceDescription: BifNativeDescription,
+    typeImports: openArray[NativeTypeImport],
 ): NativeApi =
   var description = sourceDescription
   result.libraryName = description.libraryName
@@ -1794,6 +1825,8 @@ proc buildNativeApi(
         if layout.typeSymbol notin typ.equivalentTypeSymbols:
           typ.equivalentTypeSymbols.add layout.typeSymbol
 
+  result.applyTypeImports(typeImports)
+
 proc readModuleSource*(path: string): string =
   var module = bif.load(path)
   var cursor = module.buf.beginRead()
@@ -1821,4 +1854,4 @@ proc readBifNativeApi*(
     description = bifNativeDescription(
       nimcacheDir, sourceRoot, libraryName, initSymbol, routines, hooks
     )
-  result = buildNativeApi(bifPath, description)
+  result = buildNativeApi(bifPath, description, exportConfig.typeImports)
