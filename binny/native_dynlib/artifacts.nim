@@ -150,7 +150,7 @@ proc typeNames(api: NativeApi): Table[string, string] =
   for typ in api.types:
     if typ.isAnonymousGenericType:
       continue
-    elif typ.kind == ntProc:
+    elif typ.kind in {ntProc, ntImportedGeneric, ntOpenArray}:
       continue
     elif typ.kind == ntRange and typ.name in ["Natural", "Positive"]:
       result[typ.nifSymbol] = typ.name
@@ -166,53 +166,48 @@ proc typeNames(api: NativeApi): Table[string, string] =
   while changed:
     changed = false
     for typ in api.types:
-      if not typ.isAnonymousGenericType or typ.typeId in result:
-        continue
-      let element = knownTypeExpression(typ.elementTypeSymbol, result)
-      if element.len == 0:
+      if typ.typeId in result or not (
+        typ.isAnonymousGenericType or
+        typ.kind in {ntImportedGeneric, ntOpenArray, ntProc}
+      ):
         continue
       var rendered: string
       case typ.kind
-      of ntSequence:
-        rendered = "seq[" & element & "]"
-      of ntSet:
-        rendered = "set[" & element & "]"
-      of ntArray:
-        if typ.indexTypeSymbol.len > 0:
-          let index = knownTypeExpression(typ.indexTypeSymbol, result)
-          if index.len > 0:
-            rendered = "array[" & index & ", " & element & "]"
-        if rendered.len == 0:
-          let length = api.arrayLength(typ)
-          if length >= 0:
-            rendered = "array[" & $length & ", " & element & "]"
+      of ntImportedGeneric:
+        var arguments: seq[string]
+        for argument in typ.genericArguments:
+          let expression = knownTypeExpression(argument, result)
+          if expression.len == 0:
+            break
+          arguments.add expression
+        if arguments.len == typ.genericArguments.len:
+          rendered = nimIdentifier(typ.name) & "[" & arguments.join(", ") & "]"
+      of ntProc:
+        rendered = knownProcTypeExpression(typ.procInfo, result)
+      of ntSequence, ntSet, ntArray, ntOpenArray:
+        let element = knownTypeExpression(typ.elementTypeSymbol, result)
+        if element.len == 0:
+          continue
+        case typ.kind
+        of ntSequence:
+          rendered = "seq[" & element & "]"
+        of ntSet:
+          rendered = "set[" & element & "]"
+        of ntOpenArray:
+          rendered = "openArray[" & element & "]"
+        of ntArray:
+          if typ.indexTypeSymbol.len > 0:
+            let index = knownTypeExpression(typ.indexTypeSymbol, result)
+            if index.len > 0:
+              rendered = "array[" & index & ", " & element & "]"
+          if rendered.len == 0:
+            let length = api.arrayLength(typ)
+            if length >= 0:
+              rendered = "array[" & $length & ", " & element & "]"
+        else:
+          discard
       else:
         discard
-      if rendered.len > 0:
-        result[typ.nifSymbol] = rendered
-        result[typ.typeId] = rendered
-        changed = true
-
-  for typ in api.types:
-    if typ.kind == ntImportedGeneric:
-      var arguments: seq[string]
-      for argument in typ.genericArguments:
-        arguments.add nimType(argument, result)
-      let rendered = nimIdentifier(typ.name) & "[" & arguments.join(", ") & "]"
-      result[typ.nifSymbol] = rendered
-      result[typ.typeId] = rendered
-    elif typ.kind == ntOpenArray:
-      let rendered = "openArray[" & nimType(typ.elementTypeSymbol, result) & "]"
-      result[typ.nifSymbol] = rendered
-      result[typ.typeId] = rendered
-
-  changed = true
-  while changed:
-    changed = false
-    for typ in api.types:
-      if typ.kind != ntProc or typ.typeId in result:
-        continue
-      let rendered = knownProcTypeExpression(typ.procInfo, result)
       if rendered.len > 0:
         result[typ.nifSymbol] = rendered
         result[typ.typeId] = rendered

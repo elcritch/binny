@@ -167,13 +167,16 @@ symbols the dylib exposes.
   promoted.
 - Generated bindings cover the concrete types exercised here: objects, refs,
   inheritance, case and packed objects, aliases, sequences, `Table`,
-  `OrderedTable`, `Option`, tuples, open arrays, and custom or forbidden ownership
-  hooks.
+  `OrderedTable`, `Option`, `Slice`, `HSlice`, tuples, open arrays, and custom or
+  forbidden ownership hooks.
 
 Selected public methods export Nim's dispatcher, so a consumer call reaches
 the producer's runtime-specific override rather than calling only the base
 implementation. Standard-library container instances reuse their local Nim
 declarations; their concrete argument types are reconstructed as needed.
+`Slice[T]` uses the canonical `HSlice[T, T]` declaration, including in procedure
+signatures and nested containers. Backwards bounds such as `1 .. ^2` retain
+Nim's `BackwardsIndex` type. No `typeImports` configuration is needed for slices.
 Reconstructed dependency types do not require importing their original module
 into the consumer. Polymorphic refs must be constructed by the producer to
 retain the runtime type information used by its dispatcher.

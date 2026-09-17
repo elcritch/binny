@@ -47,6 +47,8 @@ type
     baseTypeSymbol: string
     indexTypeSymbol: string
     elementTypeSymbol: string
+    genericTypeSymbol: string
+    genericArguments: seq[string]
     arrayLength: int64
     enumValues: seq[NativeEnumValue]
     record: seq[NativeRecordPart]
@@ -789,6 +791,10 @@ proc compilerAbiLayout(
 
   case typ.kind
   of tyGenericInst:
+    if typ.sonsImpl.len >= 2:
+      result.genericTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[0])
+      for index in 1 ..< typ.sonsImpl.high:
+        result.genericArguments.add context.compilerTypeSymbol(typ.sonsImpl[index])
     if typ.sonsImpl.len > 0:
       let actual = typ.sonsImpl[^1]
       if actual != nil:
@@ -887,6 +893,9 @@ proc mergeLayout(layouts: var Table[string, AbiTypeEntry], layout: AbiTypeEntry)
     merged.indexTypeSymbol = layout.indexTypeSymbol
   if merged.elementTypeSymbol.len == 0:
     merged.elementTypeSymbol = layout.elementTypeSymbol
+  if merged.genericTypeSymbol.len == 0:
+    merged.genericTypeSymbol = layout.genericTypeSymbol
+    merged.genericArguments = layout.genericArguments
   if merged.procInfo.nifSymbol.len == 0:
     merged.procInfo = layout.procInfo
   merged.inheritable = merged.inheritable or layout.inheritable
@@ -1246,6 +1255,36 @@ proc typeFromLayout(layout: AbiTypeEntry): NativeType =
   else:
     fail("unsupported native ABI layout kind: " & layout.kind)
 
+proc initStdContainer(
+    module, sourceName: string,
+    layout: AbiTypeEntry,
+    sourceArguments: seq[string],
+    typ: var NativeType,
+): bool =
+  var name = sourceName
+  var arguments = sourceArguments
+  if module == "system" and name == "Slice" and arguments.len == 1:
+    name = "HSlice"
+    arguments.add arguments[0]
+  if layout.kind != "object" or not (
+    module == "std/tables" and name in ["Table", "OrderedTable"] and arguments.len == 2 or
+    module == "std/options" and name == "Option" and arguments.len == 1 or
+    module == "system" and name == "HSlice" and arguments.len == 2
+  ):
+    return false
+  typ = NativeType(
+    name: name,
+    nifSymbol: layout.typeSymbol,
+    typeId: layout.typeSymbol,
+    kind: ntImportedGeneric,
+    size: layout.size,
+    alignment: layout.alignment,
+    layoutFingerprint: layout.layoutFingerprint,
+    importModule: (if module == "system": "" else: module),
+    genericArguments: arguments,
+  )
+  result = true
+
 proc parseStdContainer(
     node: Cursor,
     stdContainerModules: Table[string, string],
@@ -1289,30 +1328,12 @@ proc parseStdContainer(
     children.skip
 
   if symbols.len != 2 or symbolModule(symbols[1]) notin stdContainerModules or
-      symbols[0] notin layouts or
-      layouts[symbols[0]].kind != "object":
+      symbols[0] notin layouts:
     return false
   let module = stdContainerModules[symbolModule(symbols[1])]
-  let name = symbolBase(symbols[1])
-  if not (
-    module == "std/tables" and name in ["Table", "OrderedTable"] and arguments.len == 2 or
-    module == "std/options" and name == "Option" and arguments.len == 1
-  ):
-    return false
-
-  let layout = layouts[symbols[0]]
-  typ = NativeType(
-    name: name,
-    nifSymbol: layout.typeSymbol,
-    typeId: layout.typeSymbol,
-    kind: ntImportedGeneric,
-    size: layout.size,
-    alignment: layout.alignment,
-    layoutFingerprint: layout.layoutFingerprint,
-    importModule: module,
-    genericArguments: arguments,
+  result = initStdContainer(
+    module, symbolBase(symbols[1]), layouts[symbols[0]], arguments, typ
   )
-  result = true
 
 proc collectStdContainers(
     node: Cursor,
@@ -1757,6 +1778,7 @@ proc buildNativeApi(
   for module in description.modules:
     if module.name == "system":
       skipSystemModuleTypeSymbols[module.identity] = true
+      stdContainerModules[module.identity] = "system"
     if module.name == "tables":
       let path = bifPath.parentDir / (module.identity & ".s.bif")
       if readModuleSource(path).isStdTablesSource:
@@ -1767,6 +1789,7 @@ proc buildNativeApi(
         stdContainerModules[module.identity] = "std/options"
 
   var importedGenericTypes: Table[string, NativeType]
+  var std_container_symbols: Table[string, string]
   var skipStdContainerTypes: Table[string, bool]
   var unmaterializedTypes: seq[NativeType]
   var preferredTypeAliases: seq[PreferredTypeAlias]
@@ -1781,6 +1804,12 @@ proc buildNativeApi(
       if inspectDeclaration:
         if not declaration.findChildTag("type").cursorIsNil and
             not declaration.findChildTag("type0").cursorIsNil:
+          if moduleId in stdContainerModules:
+            let type_desc = declaration.findChildTag("td")
+            if not type_desc.cursorIsNil:
+              let type_id = type_desc.findChildKind(SymbolDef)
+              if not type_id.cursorIsNil:
+                std_container_symbols[type_id.symName] = nifSymbol
           collectStdContainers(
             declaration, stdContainerModules, layouts, importedGenericTypes,
             skipStdContainerTypes,
@@ -1792,13 +1821,18 @@ proc buildNativeApi(
               continue
             seenSemanticTypes[typeKey] = true
             let hasLayout = applyLayout(typ, layouts)
+            if stdContainerModules.getOrDefault(moduleId) == "system" and
+                typ.name == "BackwardsIndex" and typ.kind == ntDistinct:
+              typ.imported = true
             if typ.kind != ntAlias and not hasLayout:
               typ.size = -1
               typ.alignment = -1
               unmaterializedTypes.add typ
               continue
             if symbolModule(typ.nifSymbol) in stdContainerModules and
-                symbolBase(typ.nifSymbol) in ["Table", "OrderedTable", "Option"]:
+                symbolBase(typ.nifSymbol) in [
+                  "Table", "OrderedTable", "Option", "HSlice", "Slice"
+                ]:
               continue
             if typ.nifSymbol in skipStdContainerTypes or
                 typ.typeId in skipStdContainerTypes:
@@ -1810,6 +1844,18 @@ proc buildNativeApi(
               if alias.name.len > 0:
                 preferredTypeAliases.add alias
                 preferredTypeIndexes[alias.name] = result.types.high
+
+  # Signatures carry compiler type references rather than source generic
+  # expressions, so retain the generic head and arguments from their layouts.
+  for layout in layouts.values:
+    if layout.genericTypeSymbol in std_container_symbols:
+      let symbol = std_container_symbols[layout.genericTypeSymbol]
+      var typ: NativeType
+      if initStdContainer(
+        stdContainerModules[symbolModule(symbol)], symbolBase(symbol), layout,
+        layout.genericArguments, typ,
+      ):
+        importedGenericTypes[typ.typeId] = typ
 
   for typ in importedGenericTypes.values:
     result.types.add typ

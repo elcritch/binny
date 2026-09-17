@@ -61,6 +61,12 @@ type
     duration*: Duration
     onValue*: proc(value: int)
     cursor*: Cursor
+    span*: Slice[int]
+    shortSpan*: Slice[int16]
+    mixedSpan*: HSlice[int16, int32]
+    tailSpan*: HSlice[int, BackwardsIndex]
+    spans*: Table[int, Slice[int]]
+    ranges*: seq[Slice[int16]]
 
 method currentValue*(window: Window): int {.base.} = -1
 method `currentValue=`*(window: Window, value: int) {.base.} =
@@ -75,6 +81,15 @@ proc regionValue*(window: Window): int =
   window.region.get().x
 proc cursorValue*(window: Window): int =
   window.cursor.image.x + window.cursor.image.y
+proc sliceValue*(window: Window, span: Slice[int]): Slice[int] =
+  window.span = span
+  span
+proc shortSlice*(span: Slice[int8]): Slice[int8] = span
+proc tailValue*(window: Window, span: HSlice[int, BackwardsIndex]): string =
+  window.tailSpan = span
+  "abcdef"[span]
+proc storedSlice*(window: Window, index: int): Slice[int] = window.spans[index]
+proc storedRange*(window: Window, index: int): Slice[int16] = window.ranges[index]
 """)
       writeFile(source, """
 import siwin/window
@@ -144,6 +159,14 @@ proc newWindow*(): Window = DerivedWindow(value: 40)
       doAssert "RootObj* {.inheritable.} = object\n" in generated
       doAssert "Table[int, Touch]" in generated
       doAssert "Option[MouseButton]" in generated
+      doAssert "HSlice[int, int]" in generated
+      doAssert "HSlice[int16, int16]" in generated
+      doAssert "HSlice[int16, int32]" in generated
+      doAssert "HSlice[int8, int8]" in generated
+      doAssert "HSlice[int, BackwardsIndex]" in generated
+      doAssert "BackwardsIndex* = distinct" notin generated
+      doAssert "Table[int, HSlice[int, int]]" in generated
+      doAssert "seq[HSlice[int16, int16]]" in generated
       writeFile(consumer, """
 import methods_abi
 import std/[options, tables]
@@ -162,6 +185,21 @@ window.region = some((x: 7, y: 8))
 doAssert window.regionValue() == 7
 window.cursor = Cursor(kind: ckImage, image: Point(x: 7, y: 8))
 doAssert window.cursorValue() == 15
+let span: Slice[int] = window.sliceValue(2 .. 5)
+doAssert span == 2 .. 5
+doAssert window.span == span
+window.shortSpan = 1'i16 .. 3'i16
+doAssert window.shortSpan == 1'i16 .. 3'i16
+window.mixedSpan = HSlice[int16, int32](a: 2, b: 4)
+doAssert window.mixedSpan == HSlice[int16, int32](a: 2, b: 4)
+doAssert shortSlice(1'i8 .. 3'i8) == 1'i8 .. 3'i8
+doAssert window.tailValue(1 .. ^2) == "bcde"
+doAssert window.tailSpan.a == 1
+doAssert int(window.tailSpan.b) == 2
+window.spans[7] = 3 .. 9
+doAssert window.storedSlice(7) == 3 .. 9
+window.ranges = @[2'i16 .. 4'i16]
+doAssert window.storedRange(0) == 2'i16 .. 4'i16
 var observed = 0
 window.onValue = proc(value: int) = observed = value
 window.notify()

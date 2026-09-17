@@ -320,6 +320,54 @@ block generated_module_imports_canonical_ordered_tables:
   doAssert "doAssert sizeof(OrderedTable[Layer, RenderList]) == 40" in generated
   doAssert "OrderedTable* = object" notin generated
 
+block generated_module_resolves_nested_slices_before_containers:
+  let api = NativeApi(
+    libraryName: "libsample.so",
+    initSymbol: "NimMain",
+    types: @[
+      NativeType(
+        name: "Table",
+        nifSymbol: "`t11.1.sample",
+        typeId: "`t11.1.sample",
+        kind: ntImportedGeneric,
+        size: 40,
+        alignment: 8,
+        importModule: "std/tables",
+        genericArguments: @["int", "`t11.3.sample"],
+      ),
+      NativeType(
+        name: "NativeAbiSpans",
+        nifSymbol: "`t24.2.sample",
+        typeId: "`t24.2.sample",
+        kind: ntSequence,
+        elementTypeSymbol: "`t11.3.sample",
+      ),
+      NativeType(
+        name: "HSlice",
+        nifSymbol: "`t11.3.sample",
+        typeId: "`t11.3.sample",
+        kind: ntImportedGeneric,
+        size: 16,
+        alignment: 8,
+        genericArguments: @["int", "int"],
+      ),
+    ],
+    procs: @[
+      NativeProc(
+        name: "spans",
+        cSymbol: "spans",
+        returnTypeSymbol: "`t11.1.sample",
+        params: @[NativeParam(name: "values", typeSymbol: "`t24.2.sample")],
+      )
+    ],
+  )
+  let generated = generateNativeModule(api)
+  doAssert "values: seq[HSlice[int, int]]" in generated
+  doAssert "): Table[int, HSlice[int, int]]" in generated
+  doAssert "doAssert sizeof(HSlice[int, int]) == 16" in generated
+  doAssert "doAssert alignof(HSlice[int, int]) == 8" in generated
+  doAssert "HSlice* = object" notin generated
+
 block generated_module_declares_case_enums_before_records:
   let api = NativeApi(
     libraryName: "libsample.so",
