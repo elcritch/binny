@@ -32,6 +32,7 @@ block bif_config_accepts_export_config:
       [excludeProc("debug*")],
       includeProcs = [includeProc("public*")],
       typeImports = [importType("Rect", "bumpy")],
+      opaqueTypes = [opaqueType("Renderer", "renderer.nim")],
     )
     config = initBifNativeBindingsConfig(
       "src/producer.nim",
@@ -43,6 +44,7 @@ block bif_config_accepts_export_config:
   doAssert config.exportConfig.includeProcs == exportConfig.includeProcs
   doAssert config.exportConfig.typeImports == exportConfig.typeImports
   doAssert config.exportConfig.typeImports[0].exported
+  doAssert config.exportConfig.opaqueTypes == exportConfig.opaqueTypes
   doAssert config.exportConfig.requireMatches
 
 block native_export_selectors_match_exact_names_and_globs:
@@ -82,6 +84,9 @@ block native_export_config_loads_json:
   "typeImports": [
     {"name": "Rect", "module": "bumpy", "export": false, "source": "../bumpy.nim"}
   ],
+  "opaqueTypes": [
+    {"name": "Renderer", "source": "../renderer.nim"}
+  ],
   "requireMatches": false
 }
 """
@@ -97,8 +102,34 @@ block native_export_config_loads_json:
   doAssert config.includeProcs[1].typeArgs == @["../backend.nim:State"]
   doAssert config.excludeProcs[0].matches("producer.nim", "ignoredDebug")
   doAssert config.excludeProcs[1].matches("support.nim", "foo=")
-  doAssert config.typeImports == [importType("Rect", "bumpy", exported = false,
-    source = "../bumpy.nim")]
+  doAssert config.typeImports ==
+    [importType("Rect", "bumpy", exported = false, source = "../bumpy.nim")]
+  doAssert config.opaqueTypes == @[opaqueType("Renderer", "../renderer.nim")]
+
+block native_export_config_rejects_invalid_opaque_types:
+  doAssert opaqueType("Renderer", "foo\\bar.nim").source == "foo/bar.nim"
+  for name in ["", "*", "module.Renderer", "`Renderer`", "foo/Renderer"]:
+    doAssertRaises NativeExportConfigError:
+      discard initNativeExportConfig(opaqueTypes = [opaqueType(name)])
+  doAssertRaises NativeExportConfigError:
+    discard initNativeExportConfig(opaqueTypes = [opaqueType("Renderer", "/bad.nim")])
+
+block native_export_config_rejects_malformed_opaque_json:
+  let (configFile, configPath) = createTempFile("binny-native-opaque-config-", ".json")
+  configFile.close()
+  defer:
+    removeFile(configPath)
+  for payload in [
+    """{"opaqueTypes": null}""",
+    """{"opaqueTypes": ["Renderer"]}""",
+    """{"opaqueTypes": [{}]}""",
+    """{"opaqueTypes": [{"name": 1}]}""",
+    """{"opaqueTypes": [{"name": "Renderer", "source": 1}]}""",
+    """{"opaqueTypes": [{"name": "Renderer", "module": "backend"}]}""",
+  ]:
+    writeFile(configPath, payload)
+    doAssertRaises NativeExportConfigError:
+      discard loadNativeExportConfig(configPath)
 
 block native_export_config_rejects_invalid_type_imports:
   doAssert importType("Rect", "foo\\bar").module == "foo/bar"

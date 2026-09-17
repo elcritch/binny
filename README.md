@@ -116,6 +116,35 @@ on Linux and FreeBSD, or `.dll` on Windows. Call
 `nativeBuild.stageNativeDynlib("bin")` to copy the
 library and generate a matching binding module in a distribution directory.
 
+### Hide implementation types
+
+An export configuration can keep graphics/backend records opaque without
+recompiling their implementation in the consumer:
+
+```json
+{
+  "opaqueTypes": [
+    {"name": "Renderer", "source": "renderer.nim"},
+    {"name": "PresentationTarget", "source": "backend.nim"}
+  ]
+}
+```
+
+The selected names remain public, but their fields and field-type dependencies
+do not. Direct native calls still use the original ABI. Reference aliases share
+ownership; value copies and destruction delegate to producer-generated hooks.
+Private storage preserves scalar and managed-field calling conventions, and
+producer size/alignment checks run when the consumer module initializes.
+
+Opaque exports currently require the normal C backend, matching ARC/atomicARC
+producer and consumer builds, and `-d:useMalloc`. Only plain, final records (or
+references to them) are supported; variants, inheritance, packed/union records,
+closure fields, and custom/forbidden hooks on the selected record are rejected.
+ORC tracing and incremental-backend opaque exports are not supported yet.
+Selectors must resolve to exactly one public type, cannot overlap `typeImports`,
+and may use source globs to disambiguate dependencies. Generate bindings for
+each producer platform/backend: private storage is not a cross-platform binary ABI.
+
 ## Other binary tooling
 
 Binny also contains lower-level binary inspection and stack-walking work:

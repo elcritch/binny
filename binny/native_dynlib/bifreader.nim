@@ -1927,6 +1927,7 @@ proc buildNativeApi(
     bifPath: string,
     sourceDescription: BifNativeDescription,
     typeImports: openArray[NativeTypeImport],
+    opaqueExports: openArray[NativeOpaqueExport],
     sourceRoot: string,
 ): NativeApi =
   var description = sourceDescription
@@ -2067,6 +2068,234 @@ proc buildNativeApi(
 
   result.applyTypeImports(typeImports, layouts, description.modules, sourceRoot)
   var opaqueTypes = importedTypeSymbols(result, layouts)
+  var selectedOpaqueTypes: Table[string, bool]
+  var hiddenOpaqueDependencies: Table[string, bool]
+  var pointerSize = -1'i64
+  var pointerAlignment = -1'i64
+  for layout in layouts.values:
+    if typeOrdinal(layout.typeSymbol) == ord(tyPointer) and layout.size >= 0:
+      pointerSize = layout.size
+      pointerAlignment = layout.alignment
+      break
+  proc resolveOpaqueLayout(symbol: string, visiting: var seq[string]): AbiTypeEntry =
+    if symbol notin layouts or symbol in visiting:
+      fail("opaque storage has an unresolved or recursive layout: " & symbol)
+    visiting.add symbol
+    defer:
+      visiting.setLen(visiting.len - 1)
+    result = layouts[symbol]
+    if result.baseTypeSymbol.len > 0 or result.inheritable or result.packed or
+        result.union:
+      fail("opaque storage does not support inherited, packed, or union layouts")
+    case result.kind
+    of "alias", "distinct", "range":
+      let child = resolveOpaqueLayout(result.elementTypeSymbol, visiting)
+      result.size = child.size
+      result.alignment = child.alignment
+    of "array":
+      if result.arrayLength < 0:
+        fail("opaque storage has an unresolved array length")
+      let child = resolveOpaqueLayout(result.elementTypeSymbol, visiting)
+      result.size = result.arrayLength * child.size
+      result.alignment = child.alignment
+    of "proc":
+      if result.procInfo.callConv == "closure":
+        fail("opaque storage does not support closures")
+      result.size = pointerSize
+      result.alignment = pointerAlignment
+    of "object", "tuple":
+      # Generic bodies can be serialized before getSize has populated their
+      # offsets. Plain records use the compiler's declaration-order alignment
+      # rules; validate the resulting storage against producer sizeof/alignof
+      # before any calls cross the boundary.
+      var size = 0'i64
+      var alignment = 1'i64
+      for part in result.record.mitems:
+        if part.kind != nrField:
+          fail("opaque storage does not support variant records")
+        let child = resolveOpaqueLayout(part.field.typeSymbol, visiting)
+        let offset =
+          ((size + child.alignment - 1) div child.alignment) * child.alignment
+        if part.field.offset >= 0 and part.field.offset != offset:
+          fail("opaque storage has a nonstandard field offset: " & part.field.name)
+        part.field.offset = offset
+        part.field.size = child.size
+        part.field.alignment = child.alignment
+        size = offset + child.size
+        alignment = max(alignment, child.alignment)
+      size = max(1'i64, ((size + alignment - 1) div alignment) * alignment)
+      if result.size >= 0 and result.size != size or
+          result.alignment >= 0 and result.alignment != alignment:
+        fail("opaque storage has a nonstandard record layout: " & symbol)
+      result.size = size
+      result.alignment = alignment
+    else:
+      discard
+    if result.size < 0 or result.alignment <= 0:
+      fail("opaque storage has unknown size/alignment: " & symbol)
+    layouts[symbol] = result
+
+  # Keep the exact primitive ABI shape (including floats and managed markers),
+  # rather than substituting bytes which can change aggregate calling conventions.
+  proc opaqueRecord(layout: AbiTypeEntry): seq[NativeRecordPart] =
+    var slots: seq[NativeRecordPart]
+    proc flatten(symbol: string, offset: int64, visiting: var seq[string]) =
+      if symbol in visiting or symbol notin layouts:
+        fail("opaque storage has an unresolved or recursive layout: " & symbol)
+      visiting.add symbol
+      defer:
+        visiting.setLen(visiting.len - 1)
+      let item = layouts[symbol]
+      if item.baseTypeSymbol.len > 0 or item.inheritable or item.packed or item.union:
+        fail("opaque storage does not support inherited, packed, or union layouts")
+      var primitive: string
+      case typeOrdinal(symbol)
+      of ord(tyBool), ord(tyChar), ord(tyInt8), ord(tyUInt8):
+        primitive = "uint8"
+      of ord(tyInt16), ord(tyUInt16):
+        primitive = "uint16"
+      of ord(tyInt32), ord(tyUInt32):
+        primitive = "uint32"
+      of ord(tyInt), ord(tyUInt), ord(tyInt64), ord(tyUInt64):
+        primitive = "uint64"
+      of ord(tyFloat32):
+        primitive = "float32"
+      of ord(tyFloat), ord(tyFloat64):
+        primitive = "float64"
+      of ord(tyString):
+        primitive = "string"
+      of ord(tyPointer), ord(tyCstring):
+        primitive = "pointer"
+      else:
+        discard
+      if primitive.len == 0:
+        case item.kind
+        of "alias", "distinct", "range":
+          flatten(item.elementTypeSymbol, offset, visiting)
+          return
+        of "pointer":
+          primitive = "pointer"
+        of "ref":
+          primitive = "ref byte"
+        of "sequence":
+          primitive = "seq[byte]"
+        of "enum", "set":
+          if item.size notin [1'i64, 2, 4, 8]:
+            fail("opaque storage requires a scalar enum/set layout")
+          primitive = "uint" & $(item.size * 8)
+        of "proc":
+          if item.procInfo.callConv == "closure":
+            fail("opaque storage does not support closures")
+          primitive = "pointer"
+        of "array":
+          if item.arrayLength < 0 or item.elementTypeSymbol notin layouts:
+            fail("opaque storage has an unresolved array")
+          let stride = layouts[item.elementTypeSymbol].size
+          for index in 0 ..< item.arrayLength:
+            flatten(item.elementTypeSymbol, offset + index * stride, visiting)
+          return
+        of "object", "tuple":
+          for part in item.record:
+            if part.kind != nrField or part.field.offset < 0:
+              fail("opaque storage does not support variants or unknown offsets")
+            flatten(part.field.typeSymbol, offset + part.field.offset, visiting)
+          return
+        else:
+          fail("unsupported opaque storage layout: " & item.kind)
+      slots.add NativeRecordPart(
+        kind: nrField,
+        field: NativeField(
+          name: "binnySlot" & $slots.len,
+          storageType: primitive,
+          offset: offset,
+          size: item.size,
+          alignment: item.alignment,
+        ),
+      )
+
+    var visiting: seq[string]
+    flatten(layout.typeSymbol, 0, visiting)
+    result = slots
+
+  for opaque in opaqueExports:
+    var found = false
+    for typ in result.types.mitems:
+      if typ.nifSymbol != opaque.nifSymbol:
+        continue
+      if typ.imported:
+        fail("a type cannot be both imported and opaque: " & typ.name)
+      if typ.opaque:
+        fail("duplicate opaque type: " & typ.name)
+      if typ.typeId in selectedOpaqueTypes:
+        fail("opaque selectors resolve to the same ABI type: " & typ.name)
+      var layout = layouts.getOrDefault(typ.typeId)
+      var chain: seq[string]
+      while layout.kind == "alias":
+        if layout.typeSymbol in chain or layout.elementTypeSymbol notin layouts:
+          fail("opaque alias has no concrete layout: " & typ.name)
+        chain.add layout.typeSymbol
+        layout = layouts[layout.elementTypeSymbol]
+      typ.opaqueRef = layout.kind == "ref"
+      if typ.opaqueRef:
+        chain.add layout.typeSymbol
+        if layout.elementTypeSymbol notin layouts:
+          fail("opaque reference has no payload layout: " & typ.name)
+        # A concrete generic instance and its realized ref body have different
+        # compiler IDs but the same payload. Stop dependency traversal at every
+        # equivalent reference, including the IDs carried by direct signatures.
+        for candidate in layouts.values:
+          if candidate.kind == "ref" and
+              candidate.elementTypeSymbol == layout.elementTypeSymbol:
+            if candidate.typeSymbol notin chain:
+              chain.add candidate.typeSymbol
+        layout = layouts[layout.elementTypeSymbol]
+      else:
+        chain.add layout.typeSymbol
+      for symbol in chain:
+        if symbol in selectedOpaqueTypes:
+          fail("opaque selectors resolve to the same ABI type: " & typ.name)
+        if symbol in opaqueTypes:
+          fail("a type cannot be both imported and opaque: " & typ.name)
+      if layout.kind notin ["object", "tuple"]:
+        fail("opaque exports require a concrete record layout: " & typ.name)
+      var visiting: seq[string]
+      layout = resolveOpaqueLayout(layout.typeSymbol, visiting)
+      collectReferencedLayoutDependencies(
+        layout,
+        layouts,
+        hiddenOpaqueDependencies,
+        initTable[string, bool](),
+        initTable[string, bool](),
+      )
+      for hook in description.hooks:
+        if hook.typeSymbol in chain or hook.typeSymbol == layout.typeSymbol or
+            hook.typeSymbol == typ.typeId:
+          fail(
+            "opaque exports cannot override custom/forbidden ownership hooks: " &
+              typ.name
+          )
+      typ.opaque = true
+      typ.kind = if typ.opaqueRef: ntRefObject else: ntObject
+      typ.opaqueHookPrefix = opaque.hookPrefix
+      typ.opaqueSize = layout.size
+      typ.opaqueAlignment = layout.alignment
+      typ.record = opaqueRecord(layout)
+      typ.baseTypeSymbol = ""
+      typ.elementTypeSymbol = ""
+      opaqueTypes[typ.typeId] = true
+      selectedOpaqueTypes[typ.typeId] = true
+      for symbol in chain:
+        opaqueTypes[symbol] = true
+        selectedOpaqueTypes[symbol] = true
+        if symbol != typ.typeId and symbol notin typ.equivalentTypeSymbols:
+          typ.equivalentTypeSymbols.add symbol
+      found = true
+    if not found:
+      fail("opaque type is absent from native ABI: " & opaque.typeName)
+  # Source aliases can name an already public dependency record. Retain the
+  # selected opaque declaration as the canonical representation of that ABI ID,
+  # rather than also exposing the original record under a second name.
+  result.types = result.types.filterIt(it.opaque or it.typeId notin selectedOpaqueTypes)
   # The standard library supplies these generic layouts. Their arguments
   # remain ABI dependencies, but their private storage declarations do not.
   for typ in importedGenericTypes.values:
@@ -2134,7 +2363,8 @@ proc buildNativeApi(
     let isSignatureType =
       typ.nifSymbol in signatureTypeSymbols or typ.typeId in signatureTypeSymbols
     let isMaterializedSemanticType =
-      typ.kind != ntAlias and moduleIdentity in applicationModules
+      typ.kind != ntAlias and moduleIdentity in applicationModules and
+      (typ.opaque or typ.typeId notin hiddenOpaqueDependencies)
     if isSignatureType or isMaterializedSemanticType:
       if moduleIdentity.len > 0 and moduleIdentity in skipSystemModuleTypeSymbols:
         continue
@@ -2305,8 +2535,13 @@ proc readBifNativeApi*(
   var hooks = nativeHooks
   for (hookIndex, symbolIndex) in hookSymbolIndexes:
     hooks[hookIndex].cSymbol = resolvedSymbols[symbolIndex].cSymbol
-  let
-    description = bifNativeDescription(
-      nimcacheDir, sourceRoot, libraryName, initSymbol, routines, hooks
-    )
-  result = buildNativeApi(bifPath, description, exportConfig.typeImports, sourceRoot)
+  let description = bifNativeDescription(
+    nimcacheDir, sourceRoot, libraryName, initSymbol, routines, hooks
+  )
+  result = buildNativeApi(
+    bifPath,
+    description,
+    exportConfig.typeImports,
+    nativeOpaqueExports(nimcacheDir, sourceRoot, sourcePath, exportConfig),
+    sourceRoot,
+  )

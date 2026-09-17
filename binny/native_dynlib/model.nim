@@ -36,6 +36,7 @@ type
     alignment*: int64
     managed*: bool
     discriminant*: bool
+    storageType*: string ## Primitive ABI shape of a private opaque storage slot.
 
   NativeRecordPartKind* = enum
     nrField
@@ -83,6 +84,10 @@ type
     equivalentTypeSymbols*: seq[string]
     enumValues*: seq[NativeEnumValue]
     record*: seq[NativeRecordPart]
+    opaque*: bool
+    opaqueRef*: bool
+    opaqueHookPrefix*: string
+    opaqueSize*, opaqueAlignment*: int64
 
   NativeParam* = object
     name*: string

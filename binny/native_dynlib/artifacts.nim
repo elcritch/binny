@@ -443,7 +443,10 @@ proc generateField(
   result.add indent & nimIdentifier(field.name)
   if field.exported:
     result.add "*"
-  result.add ": " & nimType(field.typeSymbol, names) & "\n"
+  result.add ": " & (
+    if field.storageType.len > 0: field.storageType
+    else: nimType(field.typeSymbol, names)
+  ) & "\n"
 
 proc generateRecord(
     record: seq[NativeRecordPart], names: Table[string, string], indent: string
@@ -490,6 +493,12 @@ proc generateTypes(api: NativeApi, names: Table[string, string]): string =
   # Case discriminants and their selectors need complete enum declarations,
   # even though other fields can refer forward within the same type section.
   for typ in types.filterIt(it.kind == ntEnum) & types.filterIt(it.kind != ntEnum):
+    if typ.opaqueRef:
+      result.add "  " & names[typ.nifSymbol] & "* = ref BinnyOpaquePayload" &
+        typ.opaqueHookPrefix & "Storage\n"
+      result.add "  BinnyOpaquePayload" & typ.opaqueHookPrefix & "Storage = object\n"
+      result.add generateRecord(typ.record, names, "    ") & "\n"
+      continue
     result.add "  " & names[typ.nifSymbol] & "*"
     var pragmas: seq[string] = @[]
     if typ.inheritable:
@@ -614,6 +623,18 @@ static:
       result.add "  doAssert alignof(" & typeName & ") == " & $typ.alignment & "\n"
     if typ.kind == ntObject:
       result.add generateFieldChecks(typeName, typ.record, "  ", typ.imported)
+    if typ.opaque:
+      let storage =
+        if typ.opaqueRef:
+          "BinnyOpaquePayload" & typ.opaqueHookPrefix & "Storage"
+        else:
+          typeName
+      result.add "  doAssert sizeof(" & storage & ") == " & $typ.opaqueSize & "\n"
+      result.add "  doAssert alignof(" & storage & ") == " & $typ.opaqueAlignment & "\n"
+      result.add generateFieldChecks(storage, typ.record, "  ")
+  if api.types.anyIt(it.opaque):
+    result.add "  when defined(gcOrc) or not (defined(gcArc) or defined(gcAtomicArc)):\n"
+    result.add "    {.error: \"Opaque native types require ARC/atomicARC; ORC tracing is not supported.\".}\n"
   result.add "\n"
 
 proc params(procInfo: NativeProc, names: Table[string, string]): string =
@@ -707,6 +728,28 @@ proc generateNativeModule*(
     ", dynlib: nativeLibrary.}\n\n"
   result.add "nativeNimMain()\n"
   result.add "\n{.push nimcall, dynlib: nativeLibrary.}\n"
+
+  for typ in api.types:
+    if not typ.opaque:
+      continue
+    let storage =
+      if typ.opaqueRef:
+        "BinnyOpaquePayload" & typ.opaqueHookPrefix & "Storage"
+      else:
+        names[typ.nifSymbol]
+    let prefix = typ.opaqueHookPrefix
+    result.add "\nproc " & prefix & "Destroy(value: pointer) {.importc.}\n"
+    result.add "proc " & prefix & "Copy(dest, source: pointer) {.importc.}\n"
+    result.add "proc " & prefix & "Size(): int {.importc.}\n"
+    result.add "proc " & prefix & "Alignment(): int {.importc.}\n"
+    result.add "{.pop.}\n"
+    result.add "proc `=destroy`(value: var " & storage & ") =\n"
+    result.add "  " & prefix & "Destroy(addr value)\n"
+    result.add "proc `=copy`(dest: var " & storage & "; source: " & storage & ") =\n"
+    result.add "  " & prefix & "Copy(addr dest, unsafeAddr source)\n"
+    result.add "\n{.push nimcall, dynlib: nativeLibrary.}\n"
+    result.add "doAssert sizeof(" & storage & ") == " & prefix & "Size()\n"
+    result.add "doAssert alignof(" & storage & ") == " & prefix & "Alignment()\n"
 
   for hook in api.hooks:
     let procInfo = hook.procInfo

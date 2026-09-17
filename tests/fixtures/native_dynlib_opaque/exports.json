@@ -1,0 +1,13 @@
+{
+  "includeProcs": [
+    {"source": "producer.nim", "name": "*"},
+    {"source": "../backend.nim", "name": "enabled"},
+    {"source": "../backend.nim", "name": "enabled="}
+  ],
+  "opaqueTypes": [
+    {"source": "producer.nim", "name": "NativeRenderer"},
+    {"source": "producer.nim", "name": "NativeState"},
+    {"source": "producer.nim", "name": "NativeLease"},
+    {"source": "producer.nim", "name": "NativeTarget"}
+  ]
+}

@@ -40,6 +40,9 @@ type
     cSymbol*: string
     forbidden*: bool
 
+  NativeOpaqueExport* = object
+    sourcePath*, typeName*, nifSymbol*, hookPrefix*: string
+
   CDefinition = object
     nifSymbol: string
     cSymbol: string
@@ -355,6 +358,41 @@ proc activeSemanticModules(nimcacheDir, mainSource: string): HashSet[string] =
         if not imported.cursorIsNil: pending.add imported.strVal
       child.skip
     root.endRead()
+
+proc nativeOpaqueExports*(
+    nimcacheDir, sourceRoot, mainSource: string, config: NativeExportConfig
+): seq[NativeOpaqueExport] =
+  let active = activeSemanticModules(nimcacheDir, mainSource)
+  let root = sourceRoot.normalizedAbsolutePath
+  for selector in config.opaqueTypes:
+    var matches: seq[NativeOpaqueExport]
+    for path in walkFiles(nimcacheDir / "*.s.bif"):
+      let identity = bifModuleSuffix(path)
+      if active.len > 0 and identity notin active:
+        continue
+      var module = bif.load(path)
+      let source = module.readModuleSource().normalizedAbsolutePath
+      for symbol, visibility, declaration in module.declarations:
+        if visibility == ivExported and semanticModule(symbol) == identity and
+            not declaration.findChildTag("type").cursorIsNil and
+            includeProc(selector.name, selector.source).matches(
+              relativePath(source, root), symbol.semanticName
+            ):
+          matches.add NativeOpaqueExport(
+            sourcePath: source,
+            typeName: selector.name,
+            nifSymbol: symbol,
+            hookPrefix: "binny_opaque_" & symbol.mangleCName,
+          )
+    if matches.len != 1:
+      fail(
+        "native opaque type " & selector.name &
+          " requires exactly one source-owned match"
+      )
+    for previous in result:
+      if previous.nifSymbol == matches[0].nifSymbol:
+        fail("duplicate native opaque type: " & selector.name)
+    result.add matches[0]
 
 proc applyExportConfig(
     symbols: openArray[NativeExportSymbol],
@@ -804,8 +842,10 @@ proc cFunctionDefinitions(path: string): seq[string] =
   let tokens = cTokens(readFile(path))
   var depth = 0
   for index, token in tokens:
-    if depth == 0 and (token.cTokenPrefix.len > 0 or
-        token.startsWith("binny_inline_") or token.startsWith("binny_generic_")):
+    if depth == 0 and (
+      token.cTokenPrefix.len > 0 or token.startsWith("binny_inline_") or
+      token.startsWith("binny_generic_") or token.startsWith("binny_opaque_")
+    ):
       var position = index + 1
       # Nim's N_NIMCALL/N_INLINE macros place the name inside their parentheses.
       if position < tokens.len and tokens[position] == ")":
@@ -937,6 +977,7 @@ proc writeCBackendRoot(
     outputPath, mainSource: string,
     routines: openArray[NativeExportSymbol],
     hooks: openArray[NativeHookSymbol],
+    opaqueExports: openArray[NativeOpaqueExport],
 ): JsonNode =
   result = newJObject()
   for routine in routines:
@@ -957,6 +998,9 @@ proc writeCBackendRoot(
     let source = normalizedAbsolutePath(hook.sourcePath)
     if source notin sources:
       sources.add source
+  for opaque in opaqueExports:
+    if opaque.sourcePath notin sources:
+      sources.add opaque.sourcePath
   sources.sort()
 
   var aliases: Table[string, string]
@@ -1008,6 +1052,32 @@ proc binnyInlineThunk(symbol: NimNode, exportName: string): NimNode {.compileTim
           content.add ", "
         content.add name.nimQuotedIdentifier
       content.add "\n"
+
+  if opaqueExports.len > 0:
+    content.add "\nwhen defined(gcOrc) or not (defined(gcArc) or defined(gcAtomicArc)):\n"
+    content.add "  {.error: \"Opaque native types require ARC/atomicARC; ORC tracing is not supported.\".}\n"
+    content.add "when not defined(useMalloc):\n"
+    content.add "  {.error: \"Opaque native types require -d:useMalloc.\".}\n"
+  for opaque in opaqueExports:
+    let qualified =
+      aliases[opaque.sourcePath] & "." & opaque.typeName.nimQuotedIdentifier
+    let storage = opaque.hookPrefix & "Storage"
+    content.add "\nwhen " & qualified & " is ref:\n"
+    content.add "  type " & storage & " = typeof(default(" & qualified & ")[])\n"
+    content.add "else:\n  type " & storage & " = " & qualified & "\n"
+    content.add "static:\n  doAssert sizeof(" & storage & ") >= 0\n"
+    content.add "  doAssert alignof(" & storage & ") > 0\n"
+    content.add "proc " & opaque.hookPrefix & "Size(): int {.used, exportc.} = sizeof(" &
+      storage & ")\n"
+    content.add "proc " & opaque.hookPrefix &
+      "Alignment(): int {.used, exportc.} = alignof(" & storage & ")\n"
+    content.add "proc " & opaque.hookPrefix &
+      "Destroy(value: pointer) {.used, exportc.} =\n"
+    content.add "  reset(cast[ptr " & storage & "](value)[])\n"
+    content.add "proc " & opaque.hookPrefix &
+      "Copy(dest, source: pointer) {.used, exportc.} =\n"
+    content.add "  cast[ptr " & storage & "](dest)[] = cast[ptr " & storage &
+      "](source)[]\n"
 
   var generic_sources = initHashSet[string]()
   for routine in routines:
@@ -1206,6 +1276,8 @@ proc prepareNativeRoutines*(
   ## ``cBuildManifest`` selects the compiler JSON build description explicitly
   ## when the cache contains more than one; otherwise it must be unambiguous.
   if cBuildManifest.len == 0 and nimcacheDir.hasIncrementalCArtifacts:
+    if exportConfig.opaqueTypes.len > 0:
+      fail("opaque native exports currently require the normal C backend")
     let statePath = cBuildStatePath(nimcacheDir)
     if fileExists(statePath):
       removeFile(statePath)
@@ -1223,7 +1295,10 @@ proc prepareNativeRoutines*(
     let
       routines = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig, mainSource)
       hooks = nativeHookSymbols(nimcacheDir, sourceRoot)
-    let thunks = writeCBackendRoot(cRootSource, mainSource, routines, hooks)
+      opaqueExports =
+        nativeOpaqueExports(nimcacheDir, sourceRoot, mainSource, exportConfig)
+    let thunks =
+      writeCBackendRoot(cRootSource, mainSource, routines, hooks, opaqueExports)
     let state = %*{
       "manifest": manifest,
       "projectPath": normalizedAbsolutePath(cRootSource).parentDir,
@@ -1246,6 +1321,16 @@ proc nativeExportSymbols*(
         sourcePath: hook.sourcePath, nifSymbol: hook.nifSymbol
       )
   result = resolveNativeSymbols(nimcacheDir, symbols)
+  if exportConfig.opaqueTypes.len == 0:
+    return
+  let mainSource = cBuildState(nimcacheDir).getOrDefault("mainSource").getStr
+  let definitions = cBackendSymbols(nimcacheDir)
+  for opaque in nativeOpaqueExports(nimcacheDir, sourceRoot, mainSource, exportConfig):
+    for suffix in ["Destroy", "Copy", "Size", "Alignment"]:
+      let name = opaque.hookPrefix & suffix
+      if name notin definitions:
+        fail("missing opaque ownership thunk: " & name)
+      result.add NativeExportSymbol(sourcePath: opaque.sourcePath, cSymbol: name)
 
 proc writeDarwinExportList*(
     path, initSymbol: string, symbols: openArray[NativeExportSymbol]

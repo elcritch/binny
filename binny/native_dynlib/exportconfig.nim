@@ -24,6 +24,11 @@ type
     ## Re-exports the imported type from generated bindings unless disabled.
     exported*: bool
 
+  NativeOpaqueType* = object
+    ## Exports a named type with private ABI-compatible storage, not its fields.
+    name*: string
+    source*: string ## Optional source-relative ownership selector, with ``*`` globs.
+
   NativeExportConfig* = object
     ## When non-empty, only matching public procedures become exports.
     includeProcs*: seq[NativeProcSelector]
@@ -33,6 +38,8 @@ type
     requireMatches*: bool
     ## Types that generated bindings should import instead of redeclaring.
     typeImports*: seq[NativeTypeImport]
+    ## Types whose implementation fields stay inside the producer.
+    opaqueTypes*: seq[NativeOpaqueType]
 
 proc fail(message: string) {.noinline, noreturn.} =
   raise newException(NativeExportConfigError, message)
@@ -54,6 +61,11 @@ func importType*(name, module: string, exported = true, source = ""): NativeType
     name: name, module: module.replace('\\', '/'), exported: exported,
     source: source.replace('\\', '/')
   )
+
+func opaqueType*(name: string, source = ""): NativeOpaqueType =
+  ## Selects one public record or record reference for opaque native export.
+  ## Ambiguous names require a source selector; imported types cannot be opaque.
+  NativeOpaqueType(name: name, source: source.replace('\\', '/'))
 
 proc validateSelector(selector: NativeProcSelector, description: string) =
   if selector.name.len == 0:
@@ -91,18 +103,24 @@ proc validateNativeExportConfig*(config: NativeExportConfig) =
     selector.validateSelector("native export inclusion")
   for index, typeImport in config.typeImports:
     typeImport.validateTypeImport("native type import[" & $index & "]")
+  for opaque in config.opaqueTypes:
+    if opaque.name.len == 0 or '`' in opaque.name or '*' in opaque.name or
+        '.' in opaque.name or '/' in opaque.name or opaque.source.isAbsolute:
+      fail("invalid native opaque type selector: " & opaque.name)
 
 proc initNativeExportConfig*(
     excludeProcs: openArray[NativeProcSelector] = [],
     requireMatches = true,
     includeProcs: openArray[NativeProcSelector] = [],
     typeImports: openArray[NativeTypeImport] = [],
+    opaqueTypes: openArray[NativeOpaqueType] = [],
 ): NativeExportConfig =
   ## Creates a validated native export configuration.
   result.excludeProcs = @excludeProcs
   result.includeProcs = @includeProcs
   result.requireMatches = requireMatches
   result.typeImports = @typeImports
+  result.opaqueTypes = @opaqueTypes
   result.validateNativeExportConfig()
 
 func globMatches(value, pattern: string): bool =
@@ -193,7 +211,7 @@ proc parseTypeImport(node: JsonNode, index: int): NativeTypeImport =
   result.validateTypeImport(description)
 
 proc loadNativeExportConfig*(path: string): NativeExportConfig =
-  ## Loads procedure selectors, imported types, and ``requireMatches`` from JSON.
+  ## Loads procedure selectors, imported/opaque types, and match policy from JSON.
   let root =
     try:
       parseFile(path)
@@ -202,7 +220,7 @@ proc loadNativeExportConfig*(path: string): NativeExportConfig =
 
   root.requireObject("native export config")
   root.rejectUnknownFields(
-    ["includeProcs", "excludeProcs", "requireMatches", "typeImports"],
+    ["includeProcs", "excludeProcs", "requireMatches", "typeImports", "opaqueTypes"],
     "native export config",
   )
 
@@ -236,6 +254,20 @@ proc loadNativeExportConfig*(path: string): NativeExportConfig =
     for item in items.items:
       typeImports.add parseTypeImport(item, typeImports.len)
 
+  var opaqueTypes: seq[NativeOpaqueType]
+  if root.hasKey("opaqueTypes"):
+    if root["opaqueTypes"].kind != JArray:
+      fail("opaqueTypes must be an array")
+    for item in root["opaqueTypes"]:
+      item.requireObject("opaqueTypes entry")
+      item.rejectUnknownFields(["name", "source"], "opaqueTypes entry")
+      if not item.hasKey("name") or item["name"].kind != JString or
+          item.hasKey("source") and item["source"].kind != JString:
+        fail("opaqueTypes entries require a name and optional source string")
+      opaqueTypes.add opaqueType(
+        item["name"].getStr, item.getOrDefault("source").getStr
+      )
+
   result = initNativeExportConfig(
-    selectors, requireMatches, includeSelectors, typeImports
+    selectors, requireMatches, includeSelectors, typeImports, opaqueTypes
   )
