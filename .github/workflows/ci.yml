@@ -51,6 +51,9 @@ jobs:
       - name: Test imported native types
         run: nim c -r tests/tnative_dynlib_imported_types.nim
 
+      - name: Test imported generic arguments and nil method overloads
+        run: nim c -r tests/tnative_dynlib_siwin_types.nim
+
       - name: Test anonymous generic and named ref bindings
         run: nim c -r tests/tanonymous_generics.nim
 

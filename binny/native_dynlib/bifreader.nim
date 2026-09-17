@@ -37,6 +37,8 @@ type
 
   AbiTypeEntry = object
     typeSymbol: string
+    semanticTypeSymbol: string
+    instantiatedTypeSymbol: string
     kind: string
     size: int64
     alignment: int64
@@ -287,6 +289,7 @@ type CompilerTypeContext = object
   parsed: Table[string, bool]
   typeNames: Table[pointer, string]
   symbols: Table[string, PSym]
+  symbolNames: Table[pointer, string]
   moduleIds: Table[string, int32]
   nextModuleId: int32
   records: Table[string, seq[NativeRecordPart]]
@@ -300,6 +303,7 @@ proc initCompilerTypeContext(): CompilerTypeContext =
   result.parsed = initTable[string, bool]()
   result.typeNames = initTable[pointer, string]()
   result.symbols = initTable[string, PSym]()
+  result.symbolNames = initTable[pointer, string]()
   result.moduleIds = initTable[string, int32]()
   result.records = initTable[string, seq[NativeRecordPart]]()
   result.enumValues = initTable[string, seq[NativeEnumValue]]()
@@ -634,6 +638,7 @@ proc compilerSymStub(context: var CompilerTypeContext, symbol: string): PSym =
     return context.symbols[symbol]
   result = PSym(kindImpl: skStub, state: Complete, name: PIdent(s: symbolBase(symbol)))
   context.symbols[symbol] = result
+  context.symbolNames[cast[pointer](result)] = symbol
 
 proc scanCompilerTypeDefs(context: var CompilerTypeContext, node: Cursor)
 
@@ -811,6 +816,8 @@ proc compilerAbiLayout(
     context: CompilerTypeContext, symbol: string, typ: PType
 ): AbiTypeEntry =
   result.typeSymbol = symbol
+  if typ.symImpl != nil:
+    result.semanticTypeSymbol = context.symbolNames.getOrDefault(cast[pointer](typ.symImpl))
   result.kind = compilerLayoutKind(typ.kind)
   result.size = int64(typ.sizeImpl)
   result.alignment = int64(typ.alignImpl)
@@ -837,6 +844,7 @@ proc compilerAbiLayout(
     if typ.sonsImpl.len > 0:
       let actual = typ.sonsImpl[^1]
       if actual != nil:
+        result.instantiatedTypeSymbol = context.compilerTypeSymbol(actual)
         let actualLayout =
           context.compilerAbiLayout(context.compilerTypeSymbol(actual), actual)
         result.kind = actualLayout.kind
@@ -914,6 +922,10 @@ proc mergeLayout(layouts: var Table[string, AbiTypeEntry], layout: AbiTypeEntry)
     layouts[layout.typeSymbol] = layout
     return
   var merged = layouts[layout.typeSymbol]
+  if merged.semanticTypeSymbol.len == 0:
+    merged.semanticTypeSymbol = layout.semanticTypeSymbol
+  if merged.instantiatedTypeSymbol.len == 0:
+    merged.instantiatedTypeSymbol = layout.instantiatedTypeSymbol
   if merged.kind in ["genericinstance", "genericinvocation", "genericbody"] and
       layout.kind in
       ["object", "enum", "distinct", "array", "sequence", "set", "tuple", "openarray"]:
@@ -1782,7 +1794,8 @@ proc bifNativeDescription(
     )
 
 proc applyTypeImports(
-    api: var NativeApi, typeImports: openArray[NativeTypeImport]
+    api: var NativeApi, typeImports: openArray[NativeTypeImport],
+    layouts: Table[string, AbiTypeEntry],
 ) =
   for typeImport in typeImports:
     var matchingIndex = -1
@@ -1809,6 +1822,41 @@ proc applyTypeImports(
     api.types[matchingIndex].importModule = typeImport.module
     api.types[matchingIndex].imported = true
     api.types[matchingIndex].exported = typeImport.exported
+
+    var equivalents: Table[string, bool]
+    let imported_type = api.types[matchingIndex]
+    let imported_kind = layouts.getOrDefault(imported_type.typeId).kind
+    equivalents[imported_type.typeId] = true
+    for symbol in imported_type.equivalentTypeSymbols:
+      equivalents[symbol] = true
+    for layout in layouts.values:
+      if layout.semanticTypeSymbol == imported_type.nifSymbol and
+          layout.kind == imported_kind:
+        equivalents[layout.typeSymbol] = true
+
+    # Generic aliases can receive new type IDs in importing modules. The
+    # compiler's nominal symbol and realized body identify them, not their
+    # spelling or a coincidentally matching object layout.
+    var changed = true
+    while changed:
+      changed = false
+      for layout in layouts.values:
+        if layout.instantiatedTypeSymbol.len == 0:
+          continue
+        if layout.typeSymbol in equivalents and
+            layout.instantiatedTypeSymbol notin equivalents:
+          equivalents[layout.instantiatedTypeSymbol] = true
+          changed = true
+        elif layout.instantiatedTypeSymbol in equivalents and
+            layout.typeSymbol notin equivalents:
+          equivalents[layout.typeSymbol] = true
+          changed = true
+    var symbols: seq[string]
+    for symbol in equivalents.keys:
+      if symbol != imported_type.typeId:
+        symbols.add symbol
+    symbols.sort()
+    api.types[matchingIndex].equivalentTypeSymbols = symbols
 
 proc importedTypeSymbols(
     api: NativeApi, layouts: Table[string, AbiTypeEntry]
@@ -1959,7 +2007,7 @@ proc buildNativeApi(
   for typ in importedGenericTypes.values:
     result.types.add typ
 
-  result.applyTypeImports(typeImports)
+  result.applyTypeImports(typeImports, layouts)
   var opaqueTypes = importedTypeSymbols(result, layouts)
   # The standard library supplies these generic layouts. Their arguments
   # remain ABI dependencies, but their private storage declarations do not.
@@ -1982,6 +2030,8 @@ proc buildNativeApi(
   var represented: Table[string, bool]
   for typ in result.types:
     represented[typ.typeId] = true
+    for symbol in typ.equivalentTypeSymbols:
+      represented[symbol] = true
 
   for item in description.procs:
     let nifSymbol = item.nifSymbol
@@ -2128,7 +2178,12 @@ proc buildNativeApi(
 
   var publicTypes: seq[NativeType]
   for typ in result.types:
-    if typ.typeId in requiredTypes or typ.nifSymbol in requiredTypes:
+    var required = typ.typeId in requiredTypes or typ.nifSymbol in requiredTypes
+    for symbol in typ.equivalentTypeSymbols:
+      if symbol in requiredTypes:
+        required = true
+        break
+    if required:
       publicTypes.add typ
   result.types = publicTypes
   # Anonymous ref objects need the compiler's ``tyRef`` symbol mapped to

@@ -50,6 +50,7 @@ func builtinTypeId(symbol: string): string =
   case parseInt(symbol[2 ..< dot])
   of 1: "bool"
   of 2: "char"
+  of 5: "typeof(nil)"
   of 26: "pointer"
   of 28: "string"
   of 29: "cstring"

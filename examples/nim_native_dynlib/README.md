@@ -76,6 +76,8 @@ instead of reconstructing another one. Nested module paths such as `foo/bar`
 are supported. The binding also emits compile-time `sizeof`, `alignof`, and
 exported-field offset assertions against the producer's BIF layout, so an
 incompatible local type fails when the consumer is compiled.
+Imported types retain their identity inside standard-library generics, such as
+`Option[Vec2]`, including compiler-generated aliases of the imported type.
 The generated binding also re-exports each imported type, allowing a facade
 module to expose those third-party types without importing and exporting each
 dependency again. Re-exporting defaults to enabled for each entry. To keep one
