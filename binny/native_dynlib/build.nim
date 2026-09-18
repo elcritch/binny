@@ -26,6 +26,9 @@ type
     nimArgs*: seq[string]
     linkerArgs*: seq[string]
     libraryNameStrdefine*: bool
+    ## Reject raising exports. Defaults to the
+    ## ``features.binny.forbidExceptions`` compile-time feature.
+    forbidExceptions*: bool
 
 const binnyProjectDir = currentSourcePath.parentDir.parentDir.parentDir
 
@@ -54,6 +57,7 @@ proc initNativeDynlibBuildConfig*(
     exportConfigPath = "",
     backend = "",
     compiler = "",
+    forbidExceptions = defined(features.binny.forbidExceptions),
 ): NativeDynlibBuildConfig =
   ## Creates a native-dynlib build with normal ``nim c`` as the default backend.
   ##
@@ -99,6 +103,7 @@ proc initNativeDynlibBuildConfig*(
       compiler
     else:
       getCurrentCompilerExe()
+  result.forbidExceptions = forbidExceptions
 
 func nativeBuildDir*(config: NativeDynlibBuildConfig): string =
   ## Returns the backend-specific artifact directory.
@@ -206,6 +211,8 @@ proc toolArguments(config: NativeDynlibBuildConfig, command: string): seq[string
 proc addExportConfig(arguments: var seq[string], config: NativeDynlibBuildConfig) =
   if config.exportConfigPath.len > 0:
     arguments.add "--config:" & config.exportConfigPath
+  if config.forbidExceptions:
+    arguments.add "--forbid-exceptions"
 
 proc prepareRoutines(config: NativeDynlibBuildConfig) =
   var arguments = config.toolArguments("prepare")
@@ -244,7 +251,9 @@ proc producerObjects(config: NativeDynlibBuildConfig): seq[string] =
         result.add path
   else:
     for path in listFiles(config.producerCache):
-      if path.endsWith(".o"):
+      let supersededMain = fileExists(config.cRootSource) and
+        path.extractFilename == "@m" & config.sourcePath.extractFilename & ".c.o"
+      if path.endsWith(".o") and not supersededMain:
         result.add path
   result.sort()
   if result.len == 0:
@@ -350,6 +359,11 @@ proc buildNativeDynlib*(config: NativeDynlibBuildConfig) =
   config.compileProducer(config.sourcePath)
   config.prepareRoutines()
   if config.backend == "c":
+    config.compileProducer(config.cRootSource, force = true)
+  elif fileExists(config.cRootSource):
+    # The generated root lives outside the producer's project directory. Force
+    # IC to regenerate imported C artifacts so every module uses that pass's
+    # consistent compiler symbol suffixes.
     config.compileProducer(config.cRootSource, force = true)
   else:
     config.compileProducer(config.sourcePath)

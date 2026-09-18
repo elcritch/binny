@@ -40,6 +40,11 @@ type
     typeImports*: seq[NativeTypeImport]
     ## Types whose implementation fields stay inside the producer.
     opaqueTypes*: seq[NativeOpaqueType]
+    ## Reject selected procedures whose resolved exception effects are non-empty
+    ## or unknown. Enabled by ``-d:features.binny.forbidExceptions`` by default.
+    forbidExceptions*: bool
+
+const defaultForbidExceptions* = defined(features.binny.forbidExceptions)
 
 proc fail(message: string) {.noinline, noreturn.} =
   raise newException(NativeExportConfigError, message)
@@ -114,6 +119,7 @@ proc initNativeExportConfig*(
     includeProcs: openArray[NativeProcSelector] = [],
     typeImports: openArray[NativeTypeImport] = [],
     opaqueTypes: openArray[NativeOpaqueType] = [],
+    forbidExceptions = defaultForbidExceptions,
 ): NativeExportConfig =
   ## Creates a validated native export configuration.
   result.excludeProcs = @excludeProcs
@@ -121,6 +127,7 @@ proc initNativeExportConfig*(
   result.requireMatches = requireMatches
   result.typeImports = @typeImports
   result.opaqueTypes = @opaqueTypes
+  result.forbidExceptions = forbidExceptions
   result.validateNativeExportConfig()
 
 func globMatches(value, pattern: string): bool =

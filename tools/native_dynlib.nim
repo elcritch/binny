@@ -6,10 +6,10 @@ import binny/native_dynlib/staticlib
 proc usage() {.noreturn.} =
   quit """
 usage:
-  native_dynlib prepare NIMCACHE SOURCE_ROOT MAIN_SOURCE C_ROOT [--config:CONFIG] [--c-build-manifest:JSON]
-  native_dynlib exports NIMCACHE SOURCE_ROOT MAIN_SOURCE LIBRARY EXPORT_LIST [--config:CONFIG]
-  native_dynlib root NIMCACHE MAIN_SOURCE LIBRARY EXPORT_LIST [--config:CONFIG]
-  native_dynlib bindings NIMCACHE SOURCE_ROOT SOURCE LIBRARY OUTPUT [--config:CONFIG] [--library-strdefine]
+  native_dynlib prepare NIMCACHE SOURCE_ROOT MAIN_SOURCE C_ROOT [--config:CONFIG] [--c-build-manifest:JSON] [--forbid-exceptions]
+  native_dynlib exports NIMCACHE SOURCE_ROOT MAIN_SOURCE LIBRARY EXPORT_LIST [--config:CONFIG] [--forbid-exceptions]
+  native_dynlib root NIMCACHE MAIN_SOURCE LIBRARY EXPORT_LIST [--config:CONFIG] [--forbid-exceptions]
+  native_dynlib bindings NIMCACHE SOURCE_ROOT SOURCE LIBRARY OUTPUT [--config:CONFIG] [--library-strdefine] [--forbid-exceptions]
   native_dynlib pic NIMCACHE
   native_dynlib promote INPUT.a OUTPUT.a EXPORT_LIST
   native_dynlib link INPUT.a OUTPUT_LIBRARY EXPORT_LIST [LINKER_ARG ...]
@@ -24,6 +24,14 @@ proc loadConfigArgument(value: string): NativeExportConfig =
     if value.startsWith(prefix) and value.len > prefix.len:
       return loadNativeExportConfig(value[prefix.len ..^ 1])
   quit "invalid native export config option: " & value
+
+proc applyConfigArgument(config: var NativeExportConfig, value: string) =
+  if value == "--forbid-exceptions":
+    config.forbidExceptions = true
+  else:
+    let forbidExceptions = config.forbidExceptions
+    config = loadConfigArgument(value)
+    config.forbidExceptions = config.forbidExceptions or forbidExceptions
 
 proc addExport(result: var NativeExportControl, name: string) =
   if result.initSymbol.len == 0:
@@ -69,7 +77,7 @@ if paramCount() == 0:
 try:
   case paramStr(1)
   of "prepare":
-    if paramCount() notin 5..7:
+    if paramCount() notin 5..8:
       usage()
     var exportConfig: NativeExportConfig
     var cBuildManifest: string
@@ -78,7 +86,7 @@ try:
       if argument.startsWith("--c-build-manifest:"):
         cBuildManifest = argument["--c-build-manifest:".len ..^ 1]
       else:
-        exportConfig = loadConfigArgument(argument)
+        exportConfig.applyConfigArgument(argument)
     let backend = prepareNativeRoutines(
       paramStr(2), paramStr(3), paramStr(4), paramStr(5), exportConfig, cBuildManifest
     )
@@ -88,13 +96,11 @@ try:
     of ncbIncremental:
       echo "rooted incremental C NIF definitions"
   of "exports":
-    if paramCount() notin {6, 7}:
+    if paramCount() notin 6..8:
       usage()
-    let exportConfig =
-      if paramCount() == 7:
-        loadConfigArgument(paramStr(7))
-      else:
-        NativeExportConfig()
+    var exportConfig: NativeExportConfig
+    for index in 7 .. paramCount():
+      exportConfig.applyConfigArgument(paramStr(index))
     let
       mainSource = paramStr(4)
       symbols = nativeExportSymbols(paramStr(2), paramStr(3), exportConfig)
@@ -105,15 +111,15 @@ try:
     for symbol in symbols:
       echo symbol.nifSymbol, " -> ", symbol.cSymbol
   of "root":
-    if paramCount() notin {5, 6}:
+    if paramCount() notin 5..7:
       usage()
     let mainSource = paramStr(3)
     let
-      exportConfig =
-        if paramCount() == 6:
-          loadConfigArgument(paramStr(6))
-        else:
-          NativeExportConfig()
+      exportConfig = block:
+        var value: NativeExportConfig
+        for index in 6 .. paramCount():
+          value.applyConfigArgument(paramStr(index))
+        value
       symbols =
         rootPublicRoutines(paramStr(2), mainSource.parentDir, mainSource, exportConfig)
       bifPath = findSemanticBifPath(paramStr(2), mainSource)
@@ -123,7 +129,7 @@ try:
     for symbol in symbols:
       echo symbol.nifSymbol, " -> ", symbol.cSymbol
   of "bindings":
-    if paramCount() notin 6 .. 8:
+    if paramCount() notin 6 .. 9:
       usage()
     var
       exportConfig: NativeExportConfig
@@ -133,7 +139,7 @@ try:
       if argument == "--library-strdefine":
         libraryNameStrdefine = true
       else:
-        exportConfig = loadConfigArgument(argument)
+        exportConfig.applyConfigArgument(argument)
     let config = initBifNativeBindingsConfig(
       paramStr(4),
       paramStr(2),

@@ -47,6 +47,10 @@ block bif_config_accepts_export_config:
   doAssert config.exportConfig.opaqueTypes == exportConfig.opaqueTypes
   doAssert config.exportConfig.requireMatches
 
+block native_export_config_can_forbid_exceptions:
+  let config = initNativeExportConfig(forbidExceptions = true)
+  doAssert config.forbidExceptions
+
 block native_export_selectors_match_exact_names_and_globs:
   let exact = excludeProc("foo=", source = "producer.nim")
   doAssert exact.matches("producer.nim", "foo=")
@@ -179,6 +183,26 @@ block generated_module_allows_strdefine_loader_name:
   )
   let generated = generateNativeModule(api, libraryNameStrdefine = true)
   doAssert "const nativeLibrary* {.strdefine.} = \"libsample.so\"" in generated
+
+block generated_module_wraps_raising_exports:
+  let api = NativeApi(
+    libraryName: "libsample.so",
+    initSymbol: "NimMain",
+    exceptionBridgeSymbol: "binny_exception_sample",
+    procs: @[
+      NativeProc(name: "safe", cSymbol: "safe", returnTypeSymbol: "int"),
+      NativeProc(
+        name: "fail", cSymbol: "fail", returnTypeSymbol: "int", mayRaise: true
+      ),
+    ],
+  )
+  let generated = generateNativeModule(api)
+  doAssert "proc safe*(): int {.importc: \"safe\".}" in generated
+  doAssert "proc binnyNativeProc1(): int {.importc: \"fail\".}" in generated
+  doAssert "proc fail*(): int =" in generated
+  doAssert "result = binnyNativeProc1()" in generated
+  doAssert "binnyCheckPendingException()" in generated
+  doAssert "recompile with --exceptions:goto" in generated
 
 block generated_module_preserves_nil_type:
   let api = NativeApi(

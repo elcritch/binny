@@ -116,6 +116,37 @@ on Linux and FreeBSD, or `.dll` on Windows. Call
 `nativeBuild.stageNativeDynlib("bin")` to copy the
 library and generate a matching binding module in a distribution directory.
 
+### Propagate exceptions
+
+When a selected procedure has inferred or explicit exception effects, Binny can
+bridge its `CatchableError` across separate producer and consumer runtimes. Build
+both sides with matching goto exceptions, ARC or atomic ARC, and the C allocator:
+
+```nim
+nativeBuild.nimArgs = @["--exceptions:goto", "--mm:arc", "-d:useMalloc"]
+```
+
+The generated binding enforces the same consumer settings. It calls the native
+procedure, retrieves any pending producer exception through a library-specific
+endpoint, and re-raises it in the consumer runtime, preserving typed handlers
+and messages. Non-raising procedures remain direct imports.
+
+The bridge works with Binny's normal C and incremental C backends. Raising
+iterators are supported by the normal C backend; the incremental backend does
+not currently export iterators. ORC, callback exceptions, `Defect`, and panics
+are not supported. Producer and consumer must use the same Nim compiler and ABI
+configuration.
+
+Projects that prohibit exceptions in their dynamic-library API can enable:
+
+```text
+-d:features.binny.forbidExceptions
+```
+
+Binny then rejects selected procedures with non-empty or unknown resolved
+exception effects and lists them in the build error. Procedures that are known
+not to raise can state the contract explicitly with `{.raises: [].}`.
+
 ### Hide implementation types
 
 An export configuration can keep graphics/backend records opaque without

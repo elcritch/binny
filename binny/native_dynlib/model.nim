@@ -110,6 +110,7 @@ type
     iteratorRoutine*: bool
     varargs*: bool
     discardable*: bool
+    mayRaise*: bool
     params*: seq[NativeParam]
 
   NativeHookStatus* = enum
@@ -125,6 +126,7 @@ type
   NativeApi* = object
     libraryName*: string
     initSymbol*: string
+    exceptionBridgeSymbol*: string
     types*: seq[NativeType]
     hooks*: seq[NativeHook]
     procs*: seq[NativeProc]

@@ -612,6 +612,21 @@ static:
   when not (defined(gcArc) or defined(gcAtomicArc) or defined(gcOrc)):
     {.error: "Binny native dynlib wrappers require --mm:arc, --mm:atomicArc, or --mm:orc.".}
 """
+  let raising = api.procs.filterIt(it.mayRaise)
+  if raising.len > 0:
+    let procNames = raising.mapIt(it.name).join(", ")
+    result.add "  when defined(features.binny.forbidExceptions):\n"
+    result.add "    {.error: " & (
+      "This Binny binding contains raising exports (" & procNames &
+        "); remove -d:features.binny.forbidExceptions or do not import this binding."
+    ).escape & ".}\n"
+    result.add "  when not compileOption(\"exceptions\", \"goto\"):\n"
+    result.add "    {.error: " & (
+      "This Binny binding contains raising exports (" & procNames &
+        "); recompile with --exceptions:goto."
+    ).escape & ".}\n"
+    result.add "  when defined(gcOrc) or not (defined(gcArc) or defined(gcAtomicArc)):\n"
+    result.add "    {.error: \"Binny exception bridging requires ARC or atomic ARC; ORC is not supported.\".}\n"
   for typ in types:
     let typeName =
       if typ.isAnonymousGenericType:
@@ -688,6 +703,9 @@ proc params(procInfo: NativeProc, names: Table[string, string]): string =
         nimType(param.typeSymbol, names)
   result = parts.join("; ")
 
+proc arguments(procInfo: NativeProc): string =
+  result = procInfo.params.mapIt(nimIdentifier(it.name)).join(", ")
+
 proc iteratorLocalName(proc_info: NativeProc, stem: string): string =
   result = stem
   while proc_info.params.anyIt(cmpIgnoreStyle(it.name, result) == 0):
@@ -752,6 +770,16 @@ proc generateNativeModule*(
   # A pushed nimcall would also override nested closure iterator types.
   result.add "\n{.push dynlib: nativeLibrary.}\n"
 
+  let hasRaisingProcs = api.procs.anyIt(it.mayRaise)
+  if hasRaisingProcs:
+    if api.exceptionBridgeSymbol.len == 0:
+      raise newException(
+        NativeArtifactError,
+        "raising native exports have no producer exception bridge",
+      )
+    result.add "\nproc binnyTakePendingException(): ref CatchableError {.importc: " &
+      api.exceptionBridgeSymbol.escape & ".}\n"
+
   for typ in api.types:
     if not typ.opaque:
       continue
@@ -792,6 +820,9 @@ proc generateNativeModule*(
       let factory = "binnyIteratorFactory" & $index
       result.add "\nproc " & factory & "(): BinnyIterator" & $index &
         " {.importc: " & procInfo.cSymbol.escape & ".}\n"
+    elif procInfo.mayRaise:
+      result.add "\nproc binnyNativeProc" & $index & "(" & formals & ")" & returnDecl
+      result.add " {.importc: " & procInfo.cSymbol.escape & ".}\n"
     else:
       result.add "\nproc " & nimIdentifier(procInfo.name) & "*(" & formals & ")" & returnDecl
       result.add " {.importc: " & procInfo.cSymbol.escape
@@ -799,8 +830,32 @@ proc generateNativeModule*(
         result.add ", discardable"
       result.add ".}\n"
   result.add "\n{.pop.}\n"
+  if hasRaisingProcs:
+    result.add "\nproc binnyCheckPendingException() =\n"
+    result.add "  let error = binnyTakePendingException()\n"
+    result.add "  if error != nil:\n    raise error\n"
   for index, procInfo in api.procs:
-    if procInfo.iteratorRoutine:
+    if procInfo.mayRaise and not procInfo.iteratorRoutine:
+      let returnDecl = returnDeclaration(procInfo, names)
+      result.add "\nproc " & nimIdentifier(procInfo.name) & "*(" &
+        params(procInfo, names) & ")" & returnDecl
+      if procInfo.discardable:
+        result.add " {.discardable.}"
+      result.add " =\n"
+      let invocation = "binnyNativeProc" & $index & "(" & procInfo.arguments & ")"
+      if procInfo.returnByVar or procInfo.returnByLent:
+        let value = iteratorLocalName(procInfo, "binnyResult")
+        result.add "  let " & value & " = " &
+          (if procInfo.returnByVar: "addr " else: "unsafeAddr ") & invocation & "\n"
+        result.add "  binnyCheckPendingException()\n"
+        result.add "  result = " & value & "[]\n"
+      elif returnDecl.len == 0:
+        result.add "  " & invocation & "\n"
+      else:
+        result.add "  result = " & invocation & "\n"
+      if not procInfo.returnByVar and not procInfo.returnByLent:
+        result.add "  binnyCheckPendingException()\n"
+    elif procInfo.iteratorRoutine:
       let return_decl = returnDeclaration(procInfo, names)
       let state = iteratorLocalName(procInfo, "binnyIterator")
       let value = iteratorLocalName(procInfo, "binnyValue")
@@ -815,11 +870,24 @@ proc generateNativeModule*(
         # Resume once with cancellation to unwind the producer's inline loop,
         # including its defer/finally blocks, when the consumer exits early.
         result.add "  try:\n    for " & value & " in " & state & "(" & arguments & "false):\n"
-        result.add "      yield " & value & "\n  finally:\n    if not finished(" & state & "):\n"
+        if procInfo.mayRaise:
+          result.add "      binnyCheckPendingException()\n"
+        result.add "      yield " & value & "\n"
+        if procInfo.mayRaise:
+          result.add "    binnyCheckPendingException()\n"
+        result.add "  finally:\n    if not finished(" & state & "):\n"
         result.add "      discard " & state & "(" & arguments & "true)\n"
+        if procInfo.mayRaise:
+          result.add "      binnyCheckPendingException()\n"
       elif return_decl.len == 0:
         result.add "  while true:\n    " & state & "(" & arguments & ")\n"
+        if procInfo.mayRaise:
+          result.add "    binnyCheckPendingException()\n"
         result.add "    if finished(" & state & "): break\n    yield\n"
       else:
         result.add "  for " & value & " in " & state & "(" & arguments & "):\n"
+        if procInfo.mayRaise:
+          result.add "    binnyCheckPendingException()\n"
         result.add "    yield " & value & "\n"
+        if procInfo.mayRaise:
+          result.add "  binnyCheckPendingException()\n"
