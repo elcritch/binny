@@ -229,13 +229,9 @@ proc nativeSourceSelectorPaths*(
   for index in 1 ..< result.len:
     result[index] = nativePackageSelectorPrefix & result[index]
 
-proc matchesNativeSource*(
-    selector: NativeProcSelector, sourcePath, sourceRoot: string,
-    compilerPaths: openArray[string], name: string,
+proc matchesNativeSourcePaths(
+    selector: NativeProcSelector, candidates: openArray[string], name: string
 ): bool =
-  if sourcePath.len == 0:
-    return false
-  let candidates = sourceSelectorPaths(sourcePath, sourceRoot, compilerPaths)
   if selector.source.startsWith(nativePackageSelectorPrefix):
     var packageSelector = selector
     packageSelector.source = selector.source[nativePackageSelectorPrefix.len ..^ 1]
@@ -244,6 +240,16 @@ proc matchesNativeSource*(
         return true
   elif candidates.len > 0:
     result = selector.matches(candidates[0], name)
+
+proc matchesNativeSource*(
+    selector: NativeProcSelector, sourcePath, sourceRoot: string,
+    compilerPaths: openArray[string], name: string,
+): bool =
+  if sourcePath.len == 0:
+    return false
+  result = selector.matchesNativeSourcePaths(
+    sourceSelectorPaths(sourcePath, sourceRoot, compilerPaths), name
+  )
 
 proc compilerRelativeSourcePath(
     sourcePath, sourceRoot: string, compilerPaths: openArray[string]
@@ -442,11 +448,12 @@ proc nativeOpaqueExports*(
         continue
       var module = bif.load(path)
       let source = module.readModuleSource().normalizedAbsolutePath
+      let sourcePaths = sourceSelectorPaths(source, sourceRoot, compilerPaths)
       for symbol, visibility, declaration in module.declarations:
         if visibility == ivExported and semanticModule(symbol) == identity and
             not declaration.findChildTag("type").cursorIsNil and
-            includeProc(selector.name, selector.source).matchesNativeSource(
-              source, sourceRoot, compilerPaths, symbol.semanticName
+            includeProc(selector.name, selector.source).matchesNativeSourcePaths(
+              sourcePaths, symbol.semanticName
             ):
           matches.add NativeOpaqueExport(
             sourcePath: source,
@@ -477,13 +484,21 @@ proc applyExportConfig(
 
   var includedMatches = newSeq[bool](exportConfig.includeProcs.len)
   var matched = newSeq[bool](exportConfig.excludeProcs.len)
+  # Resolving filesystem paths inside the selector loop makes large APIs
+  # quadratic in selectors and compiler import roots. Cache once per module.
+  var sourcePaths: Table[string, seq[string]]
   for symbol in symbols:
-    let name = semanticName(symbol.nifSymbol)
+    if symbol.sourcePath notin sourcePaths:
+      sourcePaths[symbol.sourcePath] = sourceSelectorPaths(
+        symbol.sourcePath, sourceRoot, compilerPaths
+      )
+    let
+      name = semanticName(symbol.nifSymbol)
+      candidates = sourcePaths[symbol.sourcePath]
     var included = exportConfig.includeProcs.len == 0
     for index, selector in exportConfig.includeProcs:
-      if selector.matchesNativeSource(
-          symbol.sourcePath, sourceRoot, compilerPaths, name
-        ) and (selector.typeArgs.len == 0 or
+      if selector.matchesNativeSourcePaths(candidates, name) and
+          (selector.typeArgs.len == 0 or
           selector.typeArgs == symbol.genericArgumentSelectors or
           selector.typeArgs == symbol.genericCompilerArgumentSelectors or
           not resolvedGenerics and symbol.genericOrigin.len > 0):
@@ -491,9 +506,8 @@ proc applyExportConfig(
         included = true
     var excluded = false
     for index, selector in exportConfig.excludeProcs:
-      if selector.matchesNativeSource(
-          symbol.sourcePath, sourceRoot, compilerPaths, name
-        ) and (selector.typeArgs.len == 0 or resolvedGenerics and
+      if selector.matchesNativeSourcePaths(candidates, name) and
+          (selector.typeArgs.len == 0 or resolvedGenerics and
           (selector.typeArgs == symbol.genericArgumentSelectors or
            selector.typeArgs == symbol.genericCompilerArgumentSelectors)):
         matched[index] = true
