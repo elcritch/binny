@@ -9,18 +9,20 @@ type
     ## A source-relative public procedure selector.
     ##
     ## ``source`` and ``name`` accept ``*`` as a zero-or-more-character glob.
-    ## An empty ``source`` matches every application source file.
+    ## An empty ``source`` matches every source file. Prefix dependency paths
+    ## with ``$pkg/`` to resolve them against compiler import roots.
     source*: string
     name*: string
     typeArgs*: seq[string] ## Optional exact concrete generic arguments.
-      ## Named types use ``source.nim:Type`` relative to the producer's source root.
+      ## Named types use ``source.nim:Type`` relative to the producer source
+      ## root, or ``$pkg/source.nim:Type`` for a compiler import root.
 
   NativeTypeImport* = object
     ## Reuses a type declared by an imported Nim module. ``name`` is the
     ## unqualified ABI type name and ``module`` is its Nim import path.
     name*: string
     module*: string
-    source*: string ## Optional source-relative producer ownership selector, with ``*`` globs.
+    source*: string ## Optional producer or ``$pkg/`` ownership selector, with ``*`` globs.
     ## Re-exports the imported type from generated bindings unless disabled.
     exported*: bool
 

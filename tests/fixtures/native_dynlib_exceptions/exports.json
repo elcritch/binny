@@ -1,0 +1,19 @@
+{
+  "includeProcs": [
+    {"source": "producer.nim", "name": "*"},
+    {"source": "$pkg/portable/math.nim", "name": "externalDouble"},
+    {
+      "source": "$pkg/portable/math.nim",
+      "name": "identityValue",
+      "typeArgs": ["$pkg/portable/types.nim:ExternalValue"]
+    }
+  ],
+  "typeImports": [
+    {
+      "name": "ExternalValue",
+      "module": "portable/types",
+      "source": "$pkg/portable/types.nim"
+    }
+  ],
+  "requireMatches": true
+}

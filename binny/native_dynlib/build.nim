@@ -30,7 +30,9 @@ type
     ## ``features.binny.forbidExceptions`` compile-time feature.
     forbidExceptions*: bool
 
-const binnyProjectDir = currentSourcePath.parentDir.parentDir.parentDir
+const
+  binnyProjectDir = currentSourcePath.parentDir.parentDir.parentDir
+  nativeCompilerPathsFilename = "binny_nim_paths.json"
 
 proc fail(message: string) {.noreturn.} =
   raise newException(NativeDynlibBuildError, message)
@@ -156,6 +158,39 @@ proc validate(config: NativeDynlibBuildConfig) =
 
 func producerCache(config: NativeDynlibBuildConfig): string =
   config.nativeBuildDir / "producer"
+
+proc captureCompilerSearchPaths(config: NativeDynlibBuildConfig) =
+  var command = @[
+    config.compiler, "dump", "--dump.format:json",
+  ]
+  command.add config.nimArgs
+  command.add ["--hints:off", "--warnings:off", config.sourcePath]
+  let (output, exitCode) = gorgeEx(quoteShellCommand(command))
+  if exitCode != 0:
+    fail("nim dump failed while resolving native dependency paths:\n" & output)
+  let description =
+    try:
+      parseJson(output)
+    except JsonParsingError:
+      fail("nim dump returned invalid JSON while resolving native dependency paths")
+  if description.kind != JObject or not description.hasKey("lib_paths") or
+      description["lib_paths"].kind != JArray:
+    fail("nim dump JSON has no lib_paths array")
+
+  var searchPaths: seq[string]
+  for node in description["lib_paths"]:
+    if node.kind != JString:
+      fail("nim dump JSON contains a non-string lib_paths entry")
+    let value = node.getStr
+    if value.len == 0:
+      continue
+    let path = absoluteProjectPath(value)
+    if dirExists(path) and path notin searchPaths:
+      searchPaths.add path
+  writeFile(
+    config.producerCache / nativeCompilerPathsFilename,
+    $(%*{"lib_paths": searchPaths}),
+  )
 
 func toolCache(config: NativeDynlibBuildConfig): string =
   config.nativeBuildDir / "tool"
@@ -357,6 +392,7 @@ proc buildNativeDynlib*(config: NativeDynlibBuildConfig) =
   mkDir(config.nativeBuildDir)
   config.buildTool()
   config.compileProducer(config.sourcePath)
+  config.captureCompilerSearchPaths()
   config.prepareRoutines()
   if config.backend == "c":
     config.compileProducer(config.cRootSource, force = true)
@@ -384,6 +420,8 @@ proc generateNativeDynlibBindings*(
   if output.len == 0:
     fail("native dynlib bindings path cannot be empty")
   config.buildTool()
+  if not fileExists(config.producerCache / nativeCompilerPathsFilename):
+    config.captureCompilerSearchPaths()
   var arguments = config.toolArguments("bindings")
   arguments.add [
     config.producerCache, config.sourceRoot, config.sourcePath, library, output

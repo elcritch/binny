@@ -3,6 +3,8 @@ import exceptions_abi
 
 doAssert doubleValue(21) == 42
 doAssert maybeText(false) == "text ok"
+doAssert externalDouble(6) == 12
+doAssert identityValue(ExternalValue(amount: 9)).amount == 9
 
 block typed_exception:
   var caught = false

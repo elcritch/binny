@@ -1,4 +1,4 @@
-import std/[assertions, os, osproc, sequtils, strutils, tempfiles]
+import std/[assertions, json, os, osproc, sequtils, strutils, tempfiles]
 
 proc command(arguments: openArray[string]): string =
   result = arguments.mapIt(it.quoteShell).join(" ")
@@ -29,7 +29,7 @@ if help.exitCode == 0 and "--genBif:on|off" in help.output and
     )
 
     let
-      producer = temporary / "producer.nim"
+      producer = temporary / "application/producer.nim"
       bindings = temporary / "exceptions_abi.nim"
       consumer = temporary / "consumer.nim"
       buildArguments = @[
@@ -39,6 +39,13 @@ if help.exitCode == 0 and "--genBif:on|off" in help.output and
         @[producer]
     discard run(buildArguments)
 
+    let
+      externalRoot = temporary / "external-packages/arbitrary-layout/src"
+      compilerPaths = parseFile(
+        temporary / "cache" / backend / "producer/binny_nim_paths.json"
+      )["lib_paths"].getElems.mapIt(it.getStr)
+    doAssert expandFilename(externalRoot) in compilerPaths
+
     let generated = readFile(bindings)
     doAssert "proc binnyTakePendingException" in generated
     doAssert "proc binnyCheckPendingException" in generated
@@ -46,6 +53,9 @@ if help.exitCode == 0 and "--genBif:on|off" in help.output and
     doAssert "proc failValue*" in generated
     doAssert "proc doubleValue*" in generated
     doAssert "proc doubleValue*(value: int): int {.importc:" in generated
+    doAssert "proc externalDouble*" in generated
+    doAssert "proc identityValue*" in generated
+    doAssert "import portable/types" in generated
     if backend == "c":
       doAssert "iterator valuesThenFail*" in generated
 
@@ -59,6 +69,7 @@ if help.exitCode == 0 and "--genBif:on|off" in help.output and
       "--noNimblePath",
       "--path:" & currentSourcePath.parentDir.parentDir,
       "--path:" & temporary,
+      "--path:" & externalRoot,
       "--nimcache:" & temporary / "consumer-cache",
       "--out:" & temporary / "consumer",
       consumer,

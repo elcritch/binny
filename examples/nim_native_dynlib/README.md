@@ -47,10 +47,15 @@ backend liveness roots:
 }
 ```
 
-Both `source` and `name` accept `*` as a zero-or-more-character wildcard. Source
-paths are relative to the configured source root. Write quoted Nim names
-without backticks, such as `foo=`, `for`, or `[]`. A selector applies to every
-matching overload.
+Both `source` and `name` accept `*` as a zero-or-more-character wildcard.
+Unprefixed source paths are relative to the configured source root. Prefix a
+path with `$pkg/` to resolve it against any compiler import root. The builder
+discovers those roots from `nim dump --dump.format:json` using the same compiler
+and producer arguments, so dependency selectors do not depend on an Atlas
+`deps/` layout or a Nimble package-cache layout. For example,
+`$pkg/siwin/platforms/any/window.nim` resolves wherever the import root
+containing `siwin` lives. Write quoted Nim names without backticks, such as
+`foo=`, `for`, or `[]`. A selector applies to every matching overload.
 
 With `requireMatches` enabled—the default—a misspelled or stale selector stops
 the build. Exclusions apply to ordinary public procedures; required ownership
@@ -100,9 +105,10 @@ specializations. C builds generate callable forwarding thunks automatically,
 including for generic inline routines.
 
 Use optional `typeArgs` to select an exact specialization. Builtin arguments use
-their Nim spelling; named arguments use `source.nim:Type`, relative to the
-configured producer source root. Arguments do not accept globs. For example,
-with FigDraw's `src/figdraw/bindings` as the source root:
+their Nim spelling; named arguments use `source.nim:Type`, relative to either
+the configured producer source root or, with `$pkg/`, a compiler import root.
+Arguments do not accept globs. For example, with FigDraw's
+`src/figdraw/bindings` as the source root:
 
 ```json
 {
@@ -114,11 +120,11 @@ with FigDraw's `src/figdraw/bindings` as the source root:
   ],
   "typeImports": [
     {"name": "CAMetalLayer", "module": "metalx/cametal",
-     "source": "*metalx/src/metalx/cametal.nim"},
+     "source": "$pkg/metalx/cametal.nim"},
     {"name": "Lock", "module": "std/locks"},
     {"name": "Cond", "module": "std/locks"},
     {"name": "NSView", "module": "darwin/app_kit/nsview",
-     "source": "*darwin/darwin/app_kit/nsview.nim"}
+     "source": "$pkg/darwin/app_kit/nsview.nim"}
   ]
 }
 ```

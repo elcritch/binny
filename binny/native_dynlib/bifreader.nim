@@ -1862,19 +1862,21 @@ proc bifNativeDescription(
 proc applyTypeImports(
     api: var NativeApi, typeImports: openArray[NativeTypeImport],
     layouts: Table[string, AbiTypeEntry],
-    modules: openArray[BifModule], sourceRoot: string,
+    modules: openArray[BifModule], nimcacheDir, sourceRoot: string,
 ) =
-  var module_sources: Table[string, string]
-  let root = sourceRoot.normalizedAbsolutePath
+  var moduleSources: Table[string, string]
+  let compilerPaths = nativeCompilerSearchPaths(nimcacheDir)
   for module in modules:
-    module_sources[module.identity] = relativePath(module.sourcePath, root).replace('\\', '/')
+    moduleSources[module.identity] = module.sourcePath
   for typeImport in typeImports:
     var matchingIndex = -1
     for index, typ in api.types:
       if typ.name != typeImport.name:
         continue
-      if not includeProc(typeImport.name, typeImport.source).matches(
-          module_sources.getOrDefault(symbolModule(typ.nifSymbol)), typ.name):
+      if not includeProc(typeImport.name, typeImport.source).matchesNativeSource(
+          moduleSources.getOrDefault(symbolModule(typ.nifSymbol)), sourceRoot,
+          compilerPaths, typ.name,
+        ):
         continue
       if matchingIndex >= 0:
         fail(
@@ -2095,7 +2097,9 @@ proc buildNativeApi(
   for typ in importedGenericTypes.values:
     result.types.add typ
 
-  result.applyTypeImports(typeImports, layouts, description.modules, sourceRoot)
+  result.applyTypeImports(
+    typeImports, layouts, description.modules, bifPath.parentDir, sourceRoot
+  )
   var opaqueTypes = importedTypeSymbols(result, layouts)
   var selectedOpaqueTypes: Table[string, bool]
   var hiddenOpaqueDependencies: Table[string, bool]

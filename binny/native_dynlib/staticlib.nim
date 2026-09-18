@@ -31,6 +31,7 @@ type
     genericSources: seq[string]
     genericOrigin: string
     genericArgumentSelectors: seq[string]
+    genericCompilerArgumentSelectors: seq[string]
     genericSignature: string
 
   NativeHookSymbol* = object
@@ -73,6 +74,8 @@ const
   elfBindingWeak = 2'u8
   elfVisibilityMask = 0x03'u8
   exceptionBridgeStateKey = "$exceptionBridge"
+  nativeCompilerPathsFilename* = "binny_nim_paths.json"
+  nativePackageSelectorPrefix* = "$pkg/"
 
 proc fail(message: string) {.noreturn.} =
   raise newException(NativeStaticLibError, message)
@@ -186,6 +189,70 @@ proc pathIsWithin(path, root: string): bool =
   result =
     not relative.isAbsolute and relative != ".." and
     not relative.startsWith(".." & $DirSep)
+
+proc nativeCompilerSearchPaths*(nimcacheDir: string): seq[string] =
+  ## Returns the compiler import roots captured by the native-dynlib builder.
+  let path = nimcacheDir / nativeCompilerPathsFilename
+  if not fileExists(path):
+    return
+  let description = parseFile(path)
+  if description.kind != JObject or not description.hasKey("lib_paths") or
+      description["lib_paths"].kind != JArray:
+    fail("invalid native compiler path manifest: " & path)
+  for node in description["lib_paths"]:
+    if node.kind != JString:
+      fail("invalid native compiler path in " & path)
+    let searchPath = normalizedAbsolutePath(node.getStr)
+    if searchPath notin result:
+      result.add searchPath
+
+proc sourceSelectorPaths(
+    sourcePath, sourceRoot: string, compilerPaths: openArray[string]
+): seq[string] =
+  let
+    source = normalizedAbsolutePath(sourcePath)
+    root = normalizedAbsolutePath(sourceRoot)
+  result.add relativePath(source, root).replace('\\', '/')
+  for compilerPath in compilerPaths:
+    if pathIsWithin(source, compilerPath):
+      let candidate = relativePath(source, compilerPath).replace('\\', '/')
+      if candidate notin result:
+        result.add candidate
+
+proc nativeSourceSelectorPaths*(
+    nimcacheDir, sourceRoot, sourcePath: string
+): seq[string] =
+  ## Returns legacy source-root and compiler-import-relative selector paths.
+  result = sourceSelectorPaths(
+    sourcePath, sourceRoot, nativeCompilerSearchPaths(nimcacheDir)
+  )
+  for index in 1 ..< result.len:
+    result[index] = nativePackageSelectorPrefix & result[index]
+
+proc matchesNativeSource*(
+    selector: NativeProcSelector, sourcePath, sourceRoot: string,
+    compilerPaths: openArray[string], name: string,
+): bool =
+  if sourcePath.len == 0:
+    return false
+  let candidates = sourceSelectorPaths(sourcePath, sourceRoot, compilerPaths)
+  if selector.source.startsWith(nativePackageSelectorPrefix):
+    var packageSelector = selector
+    packageSelector.source = selector.source[nativePackageSelectorPrefix.len ..^ 1]
+    for index in 1 ..< candidates.len:
+      if packageSelector.matches(candidates[index], name):
+        return true
+  elif candidates.len > 0:
+    result = selector.matches(candidates[0], name)
+
+proc compilerRelativeSourcePath(
+    sourcePath, sourceRoot: string, compilerPaths: openArray[string]
+): string =
+  let candidates = sourceSelectorPaths(sourcePath, sourceRoot, compilerPaths)
+  if candidates.len > 1:
+    result = nativePackageSelectorPrefix & candidates[1]
+  elif candidates.len > 0:
+    result = candidates[0]
 
 proc readModuleSource(module: var BifModule): string =
   var cursor = module.buf.beginRead()
@@ -366,7 +433,7 @@ proc nativeOpaqueExports*(
     nimcacheDir, sourceRoot, mainSource: string, config: NativeExportConfig
 ): seq[NativeOpaqueExport] =
   let active = activeSemanticModules(nimcacheDir, mainSource)
-  let root = sourceRoot.normalizedAbsolutePath
+  let compilerPaths = nativeCompilerSearchPaths(nimcacheDir)
   for selector in config.opaqueTypes:
     var matches: seq[NativeOpaqueExport]
     for path in walkFiles(nimcacheDir / "*.s.bif"):
@@ -378,8 +445,8 @@ proc nativeOpaqueExports*(
       for symbol, visibility, declaration in module.declarations:
         if visibility == ivExported and semanticModule(symbol) == identity and
             not declaration.findChildTag("type").cursorIsNil and
-            includeProc(selector.name, selector.source).matches(
-              relativePath(source, root), symbol.semanticName
+            includeProc(selector.name, selector.source).matchesNativeSource(
+              source, sourceRoot, compilerPaths, symbol.semanticName
             ):
           matches.add NativeOpaqueExport(
             sourcePath: source,
@@ -400,6 +467,7 @@ proc nativeOpaqueExports*(
 proc applyExportConfig(
     symbols: openArray[NativeExportSymbol],
     sourceRoot: string,
+    compilerPaths: openArray[string],
     exportConfig: NativeExportConfig,
     resolvedGenerics = true,
 ): seq[NativeExportSymbol] =
@@ -407,24 +475,27 @@ proc applyExportConfig(
   if exportConfig.includeProcs.len == 0 and exportConfig.excludeProcs.len == 0:
     return @symbols
 
-  let root = normalizedAbsolutePath(sourceRoot)
   var includedMatches = newSeq[bool](exportConfig.includeProcs.len)
   var matched = newSeq[bool](exportConfig.excludeProcs.len)
   for symbol in symbols:
-    let
-      source = relativePath(symbol.sourcePath, root).replace('\\', '/')
-      name = semanticName(symbol.nifSymbol)
+    let name = semanticName(symbol.nifSymbol)
     var included = exportConfig.includeProcs.len == 0
     for index, selector in exportConfig.includeProcs:
-      if selector.matches(source, name) and (selector.typeArgs.len == 0 or
+      if selector.matchesNativeSource(
+          symbol.sourcePath, sourceRoot, compilerPaths, name
+        ) and (selector.typeArgs.len == 0 or
           selector.typeArgs == symbol.genericArgumentSelectors or
+          selector.typeArgs == symbol.genericCompilerArgumentSelectors or
           not resolvedGenerics and symbol.genericOrigin.len > 0):
         includedMatches[index] = true
         included = true
     var excluded = false
     for index, selector in exportConfig.excludeProcs:
-      if selector.matches(source, name) and (selector.typeArgs.len == 0 or
-          resolvedGenerics and selector.typeArgs == symbol.genericArgumentSelectors):
+      if selector.matchesNativeSource(
+          symbol.sourcePath, sourceRoot, compilerPaths, name
+        ) and (selector.typeArgs.len == 0 or resolvedGenerics and
+          (selector.typeArgs == symbol.genericArgumentSelectors or
+           selector.typeArgs == symbol.genericCompilerArgumentSelectors)):
         matched[index] = true
         excluded = true
     if included and not excluded:
@@ -508,6 +579,7 @@ proc publicRoutineSymbols*(
   ## ``mainSource`` bounds concrete generic instances to its semantic import
   ## graph. Prepared C builds retain this source in their build state.
   let root = normalizedAbsolutePath(sourceRoot)
+  let compilerPaths = nativeCompilerSearchPaths(nimcacheDir)
   var paths: seq[string]
   for path in walkFiles(nimcacheDir / "*.s.bif"):
     paths.add path
@@ -591,8 +663,10 @@ proc publicRoutineSymbols*(
       )
   if generic_instances.len > 0:
     # Determine selected origins before resolving types from dependency BIFs.
-    let selected = applyExportConfig(result & generic_instances, sourceRoot, exportConfig,
-      resolvedGenerics = false)
+    let selected = applyExportConfig(
+      result & generic_instances, sourceRoot, compilerPaths, exportConfig,
+      resolvedGenerics = false,
+    )
     var selected_ids = initHashSet[string]()
     for routine in selected:
       if routine.genericOrigin.len > 0: selected_ids.incl routine.nifSymbol
@@ -611,16 +685,23 @@ proc publicRoutineSymbols*(
         routine.genericSignature = routine.nifSymbol.semanticName &
           evidence.signatureKey(instance.declaration)
         for argument in routine.genericArguments:
-          var selector = argument.replace("`", "")
+          var
+            selector = argument.replace("`", "")
+            compilerSelector = selector
           for identity, source in evidence.sources:
             selector = selector.replace("binnyGenericModule_" & identity & ".",
               relativePath(normalizedAbsolutePath(source), root).replace('\\', '/') & ":")
+            compilerSelector = compilerSelector.replace(
+              "binnyGenericModule_" & identity & ".",
+              compilerRelativeSourcePath(source, sourceRoot, compilerPaths) & ":",
+            )
           routine.genericArgumentSelectors.add selector
+          routine.genericCompilerArgumentSelectors.add compilerSelector
         let key = routine.genericOrigin & "\x1f" & routine.genericArguments.join("\x1f")
         if key notin seen:
           seen.incl key
           result.add routine
-  result = applyExportConfig(result, sourceRoot, exportConfig)
+  result = applyExportConfig(result, sourceRoot, compilerPaths, exportConfig)
   result.rejectForbiddenExceptions(sourceRoot, exportConfig)
   var signatures: Table[string, string]
   for routine in result:

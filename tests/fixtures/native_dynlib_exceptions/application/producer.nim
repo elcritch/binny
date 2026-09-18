@@ -1,3 +1,5 @@
+import portable/[math, types]
+
 proc doubleValue*(value: int): int {.raises: [].} =
   value * 2
 
@@ -25,6 +27,8 @@ proc borrowedValue*(shouldFail: bool): var int =
   if shouldFail:
     raise newException(ValueError, "borrow failed")
   storedValue
+
+discard identityValue(ExternalValue(amount: 1))
 
 when not defined(exceptionIncremental):
   iterator valuesThenFail*(): int =

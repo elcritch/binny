@@ -111,6 +111,12 @@ default, performs both compiler passes, builds and promotes the archive, links
 and verifies the filtered dynamic library, then generates the consumer module.
 Set `backend = "ic"` in the constructor to use `nim ic` instead.
 
+The builder also runs `nim dump --dump.format:json` with the producer arguments
+and records its `lib_paths`. Export selectors can therefore name dependency
+sources with `$pkg/` paths relative to their Nim import roots, regardless of
+whether those roots come from Atlas, Nimble, a local checkout, or explicit
+`--path` options.
+
 When `libraryName` has no extension, Binny appends `.dylib` on macOS, `.so`
 on Linux and FreeBSD, or `.dll` on Windows. Call
 `nativeBuild.stageNativeDynlib("bin")` to copy the
