@@ -23,6 +23,7 @@ type
     ## declaration for ABI signature reconstruction and export selection.
     backendNifSymbol*: string
     cSymbol*: string
+    mayRaise*: bool
     iteratorRoutine*: bool
     inlineRoutine: bool
     sourceLine, sourceColumn: int
@@ -71,6 +72,7 @@ const
   elfBindingGlobal = 1'u8
   elfBindingWeak = 2'u8
   elfVisibilityMask = 0x03'u8
+  exceptionBridgeStateKey = "$exceptionBridge"
 
 proc fail(message: string) {.noreturn.} =
   raise newException(NativeStaticLibError, message)
@@ -444,6 +446,58 @@ proc applyExportConfig(
           missing.join("\n  ")
       )
 
+proc routineCanRaise*(declaration: Cursor): bool =
+  ## Reports whether a resolved routine effect list is non-empty or unknown.
+  ## Only a present, known-empty exception slot proves that a routine cannot
+  ## raise. This keeps missing or future BIF shapes on the safe side.
+  let formals =
+    if declaration.kind == TagLit and declaration.tagName == "formalparams":
+      declaration
+    else:
+      declaration.findDescendantTag("formalparams")
+  if formals.cursorIsNil:
+    return true
+
+  let effects = formals.findChildTag("arglist")
+  if effects.cursorIsNil:
+    return true
+
+  var effectParts = effects.childCursor()
+  for _ in 0 ..< 2:
+    if not effectParts.hasMore:
+      return true
+    effectParts.skip
+  if not effectParts.hasMore or effectParts.kind != TagLit or
+      effectParts.tagName notin ["arglist", "bracket"]:
+    return true
+
+  var exceptions = effectParts.childCursor()
+  for _ in 0 ..< 2:
+    if not exceptions.hasMore:
+      return true
+    exceptions.skip
+  result = exceptions.hasMore
+
+proc rejectForbiddenExceptions(
+    symbols: openArray[NativeExportSymbol], sourceRoot: string,
+    exportConfig: NativeExportConfig,
+) =
+  if not exportConfig.forbidExceptions:
+    return
+  let root = normalizedAbsolutePath(sourceRoot)
+  var raising: seq[string]
+  for symbol in symbols:
+    if symbol.mayRaise:
+      raising.add relativePath(symbol.sourcePath, root).replace('\\', '/') & ":" &
+        symbol.nifSymbol.semanticName
+  if raising.len > 0:
+    raising.sort()
+    fail(
+      "native export configuration forbids exceptions, but these procedures " &
+        "may raise:\n  " & raising.join("\n  ") &
+        "\nAnnotate non-raising procedures with {.raises: [].} or exclude them."
+    )
+
 proc publicRoutineSymbols*(
     nimcacheDir, sourceRoot: string, exportConfig = NativeExportConfig(), mainSource = ""
 ): seq[NativeExportSymbol] =
@@ -462,6 +516,7 @@ proc publicRoutineSymbols*(
   var evidence: GenericEvidence
   var instances: seq[tuple[symbol: string, origin: string, declaration: Cursor]]
   var generic_origins: Table[string, string]
+  var generic_may_raise: Table[string, bool]
   let state_path = nimcacheDir / "binny_native_build.json"
   let recorded_source = if fileExists(state_path):
                           parseFile(state_path).getOrDefault("mainSource").getStr
@@ -490,6 +545,7 @@ proc publicRoutineSymbols*(
           if children.kind == TagLit and children.tagName in routineKinds and
               not children.findChildTag("genericparams").cursorIsNil:
             generic_origins[name] = absoluteSource
+            generic_may_raise[name] = declaration.routineCanRaise
           children.skip
       if visibility == ivExported and semanticModule(name) == moduleSuffix and
           declaration.isRoutineDeclaration:
@@ -513,6 +569,7 @@ proc publicRoutineSymbols*(
         result.add NativeExportSymbol(
           sourcePath: absoluteSource, nifSymbol: name,
           backendNifSymbol: methodDispatcherSymbol(declaration),
+          mayRaise: declaration.routineCanRaise,
           inlineRoutine: inlineRoutine,
           iteratorRoutine: not declaration.findChildTag("iterator").cursorIsNil,
           sourceLine: int(position.line), sourceColumn: int(position.col),
@@ -523,6 +580,11 @@ proc publicRoutineSymbols*(
       let position = instance.declaration.rawLineInfo
       generic_instances.add NativeExportSymbol(
         sourcePath: generic_origins[instance.origin], nifSymbol: instance.symbol,
+        mayRaise:
+          if instance.declaration.findDescendantTag("formalparams").cursorIsNil:
+            generic_may_raise[instance.origin]
+          else:
+            instance.declaration.routineCanRaise,
         genericOrigin: instance.origin, sourceLine: int(position.line),
         sourceColumn: int(position.col),
         iteratorRoutine: not instance.declaration.findChildTag("iterator").cursorIsNil,
@@ -559,6 +621,7 @@ proc publicRoutineSymbols*(
           seen.incl key
           result.add routine
   result = applyExportConfig(result, sourceRoot, exportConfig)
+  result.rejectForbiddenExceptions(sourceRoot, exportConfig)
   var signatures: Table[string, string]
   for routine in result:
     if routine.genericOrigin.len == 0: continue
@@ -660,18 +723,40 @@ proc replaceDefinitionFlags(content: var string, definition: CDefinition): bool 
   content[position ..< position + oldPrefix.len] = newPrefix
   result = true
 
+proc isSupersededIncrementalMainArtifact(nimcacheDir, path: string): bool =
+  let statePath = nimcacheDir / "binny_native_build.json"
+  if not fileExists(statePath):
+    return false
+  let state = parseFile(statePath)
+  if state.getOrDefault("backend").getStr != "ic":
+    return false
+  let mainSource = state.getOrDefault("mainSource").getStr
+  result = mainSource.len > 0 and path.extractFilename ==
+    "@m" & mainSource.extractFilename & ".c.nif"
+
 proc resolveIncrementalNativeSymbols(
     nimcacheDir: string, symbols: openArray[NativeExportSymbol]
 ): seq[NativeExportSymbol] =
   ## Matches semantic routines to their exact incremental-backend C names.
   result = @symbols
+  let
+    statePath = nimcacheDir / "binny_native_build.json"
+    state = if fileExists(statePath): parseFile(statePath) else: newJObject()
+    thunks = state.getOrDefault("thunks")
   var indexes = initTable[string, seq[int]]()
   for index, symbol in result:
-    indexes.mgetOrPut(symbol.backendSymbol, @[]).add index
+    if thunks != nil and thunks.hasKey(symbol.thunkKey):
+      result[index].cSymbol = thunks[symbol.thunkKey].getStr
+    else:
+      indexes.mgetOrPut(symbol.backendSymbol, @[]).add index
 
   var matched = initHashSet[string]()
+  var definitions = initHashSet[string]()
   for path in walkFiles(nimcacheDir / "*.c.nif"):
+    if isSupersededIncrementalMainArtifact(nimcacheDir, path):
+      continue
     for definition in readCDefinitions(path):
+      definitions.incl definition.cSymbol
       if definition.nifSymbol in indexes:
         for index in indexes[definition.nifSymbol]:
           if result[index].cSymbol.len == 0:
@@ -684,7 +769,10 @@ proc resolveIncrementalNativeSymbols(
 
   var missing: seq[string]
   for symbol in result:
-    if symbol.backendSymbol notin matched:
+    if symbol.cSymbol.len > 0:
+      if symbol.cSymbol notin definitions:
+        missing.add symbol.nifSymbol
+    elif symbol.backendSymbol notin matched:
       missing.add symbol.nifSymbol
   if missing.len > 0:
     missing.sort()
@@ -759,6 +847,15 @@ func cBuildStatePath(nimcacheDir: string): string =
 proc cBuildState(nimcacheDir: string): JsonNode =
   let path = cBuildStatePath(nimcacheDir)
   result = if fileExists(path): parseFile(path) else: newJObject()
+
+proc nativeExceptionBridgeSymbol*(nimcacheDir: string): string =
+  ## Returns the generated producer-side pending-exception endpoint, if any.
+  let state = cBuildState(nimcacheDir)
+  if state.hasKey("exceptionBridge"):
+    return state["exceptionBridge"].getStr
+  let thunks = state.getOrDefault("thunks")
+  if thunks != nil and thunks.hasKey(exceptionBridgeStateKey):
+    result = thunks[exceptionBridgeStateKey].getStr
 
 proc findCBuildManifest(nimcacheDir, explicitPath: string): string =
   if explicitPath.len > 0:
@@ -848,7 +945,7 @@ proc cFunctionDefinitions(path: string): seq[string] =
     if depth == 0 and (
       token.cTokenPrefix.len > 0 or token.startsWith("binny_inline_") or
       token.startsWith("binny_generic_") or token.startsWith("binny_opaque_") or
-      token.startsWith("binny_iterator_")
+      token.startsWith("binny_iterator_") or token.startsWith("binny_exception_")
     ):
       var position = index + 1
       # Nim's N_NIMCALL/N_INLINE macros place the name inside their parentheses.
@@ -945,7 +1042,10 @@ proc resolveNativeSymbols*(
     nimcacheDir: string, symbols: openArray[NativeExportSymbol]
 ): seq[NativeExportSymbol] =
   ## Matches semantic routines to exact names from either compiler C backend.
-  if nimcacheDir.hasIncrementalCArtifacts and not fileExists(cBuildStatePath(nimcacheDir)):
+  let state = cBuildState(nimcacheDir)
+  if nimcacheDir.hasIncrementalCArtifacts and
+      (not fileExists(cBuildStatePath(nimcacheDir)) or
+       state.getOrDefault("backend").getStr == "ic"):
     result = resolveIncrementalNativeSymbols(nimcacheDir, symbols)
   else:
     result = resolveCNativeSymbols(nimcacheDir, symbols)
@@ -977,6 +1077,11 @@ func nimStringLiteral(value: string): string =
 func nimQuotedIdentifier(value: string): string =
   "`" & value.replace("`", "") & "`"
 
+proc exceptionBridgeName(nimcacheDir, mainSource: string): string =
+  "binny_exception_" & bifModuleSuffix(
+    findSemanticBifPath(nimcacheDir, mainSource)
+  ).mangleCName
+
 proc writeCBackendRoot(
     outputPath, mainSource: string,
     routines: openArray[NativeExportSymbol],
@@ -984,11 +1089,18 @@ proc writeCBackendRoot(
     opaqueExports: openArray[NativeOpaqueExport],
 ): JsonNode =
   result = newJObject()
+  var hasRaisingRoutines = false
   for routine in routines:
+    if routine.mayRaise:
+      hasRaisingRoutines = true
     if routine.iteratorRoutine or routine.inlineRoutine or routine.genericOrigin.len > 0:
       let prefix = if routine.iteratorRoutine: "binny_iterator_"
                    elif routine.genericOrigin.len > 0: "binny_generic_" else: "binny_inline_"
       result[routine.thunkKey] = % (prefix & routine.nifSymbol.mangleCName)
+  if hasRaisingRoutines:
+    result[exceptionBridgeStateKey] = % exceptionBridgeName(
+      outputPath.parentDir, mainSource
+    )
   var routineNamesBySource: Table[string, seq[string]]
   # Import the producer even when the selected API consists only of dependencies.
   var sources = @[normalizedAbsolutePath(mainSource)]
@@ -1093,6 +1205,30 @@ proc binnyIteratorFactory(symbol: NimNode, exportName: string): NimNode {.compil
           content.add ", "
         content.add name.nimQuotedIdentifier
       content.add "\n"
+
+  if hasRaisingRoutines:
+    let bridge = result[exceptionBridgeStateKey].getStr
+    var raisingNames: seq[string]
+    for routine in routines:
+      if routine.mayRaise:
+        raisingNames.add routine.nifSymbol.semanticName
+    raisingNames.sort()
+    content.add "\nwhen defined(features.binny.forbidExceptions):\n"
+    content.add "  {.error: " & (
+      "Binny native exports may raise (" & raisingNames.join(", ") &
+        "); remove -d:features.binny.forbidExceptions or exclude them."
+    ).nimStringLiteral & ".}\n"
+    content.add "when not compileOption(\"exceptions\", \"goto\"):\n"
+    content.add "  {.error: \"Binny raising native exports require --exceptions:goto.\".}\n"
+    content.add "when not defined(useMalloc):\n"
+    content.add "  {.error: \"Binny raising native exports require -d:useMalloc.\".}\n"
+    content.add "when defined(gcOrc) or not (defined(gcArc) or defined(gcAtomicArc)):\n"
+    content.add "  {.error: \"Binny raising native exports require ARC or atomic ARC; ORC is not supported.\".}\n"
+    content.add "\nproc " & bridge &
+      "(): ref CatchableError {.used, noinline, exportc: " &
+      bridge.nimStringLiteral & ", raises: [].} =\n"
+    content.add "  try:\n    discard\n  except CatchableError as error:\n"
+    content.add "    result = error\n"
 
   if opaqueExports.len > 0:
     content.add "\nwhen defined(gcOrc) or not (defined(gcArc) or defined(gcAtomicArc)):\n"
@@ -1269,18 +1405,24 @@ proc rootPublicRoutines*(
     ownsMain: bool
 
   let absoluteMain = normalizedAbsolutePath(mainSource)
+  let mainArtifact = "@m" & mainSource.extractFilename & ".c.nif"
   var artifacts: seq[Artifact]
   for path in walkFiles(nimcacheDir / "*.c.nif"):
-    var artifact = Artifact(path: path, definitions: readCDefinitions(path))
-    for definition in artifact.definitions:
+    var artifact = Artifact(path: path)
+    for definition in readCDefinitions(path):
       if definition.nifSymbol in indexes:
+        var activeDefinition = false
         for index in indexes[definition.nifSymbol]:
-          if exports[index].sourcePath == absoluteMain:
+          if exports[index].sourcePath != absoluteMain or
+              path.extractFilename == mainArtifact:
+            activeDefinition = true
+          if exports[index].sourcePath == absoluteMain and
+              path.extractFilename == mainArtifact:
             artifact.ownsMain = true
-            break
-        if artifact.ownsMain:
-          break
-    artifacts.add artifact
+        if activeDefinition:
+          artifact.definitions.add definition
+    if artifact.definitions.len > 0:
+      artifacts.add artifact
   artifacts.sort(
     proc(left, right: Artifact): int =
       if left.ownsMain != right.ownsMain:
@@ -1306,7 +1448,14 @@ proc rootPublicRoutines*(
     if changed:
       writeFile(artifact.path, content)
 
-  result = resolveIncrementalNativeSymbols(nimcacheDir, exports)
+  var missing: seq[string]
+  for symbol in exports:
+    if symbol.cSymbol.len == 0:
+      missing.add symbol.nifSymbol
+  if missing.len > 0:
+    missing.sort()
+    fail("native routines have no backend definitions:\n  " & missing.join("\n  "))
+  result = exports
 
 proc prepareNativeRoutines*(
     nimcacheDir, sourceRoot, mainSource, cRootSource: string,
@@ -1325,10 +1474,33 @@ proc prepareNativeRoutines*(
   if cBuildManifest.len == 0 and nimcacheDir.hasIncrementalCArtifacts:
     if exportConfig.opaqueTypes.len > 0:
       fail("opaque native exports currently require the normal C backend")
-    let statePath = cBuildStatePath(nimcacheDir)
-    if fileExists(statePath):
-      removeFile(statePath)
-    discard rootPublicRoutines(nimcacheDir, sourceRoot, mainSource, exportConfig)
+    let
+      statePath = cBuildStatePath(nimcacheDir)
+      rootedRoutines = rootPublicRoutines(
+        nimcacheDir, sourceRoot, mainSource, exportConfig
+      )
+    var hasRaisingRoutines = false
+    for routine in rootedRoutines:
+      if routine.mayRaise:
+        hasRaisingRoutines = true
+        break
+    if hasRaisingRoutines:
+      let
+        routines = publicRoutineSymbols(
+          nimcacheDir, sourceRoot, exportConfig, mainSource
+        )
+        hooks = nativeHookSymbols(nimcacheDir, sourceRoot)
+        thunks = writeCBackendRoot(cRootSource, mainSource, routines, hooks, [])
+      writeFile(statePath, (%*{
+        "backend": "ic",
+        "thunks": thunks,
+        "mainSource": normalizedAbsolutePath(mainSource),
+      }).pretty)
+    else:
+      if fileExists(statePath):
+        removeFile(statePath)
+      if fileExists(cRootSource):
+        removeFile(cRootSource)
     result = ncbIncremental
   else:
     let manifest = findCBuildManifest(nimcacheDir, cBuildManifest)
@@ -1368,6 +1540,9 @@ proc nativeExportSymbols*(
         sourcePath: hook.sourcePath, nifSymbol: hook.nifSymbol
       )
   result = resolveNativeSymbols(nimcacheDir, symbols)
+  let exceptionBridge = nativeExceptionBridgeSymbol(nimcacheDir)
+  if exceptionBridge.len > 0:
+    result.add NativeExportSymbol(cSymbol: exceptionBridge)
   if exportConfig.opaqueTypes.len == 0:
     return
   let mainSource = cBuildState(nimcacheDir).getOrDefault("mainSource").getStr

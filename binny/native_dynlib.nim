@@ -35,6 +35,8 @@ proc initBifNativeBindingsConfig*(
   result.sourcePath = sourcePath
   result.nimcacheDir = nimcacheDir
   result.exportConfig = exportConfig
+  when defined(features.binny.forbidExceptions):
+    result.exportConfig.forbidExceptions = true
   result.exportConfig.validateNativeExportConfig()
   result.libraryNameStrdefine = libraryNameStrdefine
   result.libraryName =

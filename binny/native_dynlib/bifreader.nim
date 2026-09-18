@@ -15,6 +15,7 @@ type
     returnTypeSymbol: string
     resolvedReturnTypeSymbol: string
     returnLowering: NativeLoweringMode
+    mayRaise: bool
     params: seq[NativeParam]
 
   AbiHookEntry = object
@@ -617,6 +618,7 @@ proc compilerProcInfo(
   result.closureEnv = typ.callConvImpl == ccClosure
   result.iteratorRoutine = tfIterator in typ.flagsImpl
   result.varargs = tfVarargs in typ.flagsImpl
+  result.mayRaise = node.routineCanRaise
   if typ.sonsImpl.len > 0:
     result.returnTypeSymbol = context.compilerTypeSymbol(typ.sonsImpl[0])
     result.returnByVar = typeOrdinal(result.returnTypeSymbol) == ord(tyVar)
@@ -1198,6 +1200,7 @@ proc parseNativeProc(declaration: Cursor, abi: AbiProcEntry,
   result.cSymbol = abi.cSymbol
   result.returnLowering = abi.returnLowering
   result.callConv = "nimcall"
+  result.mayRaise = abi.mayRaise
   result.iteratorRoutine = not declaration.findChildTag("iterator").cursorIsNil
   let descriptor = declaration.findChildTag("td")
   let proc_type = declaration.declarationType
@@ -1842,7 +1845,11 @@ proc bifNativeDescription(
   )
 
   for symbol in routines:
-    result.procs.add AbiProcEntry(nifSymbol: symbol.nifSymbol, cSymbol: symbol.cSymbol)
+    result.procs.add AbiProcEntry(
+      nifSymbol: symbol.nifSymbol,
+      cSymbol: symbol.cSymbol,
+      mayRaise: symbol.mayRaise,
+    )
   for hook in hooks:
     result.hooks.add AbiHookEntry(
       typeSymbol: hook.typeSymbol,
@@ -2568,3 +2575,9 @@ proc readBifNativeApi*(
     nativeOpaqueExports(nimcacheDir, sourceRoot, sourcePath, exportConfig),
     sourceRoot,
   )
+  if result.procs.anyIt(it.mayRaise):
+    result.exceptionBridgeSymbol = nativeExceptionBridgeSymbol(nimcacheDir)
+    if result.exceptionBridgeSymbol.len == 0:
+      fail(
+        "raising native exports require a prepared goto exception bridge"
+      )

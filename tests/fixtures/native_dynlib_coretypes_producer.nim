@@ -50,14 +50,17 @@ proc newCoreState*(): CoreState =
     mid: middleLevel,
   )
 
-proc inspectCoreState*(state: CoreState): bool =
+proc inspectCoreState*(state: CoreState): bool {.raises: [].} =
   var ordered: seq[string]
   for value in state.ordered:
     ordered.add value
   7 in state.values and ordered == @["first", "second", "third"] and
-    state.counts["apple"] == 3 and state.tableRef[5] == "five" and
-    state.orderedRef[6] == "six" and state.countRef["pear"] == 2 and
-    state.pending.peekFirst() == 3..8 and 9 in state.nested["nested"]
+    state.counts.getOrDefault("apple") == 3 and
+    state.tableRef.getOrDefault(5) == "five" and
+    state.orderedRef.getOrDefault(6) == "six" and
+    state.countRef.getOrDefault("pear", 0) == 2 and
+    state.pending.peekFirst() == 3..8 and
+    9 in state.nested.getOrDefault("nested")
 
 proc roundTripSet*(values: HashSet[string]): HashSet[string] = values
 proc roundTripDeque*(values: Deque[int16]): Deque[int16] = values

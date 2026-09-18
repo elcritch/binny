@@ -120,7 +120,8 @@ proc newWindow*(): Window = DerivedWindow(value: 40)
       )
       let root_source = nativeCRootSourcePath(cache)
       discard prepareNativeRoutines(cache, application, source, root_source, export_config)
-      discard run(arguments & @[(if backend == "c": root_source else: source)])
+      let second_source = if fileExists(root_source): root_source else: source
+      discard run(arguments & @["-f", second_source])
       let exports = nativeExportSymbols(cache, application, export_config)
       var methods = 0
       var dispatchers: seq[string]
@@ -146,7 +147,10 @@ proc newWindow*(): Window = DerivedWindow(value: 40)
           archive_arguments.add node.getStr
       else:
         for path in walkFiles(cache / "*.o"):
-          archive_arguments.add path
+          let superseded_main = fileExists(root_source) and
+            path.extractFilename == "@m" & source.extractFilename & ".c.o"
+          if not superseded_main:
+            archive_arguments.add path
       discard run(archive_arguments)
       promoteNativeArchive(archive & ".a", public_archive, exports)
       linkNativeDynlib(public_archive, library, exports_file, init_symbol)

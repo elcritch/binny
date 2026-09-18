@@ -216,6 +216,14 @@ symbols the dylib exposes.
   target, and native type layouts. Generated wrappers require `-d:useMalloc` and
   `--mm:arc`, `--mm:atomicArc`, or `--mm:orc` at compile time, even without layout
   checks. These guards do not prove that the producer used matching settings.
+- Raising procedures use a separate-runtime bridge only when producer and
+  consumer both use `--exceptions:goto`, ARC/atomic ARC, and `-d:useMalloc`.
+  Non-raising procedures remain direct imports. Both regular and incremental C
+  backends support the bridge. Raising iterators are supported by the regular C
+  backend; the incremental backend does not export iterators. The bridge handles
+  `CatchableError`, not `Defect` or panics, and callback exceptions remain
+  unsupported. Define `features.binny.forbidExceptions` to reject every selected
+  procedure with non-empty or unknown resolved exception effects.
 - Application modules are the BIF modules whose source files live beside the
   main producer source. Compiler and dependency modules are excluded.
 - A selected routine must have one externally linked backend definition. Open
