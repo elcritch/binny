@@ -2,7 +2,7 @@
 
 import std/[algorithm, sets, strutils, tables]
 import nif/[bif, nifcoreparse, nifqueries]
-import "$nim"/compiler/ast
+import "$nim"/compiler/astdef
 
 type
   GenericExportError* = object of ValueError
