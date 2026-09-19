@@ -4,7 +4,7 @@ import exportconfig
 import genericexports
 import model
 import staticlib
-import "$nim"/compiler/[astdef, idents]
+import "$nim"/compiler/[ast, idents]
 
 type
   NativeBifError* = object of ValueError
