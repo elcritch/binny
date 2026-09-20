@@ -2136,6 +2136,14 @@ proc buildNativeApi(
         fail("opaque storage does not support closures")
       result.size = pointerSize
       result.alignment = pointerAlignment
+    of "pointer", "ref":
+      result.size = pointerSize
+      result.alignment = pointerAlignment
+    of "sequence":
+      # A Nim sequence is a managed pointer plus its length. Generic sequence
+      # instances can reach BIF before the compiler fills in their layout.
+      result.size = pointerSize * 2
+      result.alignment = pointerAlignment
     of "object", "tuple":
       # Generic bodies can be serialized before getSize has populated their
       # offsets. Plain records use the compiler's declaration-order alignment

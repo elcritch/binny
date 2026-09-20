@@ -5,6 +5,7 @@ static:
   doAssert not compiles(default(NativeRenderer).state)
   doAssert not compiles(default(NativeState).graphics)
   doAssert not compiles(default(NativeTarget).width)
+  doAssert not compiles(default(NativeTableState).entries)
 
 proc exercise() =
   doAssert releasedCount() == 0
@@ -45,5 +46,11 @@ proc exercise() =
   # A homogeneous float aggregate must retain its register-based ABI shape.
   let target = presentationTarget()
   doAssert targetArea(target) == 12
+  let tableState = newNativeTableState()
+  doAssert tableState.tableValue(1) == "one"
+  var keys: seq[int8]
+  for key in tableState.tableKeys:
+    keys.add key
+  doAssert keys == @[1'i8]
 
 exercise()

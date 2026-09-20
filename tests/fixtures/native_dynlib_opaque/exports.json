@@ -8,6 +8,7 @@
     {"source": "producer.nim", "name": "NativeRenderer"},
     {"source": "producer.nim", "name": "NativeState"},
     {"source": "producer.nim", "name": "NativeLease"},
-    {"source": "producer.nim", "name": "NativeTarget"}
+    {"source": "producer.nim", "name": "NativeTarget"},
+    {"source": "producer.nim", "name": "NativeTableState"}
   ]
 }
