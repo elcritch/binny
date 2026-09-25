@@ -234,6 +234,12 @@ proc privateAdd(left, right: int): int {.noinline.} =
       doAssert exports.len in {8, 9}, "unexpected exports: " & exportedNames.join(", ")
       if exports.len == 9:
         doAssert exports[8].nifSymbol.startsWith("=copy.")
+      else:
+        var foundCopyHook = false
+        for hook in nativeHookSymbols(cache, temporary):
+          if hook.hookKind == "=copy" and hook.typeName == "Tracked":
+            foundCopyHook = true
+        doAssert foundCopyHook
       doAssert exports[0].nifSymbol.startsWith("publicAdd.")
       doAssert exports[1].nifSymbol.startsWith("orderedArgs.")
       doAssert exports[2].nifSymbol.startsWith("argumentCount.")

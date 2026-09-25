@@ -409,7 +409,12 @@ proc firstParameterType(declaration: Cursor): string =
         if not typeId.cursorIsNil:
           result = typeId.symName
           if result.startsWith("`t23."):
-            let element = typeDesc.findLastChildKind(Symbol)
+            let genericArgs = typeDesc.findChildTag("genericargs")
+            let element =
+              if genericArgs.cursorIsNil:
+                typeDesc.findLastChildKind(Symbol)
+              else:
+                genericArgs.findLastChildKind(Symbol)
             if not element.cursorIsNil:
               result = element.symName
           return
