@@ -750,10 +750,20 @@ when defined(nimAllowNonVarDestructor) and defined(gcDestructors):
   proc `=destroy`(dest: TokenBuf) {.inline.} =
     if dest.owner != nil: decRcAndFree(dest.owner)
     elif dest.data != nil: dealloc(dest.data)
+    # A custom destructor owns managed fields too. The cursor owner retains its
+    # own pool references, so cursors remain valid after the buffer is released.
+    `=destroy`(dest.openTags)
+    `=destroy`(dest.pool)
+    `=destroy`(dest.tags)
 else:
   proc `=destroy`(dest: var TokenBuf) {.inline.} =
     if dest.owner != nil: decRcAndFree(dest.owner)
     elif dest.data != nil: dealloc(dest.data)
+    # A custom destructor owns managed fields too. The cursor owner retains its
+    # own pool references, so cursors remain valid after the buffer is released.
+    `=destroy`(dest.openTags)
+    `=destroy`(dest.pool)
+    `=destroy`(dest.tags)
 
 proc createTokenBuf*(cap = 16; sharedPool: Pool = nil;
                      sharedTags: TagPool = nil): TokenBuf =
