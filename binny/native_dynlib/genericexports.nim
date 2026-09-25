@@ -46,8 +46,16 @@ proc collectTypes(node: Cursor, types: var Table[string, GenericType]) =
       typ.nominal = parts[11].symName
     elif parts[11].tagIs("sd"):
       typ.nominal = parts[11].findChildKind(SymbolDef).symName
-    for index in 16..<parts.len:
-      typ.sons.add parts[index].typeSymbol
+    if parts.len > 16 and parts[16].tagIs("genericargs"):
+      if parts.len != 17:
+        fail("invalid generic argument list for " & symbol)
+      var argument = parts[16].childCursor()
+      while argument.hasMore:
+        typ.sons.add argument.typeSymbol
+        argument.skip
+    else:
+      for index in 16..<parts.len:
+        typ.sons.add parts[index].typeSymbol
     types[symbol] = typ
   var child = node.childCursor()
   while child.hasMore:
