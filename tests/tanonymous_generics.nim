@@ -128,11 +128,8 @@ proc identityRecursiveBox*(value: RecursiveBox[int]): RecursiveBox[int] {.noinli
       ]
     )
 
-    let bifPath = findSemanticBifPath(cache, source)
-    # This branch deliberately consumes plain devel BIF output. The compiler
-    # type graph supplies the generic arguments through TType.sonsImpl, so no
-    # producer-side genericargs extension is needed.
-    doAssert "genericargs" notin readFile(bifPath)
+    # Both flat and `(genericargs ...)` compiler BIF tails must preserve the
+    # same type graph and produce usable native bindings.
     let config = initBifNativeBindingsConfig(source, cache, dylib, temporary)
     doAssert config.writeNativeBindings(bindings)
     let generatedBindings = readFile(bindings)

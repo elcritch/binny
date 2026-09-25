@@ -229,7 +229,17 @@ proc privateAdd(left, right: int): int {.noinline.} =
       var exportedNames: seq[string]
       for symbol in exports:
         exportedNames.add symbol.nifSymbol
-      doAssert exports.len == 9, "unexpected exports: " & exportedNames.join(", ")
+      # Older compiler BIFs expose the generated `=copy` hook as a public
+      # routine; current devel reports only the eight declared exports.
+      doAssert exports.len in {8, 9}, "unexpected exports: " & exportedNames.join(", ")
+      if exports.len == 9:
+        doAssert exports[8].nifSymbol.startsWith("=copy.")
+      else:
+        var foundCopyHook = false
+        for hook in nativeHookSymbols(cache, temporary):
+          if hook.hookKind == "=copy" and hook.typeName == "Tracked":
+            foundCopyHook = true
+        doAssert foundCopyHook
       doAssert exports[0].nifSymbol.startsWith("publicAdd.")
       doAssert exports[1].nifSymbol.startsWith("orderedArgs.")
       doAssert exports[2].nifSymbol.startsWith("argumentCount.")
@@ -343,6 +353,7 @@ let original = newTracked(7)
 var copied: Tracked
 copied = original
 doAssert copied.value == 7
+doAssert original.value == 7
 doAssert trackedCopyCount() == 1
 
 var quoted = producer_abi.`type`(value: 1)
