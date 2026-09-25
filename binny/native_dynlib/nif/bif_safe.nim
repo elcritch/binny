@@ -479,6 +479,32 @@ proc load*(filename: string;
     except CatchableError:
       failBif(bekIo, filename, -1, getCurrentExceptionMsg())
 
+proc loadStringList*(filename, rootTag: string;
+                     limits = DefaultBifLoadLimits): seq[string] =
+  ## Load a BIF containing one tagged list of string literals. The complete
+  ## token stream is validated before cursors are used. Malformed list shape
+  ## raises `BifError` with `bekInvalidData`.
+  var module = load(filename, limits)
+  var root = module.buf.beginRead()
+  defer: root.endRead()
+  if not root.hasMore or root.kind != TagLit or
+      root.tags.tagName(root.cursorTagId) != rootTag:
+    failBif(bekInvalidData, filename, -1,
+      "expected a single " & rootTag & " string list")
+  block:
+    var child = root.childCursor()
+    defer: child.endRead()
+    while child.hasMore:
+      if child.kind != StrLit:
+        failBif(bekInvalidData, filename, -1,
+          "non-string value in " & rootTag & " list")
+      result.add(child.strVal())
+      child.skip()
+  root.skip()
+  if root.hasMore:
+    failBif(bekInvalidData, filename, -1,
+      "unexpected token after " & rootTag & " list")
+
 when not defined(nimony):
   proc tryLoad*(filename: string; loaded: var BifModule;
                 failure: var BifLoadFailure;
@@ -533,4 +559,3 @@ proc containsSym*(filename, name: string;
       result = containsSymChecked(filename, name, limits)
     except BifError:
       result = false
-

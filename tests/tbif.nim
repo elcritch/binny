@@ -72,6 +72,48 @@ block valid_queries_use_the_checked_loader:
   doAssert not containsSym(path, "missing.symbol.name")
   doAssert loadIndex(path).len == 1
 
+block checked_string_list_rejects_malformed_dependency_metadata:
+  let path = tempBifPath()
+  defer: removeFile(path)
+
+  var source = createTokenBuf()
+  let dependencies = source.tags.registerTag("semdeps")
+  source.buildTree dependencies:
+    source.addStrLit("/tmp/first.nim")
+    source.addStrLit("/tmp/second.nim")
+  source.store(path)
+  doAssert loadStringList(path, "semdeps") ==
+    @["/tmp/first.nim", "/tmp/second.nim"]
+
+  try:
+    discard loadStringList(path, "other")
+    doAssert false
+  except BifError as error:
+    doAssert error.kind == bekInvalidData
+
+  source = createTokenBuf()
+  let malformed = source.tags.registerTag("semdeps")
+  source.buildTree malformed:
+    source.addIdent("not a string literal")
+  source.store(path)
+  try:
+    discard loadStringList(path, "semdeps")
+    doAssert false
+  except BifError as error:
+    doAssert error.kind == bekInvalidData
+
+  source = createTokenBuf()
+  let extra = source.tags.registerTag("semdeps")
+  source.buildTree extra:
+    source.addStrLit("/tmp/first.nim")
+  source.addStrLit("trailing")
+  source.store(path)
+  try:
+    discard loadStringList(path, "semdeps")
+    doAssert false
+  except BifError as error:
+    doAssert error.kind == bekInvalidData
+
 block truncated_files_are_recoverable_at_every_byte:
   let
     validPath = tempBifPath()
