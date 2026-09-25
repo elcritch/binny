@@ -47,6 +47,7 @@ block customHooks:
   var copied: Hooked
   copied = original
   doAssert copied.value == 7
+  doAssert original.value == 7
   doAssert hookedCopyCount() == 1
 
 doAssert hookedDestroyCount() == 2

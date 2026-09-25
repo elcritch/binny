@@ -347,6 +347,7 @@ let original = newTracked(7)
 var copied: Tracked
 copied = original
 doAssert copied.value == 7
+doAssert original.value == 7
 doAssert trackedCopyCount() == 1
 
 var quoted = producer_abi.`type`(value: 1)
