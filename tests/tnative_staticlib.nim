@@ -229,7 +229,11 @@ proc privateAdd(left, right: int): int {.noinline.} =
       var exportedNames: seq[string]
       for symbol in exports:
         exportedNames.add symbol.nifSymbol
-      doAssert exports.len == 9, "unexpected exports: " & exportedNames.join(", ")
+      # Older compiler BIFs expose the generated `=copy` hook as a public
+      # routine; current devel reports only the eight declared exports.
+      doAssert exports.len in {8, 9}, "unexpected exports: " & exportedNames.join(", ")
+      if exports.len == 9:
+        doAssert exports[8].nifSymbol.startsWith("=copy.")
       doAssert exports[0].nifSymbol.startsWith("publicAdd.")
       doAssert exports[1].nifSymbol.startsWith("orderedArgs.")
       doAssert exports[2].nifSymbol.startsWith("argumentCount.")
