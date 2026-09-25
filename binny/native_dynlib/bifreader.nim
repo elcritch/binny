@@ -771,8 +771,14 @@ proc loadCompilerTypeDef(context: var CompilerTypeContext, node: var Cursor): PT
     result.ownerFieldImpl = context.loadCompilerSymbol(node)
     result.symImpl = context.loadCompilerSymbol(node)
     loadCompilerLoc(node)
-    while node.hasMore:
-      result.sonsImpl.add context.loadCompilerTypeRef(node)
+    if node.hasMore and node.kind == TagLit and node.tagName == "genericargs":
+      node.into:
+        while node.hasMore:
+          result.sonsImpl.add context.loadCompilerTypeRef(node)
+    else:
+      # Older compiler BIFs stored child types as a flat tail.
+      while node.hasMore:
+        result.sonsImpl.add context.loadCompilerTypeRef(node)
   if not procNode.cursorIsNil:
     context.procTypes[name] = context.compilerProcInfo(name, result, procNode)
 
