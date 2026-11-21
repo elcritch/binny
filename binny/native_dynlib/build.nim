@@ -9,6 +9,7 @@ when not defined(nimscript):
   {.error: "binny/native_dynlib/build is intended for config.nims".}
 
 import std/[algorithm, json, os, strutils]
+import cachepaths
 
 type
   NativeDynlibBuildError* = object of CatchableError
@@ -285,7 +286,7 @@ proc producerObjects(config: NativeDynlibBuildConfig): seq[string] =
       if path.endsWith(".o") and path notin result:
         result.add path
   else:
-    for path in listFiles(config.producerCache):
+    for path in listFiles(incrementalBackendDir(config.producerCache)):
       let supersededMain = fileExists(config.cRootSource) and
         path.extractFilename == "@m" & config.sourcePath.extractFilename & ".c.o"
       if path.endsWith(".o") and not supersededMain:

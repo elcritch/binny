@@ -35,3 +35,7 @@ when not defined(exceptionIncremental):
     yield 1
     yield 2
     raise newException(ValueError, "iterator failed")
+
+  iterator closureValuesThenFail*(): int {.closure.} =
+    yield 3
+    raise newException(ValueError, "closure iterator failed")

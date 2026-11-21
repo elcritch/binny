@@ -6,8 +6,11 @@
 
 import std/[algorithm, cmdline, json, os, osproc, sets, streams, strutils, tables, tempfiles]
 import nif/[bif, nifcore, nifcoreparse, nifqueries]
+import cachepaths
 import exportconfig
 import genericexports
+
+export cachepaths
 
 type
   NativeStaticLibError* = object of CatchableError
@@ -268,10 +271,32 @@ proc readModuleSource(module: var BifModule): string =
     result = source.strVal
   cursor.endRead()
 
+iterator semanticBifPaths*(nimcacheDir: string): string =
+  var backendDir = incrementalBackendDir(nimcacheDir)
+  if backendDir != nimcacheDir:
+    let stamp = readFile(nimcacheDir / "ic_link_args.txt").splitLines()
+    let statePath = nimcacheDir / "binny_native_build.json"
+    if stamp.len >= 2 and fileExists(statePath):
+      let state = parseFile(statePath)
+      if normalizedAbsolutePath(stamp[1]) == state.getOrDefault("rootSource").getStr:
+        # The generated entry point can move generic instances to other BIFs.
+        # Keep the producer's semantic view and resolve it against the new C.
+        backendDir = state["semanticBackendDir"].getStr
+    let sem = backendDir.parentDir.parentDir.parentDir / "sem"
+    let main = sem / "main" / backendDir.extractFilename
+    for path in walkFiles(main / "*.s.bif"):
+      yield path
+    for path in walkFiles(sem / "*.s.bif"):
+      if not fileExists(main / path.extractFilename):
+        yield path
+  else:
+    for path in walkFiles(nimcacheDir / "*.s.bif"):
+      yield path
+
 proc findSemanticBifPath*(nimcacheDir, sourcePath: string): string =
   ## Finds the semantic BIF whose module source matches ``sourcePath``.
   let expected = normalizedAbsolutePath(sourcePath)
-  for path in walkFiles(nimcacheDir / "*.s.bif"):
+  for path in semanticBifPaths(nimcacheDir):
     var module = bif.load(path)
     let candidate = module.readModuleSource()
     if candidate.len > 0 and normalizedAbsolutePath(candidate) == expected:
@@ -409,9 +434,9 @@ proc firstParameterType(declaration: Cursor): string =
         if not typeId.cursorIsNil:
           result = typeId.symName
           if result.startsWith("`t23."):
-            let element = typeDesc.findLastChildKind(Symbol)
-            if not element.cursorIsNil:
-              result = element.symName
+            let element = typeDesc.lastCompilerTypeSon
+            if element.len > 0:
+              result = element
           return
       let typeSymbol = children.findChildKind(Symbol)
       if not typeSymbol.cursorIsNil:
@@ -420,12 +445,15 @@ proc firstParameterType(declaration: Cursor): string =
 
 proc activeSemanticModules(nimcacheDir, mainSource: string): HashSet[string] =
   if mainSource.len == 0: return
+  var paths: Table[string, string]
+  for path in semanticBifPaths(nimcacheDir):
+    paths[bifModuleSuffix(path)] = path
   var pending = @[bifModuleSuffix(findSemanticBifPath(nimcacheDir, mainSource))]
   while pending.len > 0:
     let identity = pending.pop()
     if identity in result: continue
     result.incl identity
-    var module = bif.load(nimcacheDir / (identity & ".s.bif"))
+    var module = bif.load(paths[identity])
     var root = module.buf.beginRead()
     var child = root.childCursor()
     while child.hasMore:
@@ -442,7 +470,7 @@ proc nativeOpaqueExports*(
   let compilerPaths = nativeCompilerSearchPaths(nimcacheDir)
   for selector in config.opaqueTypes:
     var matches: seq[NativeOpaqueExport]
-    for path in walkFiles(nimcacheDir / "*.s.bif"):
+    for path in semanticBifPaths(nimcacheDir):
       let identity = bifModuleSuffix(path)
       if active.len > 0 and identity notin active:
         continue
@@ -595,7 +623,7 @@ proc publicRoutineSymbols*(
   let root = normalizedAbsolutePath(sourceRoot)
   let compilerPaths = nativeCompilerSearchPaths(nimcacheDir)
   var paths: seq[string]
-  for path in walkFiles(nimcacheDir / "*.s.bif"):
+  for path in semanticBifPaths(nimcacheDir):
     paths.add path
   paths.sort()
 
@@ -730,7 +758,7 @@ proc nativeHookSymbols*(nimcacheDir, sourceRoot: string): seq[NativeHookSymbol] 
   ## Returns custom and forbidden ownership hooks belonging to public app types.
   let root = normalizedAbsolutePath(sourceRoot)
   var paths: seq[string]
-  for path in walkFiles(nimcacheDir / "*.s.bif"):
+  for path in semanticBifPaths(nimcacheDir):
     paths.add path
   paths.sort()
 
@@ -847,7 +875,7 @@ proc resolveIncrementalNativeSymbols(
 
   var matched = initHashSet[string]()
   var definitions = initHashSet[string]()
-  for path in walkFiles(nimcacheDir / "*.c.nif"):
+  for path in walkFiles(incrementalBackendDir(nimcacheDir) / "*.c.nif"):
     if isSupersededIncrementalMainArtifact(nimcacheDir, path):
       continue
     for definition in readCDefinitions(path):
@@ -1040,7 +1068,8 @@ proc cFunctionDefinitions(path: string): seq[string] =
     if depth == 0 and (
       token.cTokenPrefix.len > 0 or token.startsWith("binny_inline_") or
       token.startsWith("binny_generic_") or token.startsWith("binny_opaque_") or
-      token.startsWith("binny_iterator_") or token.startsWith("binny_exception_")
+      token.startsWith("binny_iterator_") or token.startsWith("binny_exception_") or
+      token.startsWith("binny_raising_")
     ):
       var position = index + 1
       # Nim's N_NIMCALL/N_INLINE macros place the name inside their parentheses.
@@ -1130,7 +1159,7 @@ proc resolveCNativeSymbols(
       result[index].cSymbol = candidate
 
 proc hasIncrementalCArtifacts*(nimcacheDir: string): bool =
-  for _ in walkFiles(nimcacheDir / "*.c.nif"):
+  for _ in walkFiles(incrementalBackendDir(nimcacheDir) / "*.c.nif"):
     return true
 
 proc resolveNativeSymbols*(
@@ -1188,8 +1217,10 @@ proc writeCBackendRoot(
   for routine in routines:
     if routine.mayRaise:
       hasRaisingRoutines = true
-    if routine.iteratorRoutine or routine.inlineRoutine or routine.genericOrigin.len > 0:
+    if routine.iteratorRoutine or routine.inlineRoutine or routine.genericOrigin.len > 0 or
+        routine.mayRaise:
       let prefix = if routine.iteratorRoutine: "binny_iterator_"
+                   elif routine.mayRaise: "binny_raising_"
                    elif routine.genericOrigin.len > 0: "binny_generic_" else: "binny_inline_"
       result[routine.thunkKey] = % (prefix & routine.nifSymbol.mangleCName)
   if hasRaisingRoutines:
@@ -1218,10 +1249,24 @@ proc writeCBackendRoot(
   var aliases: Table[string, string]
   var content = "## Generated by Binny to keep public native routines reachable.\n\n"
   content.add "import std/macros\n"
+  if hasRaisingRoutines:
+    content.add "var binnyPendingException {.threadvar.}: ref CatchableError\n"
   if result.len > 0:
     content.add """
 
-proc binnyInlineThunk(symbol: NimNode, exportName: string): NimNode {.compileTime.} =
+proc binnyCatch(body: NimNode): NimNode {.compileTime.} =
+  when declared(binnyPendingException):
+    result = quote do:
+      try:
+        `body`
+      except CatchableError as error:
+        binnyPendingException = error
+  else:
+    result = body
+
+proc binnyInlineThunk(
+    symbol: NimNode, exportName: string, mayRaise: bool
+): NimNode {.compileTime.} =
   let implementation = symbol.getImpl
   let parameters = symbol.getTypeInst[0].copyNimTree
   var invocation = newCall(symbol)
@@ -1235,6 +1280,9 @@ proc binnyInlineThunk(symbol: NimNode, exportName: string): NimNode {.compileTim
   var pragmas = newTree(nnkPragma)
   for pragma in implementation[4]:
     let name = if pragma.kind == nnkExprColonExpr: pragma[0] else: pragma
+    if mayRaise and (name.eqIdent("raises") or name.eqIdent("noSideEffect") or
+        name.eqIdent("noreturn")):
+      continue
     if name.kind notin {nnkIdent, nnkSym} or $name notin [
       "inline", "exportc", "extern", "dynlib", "importc", "header", "noinline", "used"
     ]:
@@ -1245,9 +1293,12 @@ proc binnyInlineThunk(symbol: NimNode, exportName: string): NimNode {.compileTim
   let body = if parameters[0].kind == nnkEmpty: invocation
              else: newTree(nnkReturnStmt, invocation)
   result = newTree(nnkProcDef, ident(exportName), newEmptyNode(), newEmptyNode(),
-    parameters, pragmas, newEmptyNode(), newStmtList(body))
+    parameters, pragmas, newEmptyNode(),
+    newStmtList(if mayRaise: binnyCatch(body) else: body))
 
-proc binnyIteratorFactory(symbol: NimNode, exportName: string): NimNode {.compileTime.} =
+proc binnyIteratorFactory(
+    symbol: NimNode, exportName: string, mayRaise: bool
+): NimNode {.compileTime.} =
   let signature = symbol.getTypeInst
   let parameters = signature[0].copyNimTree
   var closureIterator = false
@@ -1269,18 +1320,20 @@ proc binnyIteratorFactory(symbol: NimNode, exportName: string): NimNode {.compil
     newTree(nnkPragma, ident("closure")))
   let item = genSym(nskForVar, "item")
   let resume = genSym(nskIterator, "resume")
-  let body = newTree(nnkForStmt, item, invocation,
-    newStmtList(newTree(nnkYieldStmt, item),
-      newTree(nnkIfStmt, newTree(nnkElifBranch, stop,
-        newStmtList(newTree(nnkBreakStmt, newEmptyNode()))))))
+  var loopBody = newStmtList(newTree(nnkYieldStmt, item))
+  if not closureIterator:
+    loopBody.add newTree(nnkIfStmt, newTree(nnkElifBranch, stop,
+      newStmtList(newTree(nnkBreakStmt, newEmptyNode()))))
+  let body = newTree(nnkForStmt, item, invocation, loopBody)
   let iteratorDef = newTree(nnkIteratorDef, resume, newEmptyNode(), newEmptyNode(),
-    parameters, newTree(nnkPragma, ident("closure")), newEmptyNode(), body)
+    parameters, newTree(nnkPragma, ident("closure")), newEmptyNode(),
+    newStmtList(if mayRaise: binnyCatch(body) else: body))
   result = newTree(nnkProcDef, ident(exportName), newEmptyNode(), newEmptyNode(),
     newTree(nnkFormalParams, iteratorType),
     newTree(nnkPragma, ident("used"), ident("noinline"),
       newColonExpr(ident("exportc"), newLit(exportName))), newEmptyNode(),
     newStmtList(iteratorDef, newTree(nnkReturnStmt, resume)))
-  if closureIterator:
+  if closureIterator and not mayRaise:
     result[^1] = newStmtList(newTree(nnkReturnStmt, symbol))
 
 """
@@ -1322,8 +1375,7 @@ proc binnyIteratorFactory(symbol: NimNode, exportName: string): NimNode {.compil
     content.add "\nproc " & bridge &
       "(): ref CatchableError {.used, noinline, exportc: " &
       bridge.nimStringLiteral & ", raises: [].} =\n"
-    content.add "  try:\n    discard\n  except CatchableError as error:\n"
-    content.add "    result = error\n"
+    content.add "  result = move(binnyPendingException)\n"
 
   if opaqueExports.len > 0:
     content.add "\nwhen defined(gcOrc) or not (defined(gcArc) or defined(gcAtomicArc)):\n"
@@ -1384,7 +1436,7 @@ proc binnyIteratorFactory(symbol: NimNode, exportName: string): NimNode {.compil
       content.add "\n" & keepMacro & "()\n"
 
   for index, routine in routines:
-    if routine.iteratorRoutine or routine.inlineRoutine or routine.genericOrigin.len > 0:
+    if routine.thunkKey in result:
       let
         source = normalizedAbsolutePath(routine.sourcePath)
         name = routine.nifSymbol.semanticName
@@ -1410,7 +1462,7 @@ proc binnyIteratorFactory(symbol: NimNode, exportName: string): NimNode {.compil
           "), specialization)\n"
       else:
         content.add "      result.add " & thunk_builder & "(symbol, " &
-          exportName.nimStringLiteral & ")\n"
+          exportName.nimStringLiteral & ", " & $routine.mayRaise & ")\n"
       content.add "  if result.len != 1:\n"
       content.add "    error(" & ("cannot identify native export " &
         routine.nifSymbol).nimStringLiteral & ")\n"
@@ -1419,7 +1471,8 @@ proc binnyIteratorFactory(symbol: NimNode, exportName: string): NimNode {.compil
         # Place the typed helper before the macro that binds it.
         let insertion = content.rfind("\nmacro " & keepMacro)
         content.insert("\nmacro " & specialization_macro & "(symbol: typed): untyped =\n" &
-          "  result = " & thunk_builder & "(symbol, " & exportName.nimStringLiteral & ")\n",
+          "  result = " & thunk_builder & "(symbol, " & exportName.nimStringLiteral &
+            ", " & $routine.mayRaise & ")\n",
           insertion)
       content.add "\n" & keepMacro & "()\n"
 
@@ -1502,7 +1555,7 @@ proc rootPublicRoutines*(
   let absoluteMain = normalizedAbsolutePath(mainSource)
   let mainArtifact = "@m" & mainSource.extractFilename & ".c.nif"
   var artifacts: seq[Artifact]
-  for path in walkFiles(nimcacheDir / "*.c.nif"):
+  for path in walkFiles(incrementalBackendDir(nimcacheDir) / "*.c.nif"):
     var artifact = Artifact(path: path)
     for definition in readCDefinitions(path):
       if definition.nifSymbol in indexes:
@@ -1571,27 +1624,27 @@ proc prepareNativeRoutines*(
       fail("opaque native exports currently require the normal C backend")
     let
       statePath = cBuildStatePath(nimcacheDir)
-      rootedRoutines = rootPublicRoutines(
-        nimcacheDir, sourceRoot, mainSource, exportConfig
-      )
+      routines = publicRoutineSymbols(nimcacheDir, sourceRoot, exportConfig, mainSource)
     var hasRaisingRoutines = false
-    for routine in rootedRoutines:
+    for routine in routines:
+      if routine.iteratorRoutine:
+        fail("native iterator exports currently require the normal C backend: " &
+          routine.nifSymbol)
       if routine.mayRaise:
         hasRaisingRoutines = true
-        break
     if hasRaisingRoutines:
       let
-        routines = publicRoutineSymbols(
-          nimcacheDir, sourceRoot, exportConfig, mainSource
-        )
         hooks = nativeHookSymbols(nimcacheDir, sourceRoot)
         thunks = writeCBackendRoot(cRootSource, mainSource, routines, hooks, [])
       writeFile(statePath, (%*{
         "backend": "ic",
         "thunks": thunks,
         "mainSource": normalizedAbsolutePath(mainSource),
+        "rootSource": normalizedAbsolutePath(cRootSource),
+        "semanticBackendDir": incrementalBackendDir(nimcacheDir),
       }).pretty)
     else:
+      discard rootPublicRoutines(nimcacheDir, sourceRoot, mainSource, exportConfig)
       if fileExists(statePath):
         removeFile(statePath)
       if fileExists(cRootSource):
@@ -1962,7 +2015,7 @@ proc compileElfPicObjects*(nimcacheDir: string) =
   ## Nim's link stage; for those, reconstruct the command from the IC build
   ## arguments and the module's ``.cflags`` sidecar.
   var sources: seq[string]
-  for path in walkFiles(nimcacheDir / "*.c"):
+  for path in walkFiles(incrementalBackendDir(nimcacheDir) / "*.c"):
     sources.add path
   sources.sort()
   if sources.len == 0:

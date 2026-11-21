@@ -72,7 +72,7 @@ when defined(macosx) or defined(linux) or defined(freebsd) or defined(windows):
           for node in parseJson(readFile(archive & ".json"))["link"]:
             archiveArguments.add node.getStr
         else:
-          for path in walkFiles(cache / "*.o"):
+          for path in walkFiles(incrementalBackendDir(cache) / "*.o"):
             archiveArguments.add path
         discard run(archiveArguments)
         promoteNativeArchive(archive & ".a", publicArchive, exports)

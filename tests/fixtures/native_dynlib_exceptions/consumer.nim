@@ -14,6 +14,7 @@ block typed_exception:
     caught = true
     doAssert error.msg == "bridge value"
   doAssert caught
+  doAssert maybeText(false) == "text ok"
 
 block managed_result_failure:
   doAssertRaises ValueError:
@@ -51,6 +52,14 @@ when declared(valuesThenFail):
     except ValueError as error:
       doAssert error.msg == "iterator failed"
     doAssert values == @[1, 2]
+
+when declared(closureValuesThenFail):
+  block closure_iterator_exception:
+    var values: seq[int]
+    doAssertRaises ValueError:
+      for value in closureValuesThenFail():
+        values.add value
+    doAssert values == @[3]
 
 block repeated_failures:
   for index in 0 ..< 5:

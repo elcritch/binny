@@ -254,7 +254,7 @@ proc privateAdd(left, right: int): int {.noinline.} =
           @["/usr/bin/libtool", "-static", "-o", privateArchive]
         else:
           @["ar", "-rcs", privateArchive]
-      for path in walkFiles(cache / "*.o"):
+      for path in walkFiles(incrementalBackendDir(cache) / "*.o"):
         archiveArguments.add path
       when defined(macosx):
         doAssert archiveArguments.len > 4

@@ -28,6 +28,18 @@ proc typeSymbol(node: Cursor): string =
   elif node.tagIs("td"):
     result = node.findChildKind(SymbolDef).symName
 
+proc lastCompilerTypeSon*(node: Cursor): string =
+  let arguments = node.findChildTag("genericargs")
+  if arguments.cursorIsNil:
+    let son = node.findLastChildKind(Symbol)
+    if not son.cursorIsNil:
+      result = son.symName
+  else:
+    var son = arguments.childCursor()
+    while son.hasMore:
+      result = son.typeSymbol
+      son.skip
+
 proc collectTypes(node: Cursor, types: var Table[string, GenericType]) =
   if node.kind != TagLit:
     return
@@ -47,7 +59,13 @@ proc collectTypes(node: Cursor, types: var Table[string, GenericType]) =
     elif parts[11].tagIs("sd"):
       typ.nominal = parts[11].findChildKind(SymbolDef).symName
     for index in 16..<parts.len:
-      typ.sons.add parts[index].typeSymbol
+      if parts[index].tagIs("genericargs"):
+        var argument = parts[index].childCursor()
+        while argument.hasMore:
+          typ.sons.add argument.typeSymbol
+          argument.skip
+      else:
+        typ.sons.add parts[index].typeSymbol
     types[symbol] = typ
   var child = node.childCursor()
   while child.hasMore:

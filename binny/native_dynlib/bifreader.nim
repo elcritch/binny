@@ -29,6 +29,7 @@ type
     identity: string
     name: string
     sourcePath: string
+    bifPath: string
 
   BifNativeDescription = object
     libraryName: string
@@ -772,7 +773,12 @@ proc loadCompilerTypeDef(context: var CompilerTypeContext, node: var Cursor): PT
     result.symImpl = context.loadCompilerSymbol(node)
     loadCompilerLoc(node)
     while node.hasMore:
-      result.sonsImpl.add context.loadCompilerTypeRef(node)
+      if node.kind == TagLit and node.tagName == "genericargs":
+        node.into:
+          while node.hasMore:
+            result.sonsImpl.add context.loadCompilerTypeRef(node)
+      else:
+        result.sonsImpl.add context.loadCompilerTypeRef(node)
   if not procNode.cursorIsNil:
     context.procTypes[name] = context.compilerProcInfo(name, result, procNode)
 
@@ -1109,11 +1115,11 @@ proc parseNativeType(
         typ.indexTypeSymbol = indexType.symName
   elif not typeDesc.cursorIsNil and
       typeOrdinal(typeDesc.findChildKind(SymbolDef).symName) == ord(tyAlias):
-    let target = typeDesc.findLastChildKind(Symbol)
-    if target.cursorIsNil:
+    let target = typeDesc.lastCompilerTypeSon
+    if target.len == 0:
       return false
     typ.kind = ntAlias
-    typ.elementTypeSymbol = target.symName
+    typ.elementTypeSymbol = target
   else:
     return false
   result = true
@@ -1476,12 +1482,13 @@ proc parseStdContainer(
           return false
         let argument =
           if children.tagName == "tuplety":
-            typeDesc.findLastChildKind(Symbol)
+            typeDesc.lastCompilerTypeSon
           else:
-            children.findLastChildKind(Symbol)
-        if argument.cursorIsNil:
+            let symbol = children.findLastChildKind(Symbol)
+            if symbol.cursorIsNil: "" else: symbol.symName
+        if argument.len == 0:
           return false
-        arguments.add argument.symName
+        arguments.add argument
       else:
         return false
     of DotToken:
@@ -1769,11 +1776,10 @@ proc addAbiModule(
 proc loadBifModules(
     bifPath: string, description: BifNativeDescription
 ): seq[bif.BifModule] =
-  let nimcacheDir = bifPath.parentDir
   var seenPaths: Table[string, bool]
   addAbiModule(result, seenPaths, bifPath)
   for module in description.modules:
-    addAbiModule(result, seenPaths, nimcacheDir / (module.identity & ".s.bif"))
+    addAbiModule(result, seenPaths, module.bifPath)
 
 proc findSemanticDeclaration(modules: var seq[bif.BifModule], symbol: string): Cursor =
   for module in modules.mitems:
@@ -1817,7 +1823,7 @@ proc bifNativeDescription(
 
   let root = sourceRoot.normalizedAbsolutePath
   var paths: seq[string]
-  for path in walkFiles(nimcacheDir / "*.s.bif"):
+  for path in semanticBifPaths(nimcacheDir):
     paths.add path
   paths.sort()
 
@@ -1828,7 +1834,7 @@ proc bifNativeDescription(
       continue
     let identity = path.bifIdentity
     result.modules.add BifModule(identity: identity, name: source.splitFile.name,
-      sourcePath: source.normalizedAbsolutePath)
+      sourcePath: source.normalizedAbsolutePath, bifPath: path)
     if source.normalizedAbsolutePath.pathIsWithin(root):
       result.applicationModules.add identity
 
@@ -1955,7 +1961,7 @@ proc importedTypeSymbols(
       result[layout.typeSymbol] = true
 
 proc buildNativeApi(
-    bifPath: string,
+    nimcacheDir, bifPath: string,
     sourceDescription: BifNativeDescription,
     typeImports: openArray[NativeTypeImport],
     opaqueExports: openArray[NativeOpaqueExport],
@@ -2011,16 +2017,13 @@ proc buildNativeApi(
       skipSystemModuleTypeSymbols[module.identity] = true
       stdContainerModules[module.identity] = "system"
     if module.name == "tables":
-      let path = bifPath.parentDir / (module.identity & ".s.bif")
-      if readModuleSource(path).isStdTablesSource:
+      if module.sourcePath.isStdTablesSource:
         stdContainerModules[module.identity] = "std/tables"
     if module.name == "options":
-      let path = bifPath.parentDir / (module.identity & ".s.bif")
-      if readModuleSource(path).replace('\\', '/').endsWith("/lib/pure/options.nim"):
+      if module.sourcePath.replace('\\', '/').endsWith("/lib/pure/options.nim"):
         stdContainerModules[module.identity] = "std/options"
     if module.name in ["sets", "deques"]:
-      let path = bifPath.parentDir / (module.identity & ".s.bif")
-      let source = readModuleSource(path).replace('\\', '/')
+      let source = module.sourcePath.replace('\\', '/')
       if source.endsWith("/lib/pure/collections/" & module.name & ".nim") or
           source.endsWith("/lib/std/" & module.name & ".nim"):
         stdContainerModules[module.identity] = "std/" & module.name
@@ -2098,7 +2101,7 @@ proc buildNativeApi(
     result.types.add typ
 
   result.applyTypeImports(
-    typeImports, layouts, description.modules, bifPath.parentDir, sourceRoot
+    typeImports, layouts, description.modules, nimcacheDir, sourceRoot
   )
   var opaqueTypes = importedTypeSymbols(result, layouts)
   var selectedOpaqueTypes: Table[string, bool]
@@ -2581,6 +2584,7 @@ proc readBifNativeApi*(
     nimcacheDir, sourceRoot, libraryName, initSymbol, routines, hooks
   )
   result = buildNativeApi(
+    nimcacheDir,
     bifPath,
     description,
     exportConfig.typeImports,

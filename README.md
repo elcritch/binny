@@ -10,14 +10,16 @@ The native-library workflow is experimental. The no-pragma archive promotion
 supports 64-bit Mach-O on macOS, little-endian ELF64 on Linux and FreeBSD, and
 64-bit PE/COFF on Windows with MinGW.
 
-It requires a Nim devel compiler with `--genBif` and `nifler`.
+Use [Nim 2.4.2](https://github.com/nim-lang/Nim/releases/tag/v2.4.2) with
+`--genBif` support and the companion `nifler` and `nifmake` tools.
 
 Binny imports the compiler type definitions from the Nim installation used
 to build it. This lets the BIF reader materialize serialized definitions as
 Nim `PType` nodes and use the compiler's `sonsImpl` rules for arrays,
 containers, and generic instances. The installation must include the
-`compiler/` sources. Nim devel binary nightlies include these sources and
-`nifler`; install one with `grabnim devel`, or use a Nim devel source checkout.
+`compiler/` sources. If your distribution omits the NIF tools, build
+`nifler/nifler.nim` and `nifmake/nifmake.nim` from its bundled
+`dist/nimony/src` directory and place the binaries alongside the compiler.
 
 ## Why try it?
 
@@ -35,7 +37,7 @@ containers, and generic instances. The installation must include the
 
 ## Try the native dynlib example
 
-With Nim devel available as `nim`:
+With Nim 2.4.2 available as `nim`:
 
 ```sh
 cd examples/nim_native_dynlib
@@ -132,10 +134,11 @@ both sides with matching goto exceptions, ARC or atomic ARC, and the C allocator
 nativeBuild.nimArgs = @["--exceptions:goto", "--mm:arc", "-d:useMalloc"]
 ```
 
-The generated binding enforces the same consumer settings. It calls the native
-procedure, retrieves any pending producer exception through a library-specific
-endpoint, and re-raises it in the consumer runtime, preserving typed handlers
-and messages. Non-raising procedures remain direct imports.
+Binny catches raising exports in generated producer code and stores the
+exception in thread-local storage. The generated binding retrieves it through
+a library-specific endpoint and re-raises it in the consumer runtime,
+preserving typed handlers and messages. The binding enforces the same compiler
+settings on the consumer. Non-raising procedures remain direct imports.
 
 The bridge works with Binny's normal C and incremental C backends. Raising
 iterators are supported by the normal C backend; the incremental backend does
@@ -206,6 +209,6 @@ nim c binny.nim
 nim test
 ```
 
-The CI uses Nim devel to build the aggregate module, test native binding
-generation, and run the native dynamic-library end-to-end workflow on both
+The CI uses Nim 2.4.2 to build the aggregate module, test native binding
+generation, and run the native dynamic-library end-to-end workflow on
 Linux, macOS, and Windows.

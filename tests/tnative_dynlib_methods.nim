@@ -146,7 +146,7 @@ proc newWindow*(): Window = DerivedWindow(value: 40)
         for node in parseJson(readFile(archive & ".json"))["link"]:
           archive_arguments.add node.getStr
       else:
-        for path in walkFiles(cache / "*.o"):
+        for path in walkFiles(incrementalBackendDir(cache) / "*.o"):
           let superseded_main = fileExists(root_source) and
             path.extractFilename == "@m" & source.extractFilename & ".c.o"
           if not superseded_main:

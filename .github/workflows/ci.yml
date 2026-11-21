@@ -16,25 +16,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Install GrabNim
+      - name: Install Nim 2.4.2
         run: |
-          curl --fail --location --silent --show-error \
-            https://codeberg.org/janAkali/grabnim/raw/branch/master/misc/install.sh \
-            --output "$RUNNER_TEMP/grabnim-install.sh"
-          sh "$RUNNER_TEMP/grabnim-install.sh"
-          echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.local/share/grabnim/current/bin" >> "$GITHUB_PATH"
-
-      - name: Install Nim devel nightly
-        env:
-          GRABNIM_GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          grabnim devel
-          nim_root="$(grabnim path devel | tr -d '\r\"')"
-          "$nim_root/bin/nim" c -d:release --out:"$nim_root/bin/nifler" \
-            "$nim_root/dist/nimony/src/nifler/nifler.nim"
-          "$nim_root/bin/nim" c -d:release --out:"$nim_root/bin/nifmake" \
-            "$nim_root/dist/nimony/src/nifmake/nifmake.nim"
+          cd "$RUNNER_TEMP"
+          archive=nim-2.4.2-linux_x64.tar.xz
+          curl -fsSLO "https://nim-lang.org/download/$archive"
+          curl -fsSLO "https://nim-lang.org/download/$archive.sha256"
+          sha256sum --check "$archive.sha256"
+          tar -xf "$archive"
+          echo "$RUNNER_TEMP/nim-2.4.2/bin" >> "$GITHUB_PATH"
 
       - name: Install native binding test dependencies
         run: atlas install --feature:test
@@ -62,6 +52,9 @@ jobs:
 
       - name: Test direct C-backend exports and inline thunks
         run: nim c -r tests/tnative_dynlib_c_exports.nim
+
+      - name: Test native exception bridging
+        run: nim c -r tests/tnative_dynlib_exceptions.nim
 
       - name: Build native dynlib producer
         working-directory: examples/nim_native_dynlib
@@ -123,57 +116,39 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Install GrabNim
+      - name: Install Nim 2.4.2
         run: |
-          curl --fail --location --silent --show-error \
-            https://codeberg.org/janAkali/grabnim/raw/branch/master/misc/install.sh \
-            --output "$RUNNER_TEMP/grabnim-install.sh"
-          sh "$RUNNER_TEMP/grabnim-install.sh"
-          echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.local/share/grabnim/current/bin" >> "$GITHUB_PATH"
-
-      - name: Install Nim devel nightly
-        if: runner.os != 'Windows'
-        env:
-          GRABNIM_GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          grabnim devel
-          nim_root="$(grabnim path devel | tr -d '\r\"')"
-          "$nim_root/bin/nim" c -d:release --out:"$nim_root/bin/nifler" \
-            "$nim_root/dist/nimony/src/nifler/nifler.nim"
-          "$nim_root/bin/nim" c -d:release --out:"$nim_root/bin/nifmake" \
-            "$nim_root/dist/nimony/src/nifmake/nifmake.nim"
-          echo "$nim_root/bin" >> "$GITHUB_PATH"
-
-      - name: Install Nim devel nightly (Windows)
-        if: runner.os == 'Windows'
-        env:
-          GRABNIM_GITHUB_TOKEN: ${{ github.token }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          archive="$RUNNER_TEMP/windows_x64.zip"
-          extracted="$RUNNER_TEMP/nim-devel-extracted"
-          curl --fail --location --silent --show-error \
-            https://github.com/nim-lang/nightlies/releases/download/latest-devel/windows_x64.zip \
-            --output "$archive"
-          digest="$(gh api repos/nim-lang/nightlies/releases/tags/latest-devel \
-            --jq '.assets[] | select(.name == "windows_x64.zip") | .digest')"
-          printf '%s  %s\n' "${digest#sha256:}" "$archive" | sha256sum --check -
-          mkdir -p "$extracted"
-          unzip -q "$archive" -d "$extracted"
-          grabnim_root="$(cygpath -u "$LOCALAPPDATA")/grabnim"
-          mkdir -p "$grabnim_root"
-          mv "$extracted"/nim-* "$grabnim_root/nim-devel"
-          grabnim devel
-          nim_root="$(grabnim path devel | tr -d '\r\"')"
-          nim_root="$(cygpath -u "$nim_root")"
-          export PATH="/c/msys64/mingw64/bin:$nim_root/bin:$PATH"
-          "$nim_root/bin/nim.exe" c -d:release --out:"$nim_root/bin/nifler.exe" \
-            "$nim_root/dist/nimony/src/nifler/nifler.nim"
-          "$nim_root/bin/nim.exe" c -d:release --out:"$nim_root/bin/nifmake.exe" \
-            "$nim_root/dist/nimony/src/nifmake/nifmake.nim"
-          cygpath -w "$nim_root/bin" >> "$GITHUB_PATH"
-          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
+          cd "$RUNNER_TEMP"
+          if [ "$RUNNER_OS" = Windows ]; then
+            archive=nim-2.4.2_x64.zip
+          elif [ "$RUNNER_ARCH" = ARM64 ]; then
+            archive=nim-2.4.2-macosx_arm64.tar.xz
+          else
+            archive=nim-2.4.2-macosx_x64.tar.xz
+          fi
+          curl -fsSLO "https://nim-lang.org/download/$archive"
+          curl -fsSLO "https://nim-lang.org/download/$archive.sha256"
+          if [ "$RUNNER_OS" = Windows ]; then
+            sha256sum --check "$archive.sha256"
+            unzip -q "$archive"
+            nim_root="$(cygpath -m "$PWD/nim-2.4.2")"
+            exe=.exe
+            export PATH="/c/msys64/mingw64/bin:$PATH"
+            cygpath -w "$nim_root/bin" >> "$GITHUB_PATH"
+            printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
+          else
+            shasum -a 256 --check "$archive.sha256"
+            tar -xf "$archive"
+            nim_root="$PWD/nim-2.4.2"
+            exe=
+            echo "$nim_root/bin" >> "$GITHUB_PATH"
+          fi
+          for tool in nifler nifmake; do
+            if [ ! -f "$nim_root/bin/$tool$exe" ]; then
+              "$nim_root/bin/nim$exe" c -d:release --out:"$nim_root/bin/$tool$exe" \
+                "$nim_root/dist/nimony/src/$tool/$tool.nim"
+            fi
+          done
 
       - name: Show compiler version
         run: nim --version

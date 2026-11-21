@@ -17,10 +17,10 @@ Why this is useful:
 
 ## Try it
 
-Use a Nim 2.3.1 devel compiler that provides `--genBif` and `nifler`:
+Use Nim 2.4.2 with `nifler` and `nifmake` installed alongside the compiler:
 
 ```sh
-~/.local/share/grabnim/nim-devel/bin/nim e2e
+nim e2e
 ./consumer
 ```
 

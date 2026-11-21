@@ -80,7 +80,7 @@ when defined(macosx) or defined(linux) or defined(freebsd) or defined(windows):
           for node in parseFile(output & ".json")["link"]:
             archive_arguments.add node.getStr
         else:
-          for object_path in walkFiles(cache / "*.o"):
+          for object_path in walkFiles(incrementalBackendDir(cache) / "*.o"):
             archive_arguments.add object_path
         discard run(archive_arguments)
         promoteNativeArchive(output & ".a", public_archive, exports)
