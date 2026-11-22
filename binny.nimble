@@ -1,4 +1,4 @@
-version = "0.5.23"
+version = "0.5.24"
 author = "Jaremy Creechley"
 description = "Build native Nim dynamic libraries and strongly typed bindings without C export shims"
 license = "MIT"
