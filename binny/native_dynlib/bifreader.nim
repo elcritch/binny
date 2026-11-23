@@ -995,9 +995,8 @@ proc resolveRecordSelectors(
       for branch in part.branches.mitems:
         if enumSymbol in layouts:
           for selector in branch.selectors.mitems:
-            let ordinal = parseInt(selector)
             for value in layouts[enumSymbol].enumValues:
-              if value.ordinal == ordinal:
+              if selector == $value.ordinal:
                 selector = value.name
                 break
         resolveRecordSelectors(branch.record, layouts)

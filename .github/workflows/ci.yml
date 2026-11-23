@@ -44,6 +44,9 @@ jobs:
       - name: Test imported generic arguments and nil method overloads
         run: nim c -r tests/tnative_dynlib_siwin_types.nim
 
+      - name: Test shared variant record layouts
+        run: nim c -r tests/tnative_record_selectors.nim
+
       - name: Test anonymous generic and named ref bindings
         run: nim c -r tests/tanonymous_generics.nim
 
@@ -155,6 +158,9 @@ jobs:
 
       - name: Test native binding generation and runtime guards
         run: nim c -r tests/tnative_dynlib.nim
+
+      - name: Test shared variant record layouts
+        run: nim c -r tests/tnative_record_selectors.nim
 
       - name: Test anonymous generic and named ref bindings
         run: nim c -r tests/tanonymous_generics.nim
